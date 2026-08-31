@@ -1,0 +1,767 @@
+/**
+ * @sweetrust/mandate — issuance, invocation, revocation flows
+ *
+ * Per the mandate capability-declaration specification v0.0.
+ *
+ * Inheritance: per spec I9, this module imports the constitutional pre-check
+ * primitive from ./security.ts (formerly the standalone @private/security package, folded back into mandate 2026-07-19 per the kernel audit). Mandate metadata (rationale strings) is exactly the attack
+ * surface the pre-check exists to defend.
+ */
+import { randomBytes } from "node:crypto"
+import { constitutionalPreCheck } from "./security.ts"
+import type {
+  Capability,
+  GrantorId,
+  ISO8601,
+  MandateAuditService,
+  MandateError,
+  MandateGrantEvent,
+  MandateId,
+  MandateScope,
+  MandateTier,
+  TriggerSource,
+} from "./types.ts"
+
+/**
+ * failMandate — throw a typed MandateError. Plain-TS replacement for the
+ * former `Effect.fail<MandateError>(...)` control-flow. The error object IS
+ * the discriminated union; callers catch it and pattern-match on `_tag`.
+ */
+const failMandate = (error: MandateError): never => {
+  throw error
+}
+
+/**
+ * defineCapability — construct a capability from a stable string key. The
+ * returned value carries only the `key` at runtime; the LITERAL key type is
+ * preserved so the compile-time subset gate can distinguish capabilities.
+ *
+ * Replaces the former `Context.Tag(...)` capability declaration (which
+ * required Effect). A capability is just an identity with a name.
+ */
+export const defineCapability = <const Id extends string>(key: Id): Capability<Id> => ({ key })
+
+/**
+ * Extract the canonical string key for a `Capability`.
+ *
+ * A capability carries a stable `key`. This helper centralizes the lookup
+ * (and tolerates any-cast escape hatches where a bare string sneaks in),
+ * mirroring the branded-object-or-string fallback that previously appeared
+ * across mandate.ts and the linear.ts adapter.
+ */
+export const capabilityKey = (cap: Capability): string => {
+  const branded = cap as unknown as { key?: string }
+  return branded.key ?? String(cap)
+}
+
+/**
+ * Generate a sortable identifier with crypto-strong randomness.
+ *
+ * Format: MAN_<base36-ms-timestamp>_<10-hex-chars-from-crypto.randomBytes>.
+ * The timestamp prefix preserves ULID-like ordering for forensic readability;
+ * the randomness suffix uses node:crypto so an attacker cannot predict the
+ * next mandate ID and pre-compute hash-chain or audit-log forgeries.
+ */
+const generateMandateId = (): MandateId => {
+  const ts = Date.now().toString(36).padStart(10, "0")
+  const rand = randomBytes(8).toString("hex").slice(0, 10)
+  return (`MAN_${ts}_${rand}`.toUpperCase()) as MandateId
+}
+
+const nowISO = (): ISO8601 => new Date().toISOString() as ISO8601
+
+/**
+ * checkGrantorNotRevoked — issue-time guard against the revoke-vs-issue race.
+ *
+ * Without this, a revoke recorded against the grantor mandate AFTER the
+ * grantor's `MandateScope` reference was captured but BEFORE the child issue
+ * fires would silently produce an orphan child mandate (parent revoked, child
+ * still callable until ancestor-chain check at use time catches it). The
+ * issue-time check stops the orphan from ever entering the audit log.
+ */
+const checkGrantorNotRevoked = (
+  audit: MandateAuditService,
+  grantorScope: { readonly id: MandateId; readonly grantor: GrantorId },
+): void => {
+  const revoked = audit.isRevoked(grantorScope.id)
+  if (!revoked) return
+  const events = audit.query(grantorScope.id)
+  const revokeEvent = events.find((e) => e.type === "revoke")
+  failMandate({
+    _tag: "MandateRevoked",
+    mandateId: grantorScope.id,
+    revokedAt: revokeEvent?.timestamp ?? nowISO(),
+    revokedBy:
+      revokeEvent?.type === "revoke" ? revokeEvent.revokedBy : grantorScope.grantor,
+    rationale:
+      revokeEvent?.type === "revoke" ? revokeEvent.rationale : "grantor revoked",
+  })
+}
+
+/**
+ * assertRequestedCapsBackedByGrantorGrant — issue-time forged-scope defense
+ * (DAN-639). The grantor's IN-MEMORY `capabilities` list is attacker-forgeable
+ * (any-cast escape, untrusted-deserialization rehydrate) — it is the very
+ * thing the per-function subset check above trusts, so that check cannot
+ * defend the "dynamic capability lists from external sources" case its own
+ * comment names. The only unforgeable record of what the grantor actually
+ * holds is its grant event in the audit log. Every capability being delegated
+ * to a child MUST appear in that recorded grant; otherwise the grantor scope
+ * was forged to claim authority it never received, and the issue path would
+ * launder that forgery into a real, legitimate-looking child grant event.
+ *
+ * Runs AFTER the in-memory subset check so an honest over-request (a cap not
+ * even in the claimed scope) keeps reporting `CapabilityNotInGrantorScope`;
+ * this check adds the stronger `MandateScopeForged` verdict for a cap the
+ * grantor CLAIMS in memory but was never actually granted. Mirrors the
+ * use-time forged-scope defense in useCapability and the DAN-637/638 fixes:
+ * audit-log-is-truth must hold at EVERY security decision — here, issuance.
+ */
+const assertRequestedCapsBackedByGrantorGrant = (
+  audit: MandateAuditService,
+  grantorMandateId: MandateId,
+  requestedCaps: ReadonlyArray<Capability>,
+): void => {
+  const grantEvent = audit.query(grantorMandateId).find((e) => e.type === "grant") as
+    | MandateGrantEvent
+    | undefined
+  if (!grantEvent) {
+    // No grant event → the grantor scope itself was never issued (a wholly
+    // fabricated grantor). Nothing can be derived from authority that does not
+    // exist in the log.
+    failMandate({ _tag: "MandateNotIssued", mandateId: grantorMandateId })
+    return
+  }
+  const grantedCapIds = new Set(grantEvent.capabilities)
+  for (const cap of requestedCaps) {
+    const capId = capabilityKey(cap)
+    if (!grantedCapIds.has(capId)) {
+      failMandate({
+        _tag: "MandateScopeForged",
+        mandateId: grantorMandateId,
+        capability: capId,
+      })
+    }
+  }
+}
+
+/**
+ * issueMandate — grant a child agent a subset of the grantor's capabilities.
+ *
+ * Per spec I4 + I5: the type system enforces that every requested capability
+ * is a member of the grantor's scope. RequestedCaps extends ReadonlyArray<GrantorCaps[number]>
+ * structurally proves the subset relationship at compile time.
+ *
+ * Per spec I9: rationale strings pass through constitutionalPreCheck before
+ * any persistence. Malicious metadata throws immediately with no audit
+ * pollution.
+ */
+export const issueMandate = <
+  GrantorCaps extends ReadonlyArray<Capability>,
+  RequestedCaps extends ReadonlyArray<GrantorCaps[number]>,
+>(args: {
+  readonly grantor: GrantorId
+  readonly grantorScope: MandateScope<GrantorCaps>
+  readonly capabilities: RequestedCaps
+  readonly rationale: string
+  readonly triggerSource?: TriggerSource
+}, audit: MandateAuditService): MandateScope<RequestedCaps> => {
+  const triggerSource: TriggerSource = args.triggerSource ?? "code"
+
+  // I9: pre-check rationale before persistence
+  const rationaleCheck = constitutionalPreCheck(args.rationale)
+  if (rationaleCheck) {
+    failMandate({
+      _tag: "MaliciousMandateMetadata",
+      inputKind: "rationale",
+      matchedPatternId: rationaleCheck.patternId,
+      evidence: rationaleCheck.evidence,
+    })
+  }
+
+  // Issue-time grantor-revoked check (closes the revoke-vs-issue race).
+  checkGrantorNotRevoked(audit, args.grantorScope)
+
+  // Type-level subset check is the load-bearing guarantee. The compiler
+  // refuses to satisfy `RequestedCaps extends ReadonlyArray<GrantorCaps[number]>`
+  // when a requested capability is not in the grantor's scope. This runtime
+  // check is a belt-and-suspenders for cases where types are erased
+  // (any-cast escape hatches; dynamic capability lists from external sources).
+  const grantorCapIds = new Set(
+    args.grantorScope.capabilities.map((c) => capabilityKey(c)),
+  )
+  for (const cap of args.capabilities) {
+    const capId = capabilityKey(cap)
+    if (!grantorCapIds.has(capId)) {
+      failMandate({
+        _tag: "CapabilityNotInGrantorScope",
+        capability: capId,
+      })
+    }
+  }
+
+  // DAN-639: the check above trusts the forgeable in-memory grantorScope
+  // capabilities; re-check every requested capability against the grantor's
+  // RECORDED grant event so a forged scope cannot mint a capability the
+  // grantor was never actually granted (audit-log-is-truth at issue time).
+  assertRequestedCapsBackedByGrantorGrant(audit, args.grantorScope.id, args.capabilities)
+
+  const newId = generateMandateId()
+  const grantTimestamp = nowISO()
+
+  const newScope: MandateScope<RequestedCaps> = {
+    _tag: "MandateScope",
+    tier: "organization",
+    id: newId,
+    capabilities: args.capabilities,
+    grantor: args.grantor,
+    grantTimestamp,
+    grantRationale: args.rationale,
+    parentMandateId: args.grantorScope.id,
+    parentScope: null,
+  }
+
+  audit.record({
+    type: "grant",
+    mandateId: newId,
+    grantor: args.grantor,
+    capabilities: args.capabilities.map((c) => capabilityKey(c)),
+    rationale: args.rationale,
+    parentMandateId: args.grantorScope.id,
+    timestamp: grantTimestamp,
+    triggerSource,
+  })
+
+  return newScope
+}
+
+/**
+ * issueRootMandate — bootstrap the root of the delegation DAG. Used once per
+ * agent system to create the seed mandate from which all others derive.
+ *
+ * The grantor here is the human-in-the-loop (Arthur) — there is no parent
+ * mandate, so parentMandateId is null. Subsequent issuances chain via
+ * issueMandate.
+ */
+export const issueRootMandate = <Caps extends ReadonlyArray<Capability>>(args: {
+  readonly grantor: GrantorId
+  readonly capabilities: Caps
+  readonly rationale: string
+  readonly triggerSource?: TriggerSource
+}, audit: MandateAuditService): MandateScope<Caps> => {
+  const triggerSource: TriggerSource = args.triggerSource ?? "code"
+
+  const rationaleCheck = constitutionalPreCheck(args.rationale)
+  if (rationaleCheck) {
+    failMandate({
+      _tag: "MaliciousMandateMetadata",
+      inputKind: "rationale",
+      matchedPatternId: rationaleCheck.patternId,
+      evidence: rationaleCheck.evidence,
+    })
+  }
+
+  const newId = generateMandateId()
+  const grantTimestamp = nowISO()
+
+  const scope: MandateScope<Caps> = {
+    _tag: "MandateScope",
+    tier: "organization",
+    id: newId,
+    capabilities: args.capabilities,
+    grantor: args.grantor,
+    grantTimestamp,
+    grantRationale: args.rationale,
+    parentMandateId: null,
+    parentScope: null,
+  }
+
+  audit.record({
+    type: "grant",
+    mandateId: newId,
+    grantor: args.grantor,
+    capabilities: args.capabilities.map((c) => capabilityKey(c)),
+    rationale: args.rationale,
+    parentMandateId: null,
+    timestamp: grantTimestamp,
+    triggerSource,
+  })
+
+  return scope
+}
+
+/**
+ * useCapability — invoke a capability under a mandate.
+ *
+ * Per spec I6: the type system enforces this at the call site via the
+ * `Cap extends Caps[number]` constraint — passing a capability not in the
+ * mandate's scope is a TYPE ERROR at the call site, not a runtime error.
+ * At runtime, this helper also checks that the mandate is not revoked AND
+ * records the invocation; runtime gates handle the any-cast escape hatch.
+ *
+ * Generic-parameter ordering note: `Caps` is declared FIRST so the inference
+ * pass settles `Caps` from `mandate.capabilities` before `Cap` is constrained
+ * against `Caps[number]`. Reversing the order breaks subset enforcement.
+ */
+export const useCapability = <
+  Caps extends ReadonlyArray<Capability>,
+  Cap extends Caps[number],
+  Tier extends MandateTier = "organization",
+  ParentScope extends MandateScope<any, any, any> | null = null,
+>(args: {
+  readonly mandate: MandateScope<Caps, Tier, ParentScope>
+  readonly capability: Cap
+  readonly triggerSource?: TriggerSource
+}, audit: MandateAuditService): void => {
+  const triggerSource: TriggerSource = args.triggerSource ?? "code"
+
+  // Per I8 + multi-tier-spec I4: a mandate is invocable iff the leaf AND every
+  // ancestor in the delegation chain is unrevoked. Revoking the org-tier
+  // mandate must structurally disable every descendant; otherwise the
+  // org-tier "kill switch" is silently inert (the substrate's load-bearing
+  // termination-protocol claim).
+  //
+  // The chain is reconstructed from the AUDIT LOG via each grant event's
+  // parentMandateId — NOT from the in-memory `parentScope` pointer — exactly
+  // as revokeMandate does below. The pointer is not load-bearing for this
+  // decision: issueMandate records the real parentMandateId while setting
+  // parentScope: null, deserialized mandates (JSONL, cross-process handoff)
+  // lose the object graph entirely, and a forged {...realScope, parentScope:
+  // null} severs the pointer on purpose. All three defeat a pointer walk; none
+  // defeats the audit log, which is the only unforgeable record of who granted
+  // what. (LESSONS 2026-07-22: audit-log-is-truth must hold at EVERY security
+  // decision, not just most.)
+  // `seen` guards against a cyclic or self-referential parentMandateId in the
+  // audit log. A legitimate chain is always a DAG (fresh crypto-random IDs;
+  // parents are issued strictly before children), so a cycle only arises from a
+  // corrupted/attacker-tampered log — but because DAN-637 made this walk the
+  // load-bearing revocation decision, an unguarded walk on such a log is an
+  // unkillable synchronous hang. Revisiting a node is safe to stop on: every
+  // reachable ancestor has already had isRevoked checked at the top of its
+  // iteration before we could return to it, so revocation is still fully
+  // enforced across the reachable set. (Battle-test follow-up 2026-07-22.)
+  const seen = new Set<MandateId>()
+  let cursorId: MandateId | null = args.mandate.id
+  while (cursorId !== null && !seen.has(cursorId)) {
+    seen.add(cursorId)
+    if (audit.isRevoked(cursorId)) {
+      const events = audit.query(cursorId)
+      const revokeEvent = events.find((e) => e.type === "revoke")
+      if (cursorId === args.mandate.id) {
+        failMandate({
+          _tag: "MandateRevoked",
+          mandateId: args.mandate.id,
+          revokedAt: (revokeEvent?.timestamp ?? nowISO()),
+          revokedBy:
+            revokeEvent?.type === "revoke" ? revokeEvent.revokedBy : args.mandate.grantor,
+          rationale:
+            revokeEvent?.type === "revoke" ? revokeEvent.rationale : "unknown",
+        })
+      }
+      failMandate({
+        _tag: "AncestorMandateRevoked",
+        mandateId: args.mandate.id,
+        revokedAncestorId: cursorId,
+        revokedAt: revokeEvent?.timestamp ?? nowISO(),
+      })
+    }
+    const grantEvent = audit.query(cursorId).find((e) => e.type === "grant") as
+      | MandateGrantEvent
+      | undefined
+    if (!grantEvent) {
+      // A NON-leaf cursor with no grant event means the chain references a
+      // parent whose grant is ABSENT from the log (tampering / truncation /
+      // corruption). We can no longer certify that this ancestor — or anything
+      // above it — is unrevoked, so a revoked grandparent above the break would
+      // be silently missed. Fail CLOSED with an integrity error rather than
+      // fail OPEN (DAN-640: the DAN-637 walk stopped here, hiding the ancestor).
+      if (cursorId !== args.mandate.id) {
+        failMandate({
+          _tag: "DelegationChainBroken",
+          mandateId: args.mandate.id,
+          brokenAncestorId: cursorId,
+        })
+      }
+      // The LEAF with no grant event is the legitimate forged-fake-id case:
+      // stop here and let the forged-scope defense below report the precise
+      // MandateNotIssued. (An unissued leaf, not a broken chain.)
+      break
+    }
+    cursorId = grantEvent.parentMandateId
+  }
+
+  // Defense-in-depth against forged-scope literals: verify a grant event
+  // exists in the audit log AND that the mandate's claimed capabilities
+  // are a subset of what was actually granted. Without this, a caller
+  // (or deserialized payload) holding `{ _tag: "MandateScope", id: "FAKE",
+  // capabilities: [...] }` would pass the capability-membership check
+  // trivially because the forged scope's own capability list was the only
+  // thing being checked.
+  const events = audit.query(args.mandate.id)
+  const grantEvent = events.find((e) => e.type === "grant") as
+    | MandateGrantEvent
+    | undefined
+  if (!grantEvent) {
+    failMandate({
+      _tag: "MandateNotIssued",
+      mandateId: args.mandate.id,
+    })
+    return
+  }
+  const grantedCapIds = new Set(grantEvent.capabilities)
+  const claimedCapIds = args.mandate.capabilities.map((c) => capabilityKey(c))
+  for (const claimed of claimedCapIds) {
+    if (!grantedCapIds.has(claimed)) {
+      failMandate({
+        _tag: "MandateScopeForged",
+        mandateId: args.mandate.id,
+        capability: claimed,
+      })
+    }
+  }
+
+  const capId = capabilityKey(args.capability)
+
+  // Compile-time check: this function's signature requires the mandate to
+  // include the capability. The runtime check is for any-cast escape hatches.
+  const mandateCapIds = new Set(claimedCapIds)
+  if (!mandateCapIds.has(capId)) {
+    failMandate({
+      _tag: "CapabilityNotInGrantorScope",
+      capability: capId,
+    })
+  }
+
+  audit.record({
+    type: "invoke",
+    mandateId: args.mandate.id,
+    capability: capId,
+    timestamp: nowISO(),
+    triggerSource,
+  })
+}
+
+/**
+ * revokeMandate — remove a mandate from the active pool.
+ *
+ * Per spec I8: the revoker must be in the delegation chain (grantor or
+ * ancestor). Verification walks the parentMandateId chain via the audit
+ * log. Once revoked, useCapability throws MandateRevoked.
+ */
+export const revokeMandate = (args: {
+  readonly mandateId: MandateId
+  readonly revoker: GrantorId
+  readonly rationale: string
+  readonly triggerSource?: TriggerSource
+}, audit: MandateAuditService): void => {
+  const triggerSource: TriggerSource = args.triggerSource ?? "code"
+
+  // I9: rationale pre-check
+  const rationaleCheck = constitutionalPreCheck(args.rationale)
+  if (rationaleCheck) {
+    failMandate({
+      _tag: "MaliciousMandateMetadata",
+      inputKind: "rationale",
+      matchedPatternId: rationaleCheck.patternId,
+      evidence: rationaleCheck.evidence,
+    })
+  }
+
+  const events = audit.query(args.mandateId)
+
+  // Walk the delegation chain: collect all grantor IDs from this mandate
+  // up to the root via parentMandateId. `seen` guards against a cyclic /
+  // self-referential parentMandateId in a corrupted log (same hazard and
+  // rationale as the useCapability walk above — a legitimate chain is a DAG,
+  // but an unguarded walk on a tampered log hangs synchronously).
+  const grantersInChain = new Set<GrantorId>()
+  const seen = new Set<MandateId>()
+  let currentMandateId: MandateId | null = args.mandateId
+  while (currentMandateId !== null && !seen.has(currentMandateId)) {
+    seen.add(currentMandateId)
+    const grantEvent = audit.query(currentMandateId).find((e) => e.type === "grant") as
+      | { readonly type: "grant"; readonly grantor: GrantorId; readonly parentMandateId: MandateId | null }
+      | undefined
+    if (!grantEvent) break
+    grantersInChain.add(grantEvent.grantor)
+    currentMandateId = grantEvent.parentMandateId
+  }
+
+  if (!grantersInChain.has(args.revoker)) {
+    failMandate({
+      _tag: "RevokerNotInDelegationChain",
+      mandateId: args.mandateId,
+      revoker: args.revoker,
+    })
+  }
+
+  // Idempotent: if already revoked, do not double-record.
+  const alreadyRevoked = events.some((e) => e.type === "revoke")
+  if (alreadyRevoked) {
+    return
+  }
+
+  audit.record({
+    type: "revoke",
+    mandateId: args.mandateId,
+    revokedBy: args.revoker,
+    rationale: args.rationale,
+    timestamp: nowISO(),
+    triggerSource,
+  })
+}
+
+// ============================================================================
+// v1.0 multi-tier issue functions (per spec mandate-v0-2-multi-tier-and-signing)
+// ============================================================================
+//
+// Three named entry points encode the tier-transition discipline at the API
+// surface. Agent-tier mandates are LEAVES — there is no function whose
+// `grantorScope` parameter accepts an agent-tier scope; the type system
+// structurally refuses upward or peer-tier delegation from agent-tier.
+//
+// Each function preserves the v0.0 + v0.1 + v0.1.1 invariants:
+//   - I9 constitutional pre-check on rationale strings BEFORE persistence
+//   - Audit recording with triggerSource discriminator
+//   - Branded ULID-shaped MandateId
+//   - Immutable scope; re-grant via new function call
+//
+// And adds:
+//   - Per-tier subset gate at compile time via Cap extends ParentCaps[number]
+//   - Typed parent-scope chain via the ParentScope generic parameter
+
+/**
+ * issueOrgMandate — bootstrap an organization-tier mandate (the root tier
+ * per spec I2 + I4). The grantor is the human-in-the-loop or any root
+ * authority; there is no parent scope (this IS the root).
+ */
+export const issueOrgMandate = <Caps extends ReadonlyArray<Capability>>(args: {
+  readonly grantor: GrantorId
+  readonly capabilities: Caps
+  readonly rationale: string
+  readonly triggerSource?: TriggerSource
+}, audit: MandateAuditService): MandateScope<Caps, "organization", null> => {
+  const triggerSource: TriggerSource = args.triggerSource ?? "code"
+
+  const rationaleCheck = constitutionalPreCheck(args.rationale)
+  if (rationaleCheck) {
+    failMandate({
+      _tag: "MaliciousMandateMetadata",
+      inputKind: "rationale",
+      matchedPatternId: rationaleCheck.patternId,
+      evidence: rationaleCheck.evidence,
+    })
+  }
+
+  const newId = generateMandateId()
+  const grantTimestamp = nowISO()
+
+  const scope: MandateScope<Caps, "organization", null> = {
+    _tag: "MandateScope",
+    tier: "organization",
+    id: newId,
+    capabilities: args.capabilities,
+    grantor: args.grantor,
+    grantTimestamp,
+    grantRationale: args.rationale,
+    parentMandateId: null,
+    parentScope: null,
+  }
+
+  audit.record({
+    type: "grant",
+    mandateId: newId,
+    grantor: args.grantor,
+    capabilities: args.capabilities.map((c) => capabilityKey(c)),
+    rationale: args.rationale,
+    parentMandateId: null,
+    timestamp: grantTimestamp,
+    triggerSource,
+  })
+
+  return scope
+}
+
+/**
+ * issueProjectMandate — derive a project-tier mandate from an
+ * organization-tier grantor scope. Per spec I3, the compile-time constraint
+ * `ProjectCaps extends ReadonlyArray<OrgCaps[number]>` enforces that every
+ * project-tier capability is a member of the parent org-tier capability
+ * tuple. Granting a capability the org does not hold is a TYPE ERROR at
+ * the call site.
+ */
+export const issueProjectMandate = <
+  OrgCaps extends ReadonlyArray<Capability>,
+  ProjectCaps extends ReadonlyArray<OrgCaps[number]>,
+>(args: {
+  readonly grantor: GrantorId
+  readonly grantorScope: MandateScope<OrgCaps, "organization", null>
+  readonly capabilities: ProjectCaps
+  readonly rationale: string
+  readonly triggerSource?: TriggerSource
+}, audit: MandateAuditService): MandateScope<
+  ProjectCaps,
+  "project",
+  MandateScope<OrgCaps, "organization", null>
+> => {
+  const triggerSource: TriggerSource = args.triggerSource ?? "code"
+
+  const rationaleCheck = constitutionalPreCheck(args.rationale)
+  if (rationaleCheck) {
+    failMandate({
+      _tag: "MaliciousMandateMetadata",
+      inputKind: "rationale",
+      matchedPatternId: rationaleCheck.patternId,
+      evidence: rationaleCheck.evidence,
+    })
+  }
+
+  // Issue-time grantor-revoked check (closes the revoke-vs-issue race).
+  checkGrantorNotRevoked(audit, args.grantorScope)
+
+  // Runtime fallback subset check (belt-and-suspenders for any-cast escapes)
+  const grantorCapIds = new Set(
+    args.grantorScope.capabilities.map((c) => capabilityKey(c)),
+  )
+  for (const cap of args.capabilities) {
+    const capId = capabilityKey(cap)
+    if (!grantorCapIds.has(capId)) {
+      failMandate({
+        _tag: "CapabilityNotInGrantorScope",
+        capability: capId,
+      })
+    }
+  }
+
+  // DAN-639: the check above trusts the forgeable in-memory grantorScope
+  // capabilities; re-check every requested capability against the grantor's
+  // RECORDED grant event so a forged scope cannot mint a capability the
+  // grantor was never actually granted (audit-log-is-truth at issue time).
+  assertRequestedCapsBackedByGrantorGrant(audit, args.grantorScope.id, args.capabilities)
+
+  const newId = generateMandateId()
+  const grantTimestamp = nowISO()
+
+  const scope: MandateScope<
+    ProjectCaps,
+    "project",
+    MandateScope<OrgCaps, "organization", null>
+  > = {
+    _tag: "MandateScope",
+    tier: "project",
+    id: newId,
+    capabilities: args.capabilities,
+    grantor: args.grantor,
+    grantTimestamp,
+    grantRationale: args.rationale,
+    parentMandateId: args.grantorScope.id,
+    parentScope: args.grantorScope,
+  }
+
+  audit.record({
+    type: "grant",
+    mandateId: newId,
+    grantor: args.grantor,
+    capabilities: args.capabilities.map((c) => capabilityKey(c)),
+    rationale: args.rationale,
+    parentMandateId: args.grantorScope.id,
+    timestamp: grantTimestamp,
+    triggerSource,
+  })
+
+  return scope
+}
+
+/**
+ * issueAgentMandate — derive an agent-tier mandate from a project-tier
+ * grantor scope. Per spec I3 + I4, the compile-time constraint
+ * `AgentCaps extends ReadonlyArray<ProjectCaps[number]>` enforces project-
+ * tier subset; the function signature requires a project-tier grantorScope
+ * (NOT agent-tier), structurally refusing upward delegation from agent.
+ */
+export const issueAgentMandate = <
+  OrgCaps extends ReadonlyArray<Capability>,
+  ProjectCaps extends ReadonlyArray<OrgCaps[number]>,
+  AgentCaps extends ReadonlyArray<ProjectCaps[number]>,
+>(args: {
+  readonly grantor: GrantorId
+  readonly grantorScope: MandateScope<
+    ProjectCaps,
+    "project",
+    MandateScope<OrgCaps, "organization", null>
+  >
+  readonly capabilities: AgentCaps
+  readonly rationale: string
+  readonly triggerSource?: TriggerSource
+}, audit: MandateAuditService): MandateScope<
+  AgentCaps,
+  "agent",
+  MandateScope<ProjectCaps, "project", MandateScope<OrgCaps, "organization", null>>
+> => {
+  const triggerSource: TriggerSource = args.triggerSource ?? "code"
+
+  const rationaleCheck = constitutionalPreCheck(args.rationale)
+  if (rationaleCheck) {
+    failMandate({
+      _tag: "MaliciousMandateMetadata",
+      inputKind: "rationale",
+      matchedPatternId: rationaleCheck.patternId,
+      evidence: rationaleCheck.evidence,
+    })
+  }
+
+  // Issue-time grantor-revoked check (closes the revoke-vs-issue race).
+  checkGrantorNotRevoked(audit, args.grantorScope)
+
+  // Runtime fallback subset check (belt-and-suspenders for any-cast escapes)
+  const grantorCapIds = new Set(
+    args.grantorScope.capabilities.map((c) => capabilityKey(c)),
+  )
+  for (const cap of args.capabilities) {
+    const capId = capabilityKey(cap)
+    if (!grantorCapIds.has(capId)) {
+      failMandate({
+        _tag: "CapabilityNotInGrantorScope",
+        capability: capId,
+      })
+    }
+  }
+
+  // DAN-639: the check above trusts the forgeable in-memory grantorScope
+  // capabilities; re-check every requested capability against the grantor's
+  // RECORDED grant event so a forged scope cannot mint a capability the
+  // grantor was never actually granted (audit-log-is-truth at issue time).
+  assertRequestedCapsBackedByGrantorGrant(audit, args.grantorScope.id, args.capabilities)
+
+  const newId = generateMandateId()
+  const grantTimestamp = nowISO()
+
+  const scope: MandateScope<
+    AgentCaps,
+    "agent",
+    MandateScope<ProjectCaps, "project", MandateScope<OrgCaps, "organization", null>>
+  > = {
+    _tag: "MandateScope",
+    tier: "agent",
+    id: newId,
+    capabilities: args.capabilities,
+    grantor: args.grantor,
+    grantTimestamp,
+    grantRationale: args.rationale,
+    parentMandateId: args.grantorScope.id,
+    parentScope: args.grantorScope,
+  }
+
+  audit.record({
+    type: "grant",
+    mandateId: newId,
+    grantor: args.grantor,
+    capabilities: args.capabilities.map((c) => capabilityKey(c)),
+    rationale: args.rationale,
+    parentMandateId: args.grantorScope.id,
+    timestamp: grantTimestamp,
+    triggerSource,
+  })
+
+  return scope
+}

@@ -1,0 +1,86 @@
+{
+  "name": "@swee/trust",
+  "version": "0.3.0",
+  "description": "Trust rails for AI agents: issue authority, enforce it, prove what happened. SweeMandate signs (type-enforced multi-tier capability mandates on an Ed25519-signed hash chain), SweeGate enforces (Sourced<T> provenance tiers, audited declassifiers, fail-closed sinks, tamper-evident receipts), SweeVerify proves (signed receipt chains re-checkable from public material alone, with a Sui anchor convention that makes tail truncation detectable). Zero runtime dependencies — node builtins only. Import the whole rail or one primitive: @swee/trust, @swee/trust/mandate, @swee/trust/gate, @swee/trust/verify.",
+  "type": "module",
+  "main": "./dist/index.mjs",
+  "types": "./dist/index.d.mts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs",
+      "default": "./dist/index.mjs"
+    },
+    "./mandate": {
+      "types": "./dist/mandate.d.mts",
+      "import": "./dist/mandate.mjs",
+      "default": "./dist/mandate.mjs"
+    },
+    "./gate": {
+      "types": "./dist/gate.d.mts",
+      "import": "./dist/gate.mjs",
+      "default": "./dist/gate.mjs"
+    },
+    "./verify": {
+      "types": "./dist/verify.d.mts",
+      "import": "./dist/verify.mjs",
+      "default": "./dist/verify.mjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "NOTICE",
+    "SECURITY.md"
+  ],
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sweeai/swee-oss.git",
+    "directory": "packages/trust"
+  },
+  "homepage": "https://github.com/sweeai/swee-oss/tree/main/packages/trust#readme",
+  "bugs": "https://github.com/sweeai/swee-oss/issues",
+  "keywords": [
+    "ai-agents",
+    "agent-orchestration",
+    "capability-security",
+    "information-flow-control",
+    "provenance",
+    "taint-tracking",
+    "prompt-injection",
+    "trust-tiers",
+    "audit-log",
+    "hash-chain",
+    "ed25519",
+    "receipts",
+    "evidence",
+    "verification",
+    "mandate",
+    "sui"
+  ],
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "scripts": {
+    "prepublishOnly": "pnpm build && pnpm test && pnpm typecheck",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit && node --experimental-strip-types scripts/readme-typecheck.ts && node --experimental-strip-types scripts/forgery-typecheck.ts",
+    "typecheck:readme": "node --experimental-strip-types scripts/readme-typecheck.ts",
+    "build": "tsdown",
+    "typecheck:forgery": "node --experimental-strip-types scripts/forgery-typecheck.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "fast-check": "^3.23.2",
+    "tsdown": "^0.21.10",
+    "typescript": "^5.7.3",
+    "vitest": "^3.2.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "sideEffects": false
+}

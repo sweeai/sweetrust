@@ -1,0 +1,13 @@
+{
+  "name": "swee-oss",
+  "private": true,
+  "type": "module",
+  "description": "Swee's open-source packages. Everything published under the @swee scope lives here.",
+  "license": "Apache-2.0",
+  "scripts": {
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "typecheck": "pnpm -r typecheck"
+  },
+  "packageManager": "pnpm@9.0.0"
+}

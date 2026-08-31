@@ -1,0 +1,16 @@
+# Written 2026-08-31 BEFORE any `git init` of this directory as its own repo.
+#
+# Until now `sweetrust/.env` was ignored ONLY by the monorepo's ROOT .gitignore.
+# The moment this directory becomes its own repo, that root file is out of scope
+# and `git add .` would commit a live api-key on commit one.
+# This file exists so that cannot happen. Do not delete it during extraction.
+
+.env
+.env.*
+!.env.example
+
+node_modules/
+dist/
+*.tsbuildinfo
+
+.DS_Store

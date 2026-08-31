@@ -1,0 +1,4 @@
+packages:
+  # Explicit, never a glob. `packages/*` would also match any non-package directory
+  # added later, find no manifest, and pnpm reports nothing when a glob matches nothing.
+  - packages/trust
