@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 
-Open a [security advisory](https://github.com/sweeai/swee-oss/security/advisories/new) rather than
+Open a [security advisory](https://github.com/sweeai/sweetrust/security/advisories/new) rather than
 a public issue. We will confirm receipt and tell you what we found, including when we disagree.
 
 ---

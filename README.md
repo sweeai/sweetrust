@@ -1,4 +1,4 @@
-# swee-oss
+# sweetrust
 
 Swee's open-source packages. Everything published under the **`@swee`** scope lives here.
 
@@ -29,7 +29,7 @@ Each package owns its own gates and its own `AGENTS.md`. Start with
 ## Security
 
 Report vulnerabilities through a
-[security advisory](https://github.com/sweeai/swee-oss/security/advisories/new), never a public
+[security advisory](https://github.com/sweeai/sweetrust/security/advisories/new), never a public
 issue. Each package also ships a `SECURITY.md` with an **Honest limits** section stating what it
 does *not* protect — read that before you rely on one.
 

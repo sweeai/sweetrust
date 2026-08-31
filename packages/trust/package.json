@@ -38,11 +38,11 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/sweeai/swee-oss.git",
+    "url": "git+https://github.com/sweeai/sweetrust.git",
     "directory": "packages/trust"
   },
-  "homepage": "https://github.com/sweeai/swee-oss/tree/main/packages/trust#readme",
-  "bugs": "https://github.com/sweeai/swee-oss/issues",
+  "homepage": "https://github.com/sweeai/sweetrust/tree/main/packages/trust#readme",
+  "bugs": "https://github.com/sweeai/sweetrust/issues",
   "keywords": [
     "ai-agents",
     "agent-orchestration",
