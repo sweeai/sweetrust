@@ -9,6 +9,7 @@
  */
 import { randomBytes } from "node:crypto"
 import { constitutionalPreCheck } from "./security.ts"
+import { MandateFailure } from "./errors.ts"
 import type {
   Capability,
   GrantorId,
@@ -23,12 +24,12 @@ import type {
 } from "./types.ts"
 
 /**
- * failMandate — throw a typed MandateError. Plain-TS replacement for the
- * former `Effect.fail<MandateError>(...)` control-flow. The error object IS
- * the discriminated union; callers catch it and pattern-match on `_tag`.
+ * failMandate — throw a typed MandateError as a `MandateFailure`: a real Error
+ * whose own properties ARE the discriminated union, so callers still catch it
+ * and pattern-match on `_tag` (DAN-1159 item 4c; see errors.ts).
  */
 const failMandate = (error: MandateError): never => {
-  throw error
+  throw new MandateFailure(error)
 }
 
 /**

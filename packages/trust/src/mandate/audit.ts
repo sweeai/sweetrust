@@ -13,6 +13,7 @@
  */
 import { appendFileSync, mkdirSync, readFileSync } from "node:fs"
 import { dirname } from "node:path"
+import { MandateFailure } from "./errors.ts"
 import {
   canonicalJSON,
   MANDATE_AUDIT_DOMAIN,
@@ -43,7 +44,7 @@ const corrupt = (
     reason,
     ...(detail === undefined ? {} : { detail }),
   }
-  throw error
+  throw new MandateFailure(error)
 }
 
 /**

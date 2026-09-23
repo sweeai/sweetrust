@@ -16,7 +16,6 @@ import { appendFileSync, mkdtempSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, test } from "vitest"
-import * as mandateBarrel from "../../src/mandate/index.ts"
 import { makeJsonlAuditLive, makeJsonlSignedAuditLive } from "../../src/mandate/audit.ts"
 import {
   defineCapability,
@@ -24,16 +23,10 @@ import {
   issueRootMandate,
   makeEd25519SignerLive,
   makeInMemoryAuditLive,
+  MandateFailure,
 } from "../../src/mandate/index.ts"
 import { generateKeyPairSync } from "node:crypto"
 import type { GrantorId } from "../../src/mandate/types.ts"
-
-// TEMPORARY (red commit only): `MandateFailure` does not exist yet, so it is
-// read off the barrel through a cast to keep this commit tsc-clean. The fix
-// commit replaces this with a direct import.
-const MandateFailure = (mandateBarrel as unknown as Record<string, unknown>)["MandateFailure"] as
-  | (abstract new (...args: never[]) => Error)
-  | undefined
 
 const Deploy = defineCapability("deploy")
 const OPERATOR = "operator" as GrantorId
@@ -87,8 +80,8 @@ describe("a mandate refusal is an Error (DAN-1159 item 4c)", () => {
   })
 
   test.each(refusals())("%s: is a MandateFailure, the one class both throwers share", (_label, e) => {
-    expect(MandateFailure).toBeTypeOf("function")
-    expect(e).toBeInstanceOf(MandateFailure!)
+    expect(e).toBeInstanceOf(MandateFailure)
+    expect(MandateFailure.is(e)).toBe(true)
   })
 
   test("the message is the TAG alone: a field can carry an attacker's text, and messages reach every log", () => {
