@@ -402,6 +402,22 @@ export const verifyAuditChain = (
   signer: MandateSignerService,
   opts: { readonly trustedSignerPublicKeyHex: string },
 ): import("./types.ts").VerifyAuditChainResult => {
+  // The container is checked before anything is read from it. A plain object
+  // used to VERIFY: `{}.length` is undefined, so `=== 0` missed the empty-log
+  // guard below, `i < undefined` never entered the loop, and control fell
+  // through to valid:true (F6's residual, DAN-1159 item 5). verifySignedChain
+  // has the same guard; a parity test holds the two to the same verdict.
+  // `input` is `unknown` so the narrowing cannot leak `any[]` into `log`.
+  const input: unknown = log
+  if (!Array.isArray(input)) {
+    return {
+      valid: false,
+      firstInvalidIndex: null,
+      reason: "malformed-record" as const,
+      detail: `expected an array of signed records (got ${input === null ? "null" : typeof input})`,
+    }
+  }
+
   // An empty log used to fold to valid:true, the loop's identity element and
   // the strongest claim it can make. An operator handed an empty file and told
   // "valid" has been told something false. Same lesson verifySignedChain learned
@@ -448,8 +464,9 @@ export const verifyAuditChain = (
 
     // Pinned-key check BEFORE signature verification (DAN-638/642). A record
     // signed by any key other than the pinned one is rejected regardless of
-    // whether its self-referential signature validates.
-    if (record.signerPublicKeyHex !== opts.trustedSignerPublicKeyHex) {
+    // whether its self-referential signature validates. A missing `opts` pins
+    // nothing, so nothing verifies: fail-closed, as a verdict (DAN-1159 item 5).
+    if (record.signerPublicKeyHex !== opts?.trustedSignerPublicKeyHex) {
       return {
         valid: false,
         firstInvalidIndex: i,

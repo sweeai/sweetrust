@@ -205,6 +205,13 @@ export interface VerifyReport {
   readonly detail?: string
 }
 
+// How a verdict's `detail` names a value it could not use, without ever
+// dereferencing it. The detail used to `.slice` the signer key and the anchor
+// head directly, so a non-string threw from inside the very message that was
+// reporting it, and the verdict was lost (DAN-1159 item 5).
+const typeName = (v: unknown): string => (v === null ? "null" : typeof v)
+const preview = (v: unknown): string => (typeof v === "string" ? `${v.slice(0, 16)}…` : `<${typeName(v)}>`)
+
 /**
  * Re-verify an exported chain holding ONLY public material.
  *
@@ -231,6 +238,11 @@ export interface VerifyReport {
  * The `kind` dispatch fails CLOSED: only an explicit `"receipt"` gets the weaker
  * membership check, so an unknown/absent kind arriving from an untyped JS
  * consumer is checked as a seal rather than silently downgraded.
+ *
+ * Every input SHAPE returns a verdict, never a throw: a chain that is not an
+ * array, a record that is not an object, a key or anchor head that is not a
+ * string (DAN-1159 item 5). `verifyAuditChain` makes the same promise, and a
+ * parity test holds the two to the same verdict for the same hostile shape.
  */
 export function verifySignedChain(
   records: ReadonlyArray<SignedReceipt>,
@@ -239,6 +251,19 @@ export function verifySignedChain(
     anchor?: { kind: "anchor" | "receipt"; head: string }
   },
 ): VerifyReport {
+  // The container is checked before anything is read from it. A plain object
+  // used to VERIFY: `{}.length` is undefined, so `=== 0` missed the empty-chain
+  // guard below, `i < undefined` never entered the loop, and control fell
+  // through to valid:true for evidence nobody checked (DAN-1159 item 5).
+  // `input` is `unknown` so the narrowing cannot leak `any[]` into `records`.
+  const input: unknown = records
+  if (!Array.isArray(input)) {
+    return {
+      valid: false, firstInvalidIndex: null, reason: "malformed-record", anchoredThrough: null,
+      detail: `expected an array of signed records (got ${typeName(input)})`,
+    }
+  }
+
   // An empty chain used to fold to `valid: true` — the identity element of the
   // loop is the strongest possible claim (adversarial pass V2, 2026-07-25; the
   // same shape as @sweetrust/gate's minTier() returning "verified" over an empty
@@ -251,17 +276,30 @@ export function verifySignedChain(
     }
   }
 
+  // The pin is only ever COMPARED, never assumed to be a string. A missing or
+  // non-string pin matches no genuine record, so nothing verifies against it:
+  // fail-closed, and a verdict rather than a crash in the detail message.
+  const pin: unknown = opts?.trustedSignerPublicKeyHex
+  const malformed = (i: number, what: string, err?: unknown): VerifyReport => ({
+    valid: false, firstInvalidIndex: i, reason: "malformed-record", anchoredThrough: null,
+    detail: err === undefined ? what : `${what}: ${err instanceof Error ? err.message : String(err)}`,
+  })
+
   let prevInteriorHash = "genesis"
   let prevWrapperHash: string | null = null
   for (let i = 0; i < records.length; i++) {
-    const r = records[i]!
+    const candidate: unknown = records[i]
+    if (typeof candidate !== "object" || candidate === null) {
+      return malformed(i, `record ${i} is not a signed record (got ${typeName(candidate)})`)
+    }
+    const r = candidate as SignedReceipt
     if (!r.signature || r.signature.length === 0) {
       return { valid: false, firstInvalidIndex: i, reason: "missing-signature", anchoredThrough: null }
     }
-    if (r.signerPublicKeyHex !== opts.trustedSignerPublicKeyHex) {
+    if (r.signerPublicKeyHex !== pin) {
       return {
         valid: false, firstInvalidIndex: i, reason: "untrusted-signer", anchoredThrough: null,
-        detail: `record ${i} signed by ${r.signerPublicKeyHex.slice(0, 16)}…, expected ${opts.trustedSignerPublicKeyHex.slice(0, 16)}…`,
+        detail: `record ${i} signed by ${preview(r.signerPublicKeyHex)}, expected ${preview(pin)}`,
       }
     }
     // This function is what an auditor points at a file from an UNTRUSTED
@@ -280,10 +318,7 @@ export function verifySignedChain(
       // no second preimage definition can drift from the signer's (DAN-641).
       sigOk = edVerify(null, Buffer.from(signedPreimage(r)), publicKey, Buffer.from(r.signature, "hex"))
     } catch (err) {
-      return {
-        valid: false, firstInvalidIndex: i, reason: "malformed-record", anchoredThrough: null,
-        detail: `record ${i} could not be checked: ${err instanceof Error ? err.message : String(err)}`,
-      }
+      return malformed(i, `record ${i} could not be checked`, err)
     }
     if (!sigOk) {
       return { valid: false, firstInvalidIndex: i, reason: "signature-mismatch", anchoredThrough: null }
@@ -294,21 +329,45 @@ export function verifySignedChain(
       return { valid: false, firstInvalidIndex: i, reason: "domain-mismatch", anchoredThrough: null }
     }
     // Interior (kernel) hash recomputation — trust's own serialization, one definition.
-    const e = r.payload
-    const rebuilt = sha256Hex(receiptBody(e))
-    if (rebuilt !== e.hash) {
+    // The signature authenticates the payload's BYTES, not its shape: a buggy
+    // signer can sign `null`, and receiptBody would throw reading it.
+    const e: unknown = r.payload
+    if (typeof e !== "object" || e === null) {
+      return malformed(i, `record ${i} carries no receipt payload (got ${typeName(e)})`)
+    }
+    const payload = e as Receipt
+    const rebuilt = sha256Hex(receiptBody(payload))
+    if (rebuilt !== payload.hash) {
       return { valid: false, firstInvalidIndex: i, reason: "hash-mismatch", anchoredThrough: null }
     }
     // Both chains must link: interior (kernel) and wrapper (mandate spec I8).
-    if (e.prevHash !== prevInteriorHash || e.seq !== i || r.previousHash !== prevWrapperHash) {
+    if (payload.prevHash !== prevInteriorHash || payload.seq !== i || r.previousHash !== prevWrapperHash) {
       return { valid: false, firstInvalidIndex: i, reason: "hash-chain-broken", anchoredThrough: null }
     }
-    prevInteriorHash = e.hash
-    prevWrapperHash = sha256Hex(canonicalJSON(r))
+    prevInteriorHash = payload.hash
+    // The next wrapper link hashes the WHOLE record, which includes fields
+    // outside the signed preimage. A field canonicalJSON cannot encode (a
+    // BigInt, a cycle) leaves the signature valid and makes this record
+    // unlinkable, so it is malformed HERE, at the record that carries it.
+    // verifyAuditChain learned this in DAN-1159 item 3; it never came back here.
+    try {
+      prevWrapperHash = sha256Hex(canonicalJSON(r))
+    } catch (err) {
+      return malformed(i, `record ${i} cannot be hashed for the next link`, err)
+    }
   }
 
-  if (opts.anchor !== undefined) {
-    const { kind, head } = opts.anchor
+  const anchor: unknown = opts?.anchor
+  if (anchor !== undefined) {
+    // Present but unusable (null, a head that is not a string) proves nothing,
+    // so it fails as anchor-not-found: the same fail-closed reading the kind
+    // dispatch below gives an unknown kind. `null` is present, not absent. A
+    // non-string head can never equal a verified record's hash, so both
+    // branches reach their not-found verdict on their own.
+    const { kind, head } = (typeof anchor === "object" && anchor !== null ? anchor : {}) as {
+      readonly kind?: unknown
+      readonly head?: unknown
+    }
     // Fail CLOSED on the kind: only an explicit "receipt" earns the weaker
     // membership check. Anything else — an unknown string, a JSON-hydrated
     // value, undefined from an untyped JS consumer — is treated as a SEAL and
@@ -323,7 +382,7 @@ export function verifySignedChain(
       if (!last || last.payload.hash !== head) {
         return {
           valid: false, firstInvalidIndex: null, reason: "anchor-not-found", anchoredThrough: null,
-          detail: `sealing anchor ${head.slice(0, 16)}… is not the head of the presented chain — records after it were removed, or the wrong chain was presented`,
+          detail: `sealing anchor ${preview(head)} is not the head of the presented chain — records after it were removed, or the wrong chain was presented`,
         }
       }
       return { valid: true, firstInvalidIndex: null, reason: "ok", anchoredThrough: last.payload.seq }
@@ -334,7 +393,7 @@ export function verifySignedChain(
     if (hit === -1) {
       return {
         valid: false, firstInvalidIndex: null, reason: "anchor-not-found", anchoredThrough: null,
-        detail: `receipt memo ${head.slice(0, 16)}… does not appear in the presented chain — the wrong chain was presented, or records up to it were removed`,
+        detail: `receipt memo ${preview(head)} does not appear in the presented chain — the wrong chain was presented, or records up to it were removed`,
       }
     }
     return { valid: true, firstInvalidIndex: null, reason: "ok", anchoredThrough: records[hit]!.payload.seq }
