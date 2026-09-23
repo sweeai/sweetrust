@@ -2,7 +2,7 @@
  * @sweetrust/gate — public API surface
  *
  * The enforcement kernel of SWEE AI's vertical trust rails: trust-tier
- * provenance (Sourced<T>), the audited declassifier trio, appetite-declaring
+ * provenance (Sourced<T>), the three declassifiers, appetite-declaring
  * sinks with the observe→warn→enforce adoption ladder, the judgment seam,
  * and the hash-chained receipt log.
  *

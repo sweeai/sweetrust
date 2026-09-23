@@ -17,7 +17,7 @@ One package, three primitives, one direction of flow:
 Each is independently importable — the arrows are how they *compose*, not what they *require*. `gate` has no knowledge of `mandate`. `verify` is the only one that reaches across, and it reaches for exactly one thing: mandate's signer, so the rail has one canonicalization rather than two that drift.
 
 1. **Authority** (`src/mandate/`) — issue, use, revoke, across organization → project → agent tiers. Subset gates enforced by the compiler and re-checked at runtime. Every act on an Ed25519-signed hash chain.
-2. **Enforcement** (`src/gate/`) — `Sourced<T>` provenance tags, the four-tier lattice, three audited declassifiers as the only ascent paths, fail-closed sinks, the judgment seam, and the receipt log.
+2. **Enforcement** (`src/gate/`) — `Sourced<T>` provenance tags, the four-tier lattice, three declassifiers as the only ascent paths, fail-closed sinks, the judgment seam, and the receipt log.
 3. **Evidence** (`src/verify/`) — signs gate's receipts *through* mandate's signer, exports JSONL, and re-verifies from public material alone plus an optional on-chain anchor.
 4. **Adapters** — anything needing a network lives outside the package. Keeping adapters out is what makes the zero-dependency claim true.
 
@@ -49,9 +49,9 @@ Enforcement: extraction boundary → `Sourced` tag → (optional declassifier) �
 ### 3. Audit log (unsigned + signed)
 
 - **STATUS:** LIVE
-- **FLOW:** Two parallel factory families sharing the same `MandateAuditService` interface for record/query/isRevoked. Unsigned (`makeInMemoryAuditLive`, `makeJsonlAuditLive`) records raw `MandateAuditEvent` objects. Signed (`makeInMemorySignedAuditLive`, `makeJsonlSignedAuditLive`) wraps every record in `SignedMandateAuditEvent` using an injected signer; previousHash chains records via SHA-256 of canonical JSON. The `read → sign → append` critical section must not interleave, or two recorders observe the same chain head and fork the chain. **Mechanism changed 2026-07-20 (DAN-600):** the Effect version guarded it with a single-permit `Effect.makeSemaphore(1)`; the plain-TS rewrite is fully synchronous, so the critical section is inherently serialized and no lock is needed (`src/mandate/audit.ts:67` states this at the site). **The property is unchanged; only its enforcement is.** The JSONL family's cross-process append is NOT locked — single writer per store.
-- **SOURCE:** `src/mandate/audit.ts`. The signed factories return both the `MandateAudit` and `SignedMandateAudit` surfaces backed by one shared array, so state stays consistent across the two views.
-- **LAST VERIFIED:** 2026-05-07 for the chain semantics (multi-tier-demo runs end-to-end with a 4-event signed chain; `verifyAuditChain` returns valid:true on intact, signature-mismatch on tamper, hash-chain-broken on removal). **Serialization mechanism re-verified 2026-07-30** against the merged source.
+- **FLOW:** Two parallel factory families sharing the same `MandateAuditService` interface for record/query/isRevoked. Unsigned (`makeInMemoryAuditLive`, `makeJsonlAuditLive`) records raw `MandateAuditEvent` objects. Signed (`makeInMemorySignedAuditLive`, `makeJsonlSignedAuditLive`) wraps every record in `SignedMandateAuditEvent` using an injected signer; previousHash chains records via SHA-256 of canonical JSON. The `read → sign → append` critical section must not interleave, or two recorders observe the same chain head and fork the chain. **Mechanism changed 2026-07-20 (DAN-600):** the Effect version guarded it with a single-permit `Effect.makeSemaphore(1)`; the plain-TS rewrite is fully synchronous, so the critical section is inherently serialized and no lock is needed (`src/mandate/audit.ts:67` states this at the site). **The property is unchanged; only its enforcement is.** The JSONL family's cross-process append is NOT locked — single writer per store. **Both JSONL stores read fail-closed** through one shared `readJsonl`: a corrupt line throws `AuditLogCorrupt` from every read (including a direct `isRevoked`, which must never read a wrecked log as "not revoked"), and only a missing file is an empty log. The signed JSONL store additionally re-verifies the whole file against the signer's key on every read, and refuses to append past corruption.
+- **SOURCE:** `src/mandate/audit.ts`. Both signed factories return `{ mandateAudit, signedAudit }`, two views of ONE store (an array in memory, the file for JSONL), so state stays consistent across them. That is what makes the signed store usable as THE audit log: before 2026-09-23 the JSONL signed factory returned only the signed surface, so a host needing `isRevoked` had to pick the unsigned store.
+- **LAST VERIFIED:** 2026-05-07 for the chain semantics (multi-tier-demo runs end-to-end with a 4-event signed chain; `verifyAuditChain` returns valid:true on intact, signature-mismatch on tamper, hash-chain-broken on removal). **Serialization mechanism re-verified 2026-07-30** against the merged source. **Fail-closed reads and the two-view signed JSONL store verified 2026-09-23**, 266/266.
 
 ### 4. Cryptographic signer
 
@@ -62,21 +62,21 @@ Enforcement: extraction boundary → `Sourced` tag → (optional declassifier) �
 
 ### 5–7. Linear integration, resilience layer, scheduler — EXTRACTED
 
-> audit (`docs/KERNEL-AUDIT-2026-07-19.md`): adapters do not live inside SweeTrust proper.
+> A 2026-07-19 kernel audit moved these out: adapters do not live inside SweeTrust proper.
 
-### 8. Demos (runnable talk scripts)
+### 8. Demos (runnable scripts)
 
 - **STATUS:** LIVE
 - **FLOW:** Two demo scripts here, each runnable via `node packages/trust/src/mandate/<demo>.ts`:
   - `demo.ts` — v0.0 capability subset gate proof (Arthur → AgentA single-tier flow)
   - `multi-tier-demo.ts` — v1.0 multi-tier + signed audit + tamper-detection demo (org → project → agent + verifyAuditChain on intact, tampered, removed-record logs)
-- **SOURCE:** `src/{demo,multi-tier-demo}.ts`. Each is intentionally readable as a verbal narration matching the planned talk script.
+- **SOURCE:** `src/{demo,multi-tier-demo}.ts`. Each is intentionally readable as a narration of the flow it runs.
 - **LAST VERIFIED:** 2026-05-04 (all three run end-to-end without errors; output formatted for stage clarity).
 
 ### 9. Enforcement kernel — `@swee/trust/gate`
 
 - **STATUS:** LIVE
-- **FLOW:** Extraction boundary → `Sourced<T>` tag carrying tier + provenance (origin, ancestry, audit chain, optional confidence) → tags propagate through combination, taking the **minimum** tier (Rule 1: taint is sticky) → optionally through one of exactly three declassifiers (Rule 3) → sink appetite check (Rule 4, fail-closed) → judgment seam → `ReceiptLog.append`. Every decision lands on the log, allow *and* refuse. `fromLLM` returns untrusted unconditionally (Rule 2: inference is not evidence). Adoption ladder `observe → warn → enforce` (Rule 5) lets it be installed into a running system without breaking it.
+- **FLOW:** Extraction boundary → `Sourced<T>` tag carrying tier + provenance (origin, ancestry, audit chain, optional confidence) → tags propagate through combination, taking the **minimum** tier (Rule 1: taint is sticky) → optionally through one of exactly three declassifiers (Rule 3) → sink appetite check (Rule 4, fail-closed) → judgment seam → `ReceiptLog.append`. Every SINK decision lands on the log, allow *and* refuse. Two gaps are documented in `SECURITY.md` § *Honest limits*: a declassifier's refusal leaves no receipt (`"declassify-refused"` is reserved, not produced), and neither does an action whose signer throws after `execute()`. `fromLLM` returns untrusted unconditionally (Rule 2: inference is not evidence). Adoption ladder `observe → warn → enforce` (Rule 5) lets it be installed into a running system without breaking it.
 - **SOURCE:** `src/gate/trust.ts` — one file, deliberately, so the kernel is auditable in a sitting. The `Sourced` constructor and `ascend` are **module-private**; `allowlisted` / `corroborate` / `humanConfirm` are the only doors. Implements the trust-types specification §4–§5. Zero dependencies, `node:crypto` only.
 - **Architecture Invariant — a check and the promotion it authorizes name the SAME binding.** `allowlisted` returns the **registry's** `Sourced`, never the caller's candidate. The candidate is compared and then discarded; its identity survives only in the ascent event's `evidence`. This is not a style preference: serialization is not identity, so a candidate can compare equal and *be* something else, and promoting the compared-against record is what makes the comparison mean anything. Callers must not assume they get their own object back.
 - **Architecture Invariant — an ABSENCE: nothing in the sink path reads a key off a prototype.** Membership is `Object.hasOwn`, never `in`; the receipt's `args` bag is `Object.create(null)`, never `{}`; redaction policy is read through an own-key helper. Argument names are chosen by whoever wrote the tool schema — which, for this package's stated target, is not us. An argument named `constructor` or `__proto__` must be as visible to enforcement as one named `amount`.

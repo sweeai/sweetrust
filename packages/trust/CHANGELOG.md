@@ -15,12 +15,64 @@ this package follows [Semantic Versioning](https://semver.org).
   every public field. `parentScope` is now a detached view with no authority.
 - **The tier ladder holds at runtime**, not only at compile time. Agent → agent, org → agent and
   non-org grantors through `issueMandate` now throw the new `TierLadderViolation`.
+- **The signed JSONL store is now the audit log itself.** `makeJsonlSignedAuditLive` re-verifies
+  the whole file against the signer's key on every read, including a direct `isRevoked`. It
+  refuses to append past a corrupt line. Before this, a corrupt line made it sign the next record
+  as a second genesis mid-file.
+- **The unsigned JSONL store fails closed.** One unparseable line used to blank the whole log,
+  which flipped a direct `isRevoked` from `true` to `false`. It now throws `AuditLogCorrupt`. Only
+  a missing file reads as an empty log; other I/O errors propagate.
+- **Both verifiers return a verdict for every input, and two of them were failing open.**
+  `verifySignedChain({})` and `verifyAuditChain({}, …)` returned `valid: true` for a plain object.
+  Null records, records with no key and malformed anchors used to throw; they now fail with a
+  reason. An empty chain passed `verifyAuditChain` vacuously and is now `empty-chain`.
+- **An action no longer runs without its receipt when the caller's input is the problem.**
+  Receipt arguments are rendered to a JSON snapshot BEFORE `execute()`. A `BigInt` is written as
+  `1000000000n`. An argument that cannot be rendered is a violation, so `enforce` refuses before
+  the action runs. The `raw` policy used to store the caller's object by reference, so editing it
+  after the call rewrote the receipt and made `verifyChain()` report tampering.
+- **Correction to the 0.3.0 entry below.** It says every decision lands in the receipt log,
+  allowed *and* refused. Two decisions do not yet: a declassifier's refusal, and an action whose
+  signer throws after `execute()`. `SECURITY.md` § *Honest limits* states both.
+
+### Added
+
+- `AuditLogCorrupt { storePath, line, reason, detail? }`, a new `MandateError` variant thrown by
+  every read of a corrupt store.
+- `MandateFailure`, the `Error` subclass mandate refusals are thrown as, and `MandateFailure.is(e)`
+  to narrow a caught value.
+- `VerifyAuditChainResult.reason` gains `"empty-chain"` and `"malformed-record"`, plus an optional
+  `detail`.
+- `Receipt["decision"]` gains `"declassify-refused"`. It is **reserved, not yet produced**.
+  Nothing emits it today, and it exists now because adding a member after publish would break
+  every exhaustive switch.
 
 ### Changed
 
 - **Breaking:** `revokeMandate` takes `revokerScope` (the scope you hold) in place of `revoker`
   (a name). It succeeds when that scope is the target or one of its ancestors.
 - **Breaking:** issued scopes and their capability lists are frozen.
+- **Breaking:** `makeJsonlSignedAuditLive` returns `{ mandateAudit, signedAudit }`, not the
+  signed surface alone. Pass `mandateAudit` wherever an audit log is taken.
+- **Breaking:** mandate refusals are thrown as `MandateFailure`, a real `Error` with a stack, not
+  as a plain object. The union's fields (`_tag` and the rest) are still own properties, so
+  `e._tag` switches keep working and `JSON.stringify(e)` is unchanged. `message` is the `_tag`
+  alone, because some variants carry attacker-supplied text. One thing does change:
+  `structuredClone(e)` drops `_tag`, because cloning an `Error` keeps only its standard fields.
+- **Breaking (types):** `makeSink`'s argument constraint is `Sourced<unknown>`, not
+  `Sourced<any>`. Without declared generics, `execute` could read `amount.value.anything.deep`
+  and compile. Declare `Args`, or type `execute`'s parameter.
+- **Breaking (types):** an exhaustive switch over `Receipt["decision"]` must handle
+  `"declassify-refused"`, and one over `VerifyAuditChainResult.reason` must handle the two new
+  reasons.
+- `verifySignedChain` reports a non-object record such as `[42]` as `malformed-record`. It used to
+  report `missing-signature`.
+- The npm package no longer ships sourcemaps.
+
+### Deprecated
+
+- `issueMandate` and `issueRootMandate`. Use `issueOrgMandate`, then `issueProjectMandate` and
+  `issueAgentMandate`. They will be removed in a future release.
 
 ## [0.3.0] — first public release
 

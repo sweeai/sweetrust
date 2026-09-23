@@ -16,7 +16,7 @@
 // Spec rules implemented:
 //   Rule 1  — taint is sticky (combining takes the minimum tier)
 //   Rule 2  — inference is not evidence (LLM output is Untrusted, always)
-//   Rule 3  — ascent only through explicit declassifiers (audited)
+//   Rule 3  — ascent only through explicit declassifiers (each ascent recorded in provenance)
 //   Rule 3a — accumulation never reaches Verified (authority acts only)
 //   Rule 3b — corroboration requires INDEPENDENT sources (disjoint ancestry)
 //   Rule 4  — sinks declare their appetite (@requires), fail closed
@@ -282,7 +282,7 @@ function ascend<T>(prev: Sourced<T>, event: UpgradeEvent, mergedAncestors?: Read
 
 const now = () => new Date().toISOString()
 
-// ── Declassifiers (§5 — the audited trio) ───────────────────────────────────
+// ── Declassifiers (§5 — the three doors) ────────────────────────────────────
 
 export type DeclassifyResult<T> =
   | { readonly ok: true; readonly value: Sourced<T> }

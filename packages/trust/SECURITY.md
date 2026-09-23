@@ -61,6 +61,38 @@ sequence number, never the whole chain.
 A compromised host can sign lies going forward. It cannot rewrite the past behind an anchor, and it
 cannot forge under a key it does not hold.
 
+**The same holds for a JSONL audit store on disk, and there it can re-arm authority.** Delete the
+last line of a signed store and the file still verifies, because it is a valid shorter chain. If
+that line was a revoke, the mandate is live again: `isRevoked` returns `false`. Protect the store
+file the way you protect the key, or anchor its head somewhere the host cannot write.
+
+### One writer per store file
+
+The JSONL stores do not lock across processes. Two processes appending to one file can both link
+to the same predecessor. That forks the chain, and every later read then fails closed as corrupt.
+Give each store file exactly one writing process.
+
+### A signer that throws after `execute()` leaves no receipt
+
+Receipt arguments are rendered before the action runs, so nothing the caller passes can stop the
+receipt from being written. The signer is different. If `SignedReceiptLog`'s signer throws after
+`execute()` has run (an HSM or keychain outage, say), the action has happened and the chain says
+nothing. This is a known gap, not a design choice. The planned fix writes an intent record before
+the action and the outcome after it. Until then, treat a signer error as "an action may have run
+unrecorded", not as a refusal.
+
+### A declassifier's refusal leaves no receipt
+
+`allowlisted`, `corroborate` and `humanConfirm` return `{ ok: false, reason }` when they refuse an
+ascent, and they take no log. So a refused ascent records nothing, and an injected payee stopped
+at `allowlisted` leaves no evidence that it was ever tried. A successful ascent IS recorded, as an
+event in the value's provenance chain. Sink decisions, allowed and refused, all land on the
+receipt log.
+
+`Receipt["decision"]` already reserves `"declassify-refused"` so that emitting it later is not a
+breaking change. Nothing produces it yet. Until something does, log a declassifier's refusal
+yourself if you need the evidence.
+
 ### `asserted` is not reachable
 
 Four tiers are documented; three are produced. No factory or declassifier currently emits
