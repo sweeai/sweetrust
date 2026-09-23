@@ -69,7 +69,7 @@ declare const settle: (to: string, amount: number) => string
 import { Sourced, allowlisted, makeSink, ReceiptLog } from "@swee/trust/gate"
 
 const log = new ReceiptLog()
-const pay = makeSink({
+const pay = makeSink<{ to: Sourced<string>; amount: Sourced<number> }, string>({
   name: "pay",
   requires: { to: "verified", amount: "corroborated" },
   mode: "enforce",

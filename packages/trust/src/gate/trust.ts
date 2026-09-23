@@ -640,8 +640,14 @@ function renderForReceipt(value: unknown, policy: "raw" | "hash" | "truncate"): 
  * tier. In `enforce` mode an under-tier argument refuses the call with the
  * provenance rendered — the human sees exactly the right question. Every
  * decision, either way, lands in the receipt log.
+ *
+ * Declare `Args` (`makeSink<{ to: Sourced<string> }, string>(…)`) or type
+ * `execute`'s parameter. `requires` names the keys but not their types, so
+ * without one of those each argument's `value` is `unknown` until narrowed. It
+ * used to be `any`, which let a sink compile against a shape nobody declared
+ * (DAN-1159 item 4a).
  */
-export function makeSink<Args extends Record<string, Sourced<any>>, R>(spec: {
+export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec: {
   readonly name: string
   readonly requires: { readonly [K in keyof Args]: Tier }
   readonly mode: EnforcementMode
@@ -721,7 +727,7 @@ export function makeSink<Args extends Record<string, Sourced<any>>, R>(spec: {
       // evidence.
       //
       // The `as unknown` is deliberate and is the point rather than a wart:
-      // `arg`'s static type is `Sourced<any>`, and that static type IS THE
+      // `arg`'s static type is `Sourced<unknown>`, and that static type IS THE
       // CLAIM UNDER TEST. Narrowing through the cast also keeps `arg`'s
       // declared type intact for the honest path below, instead of collapsing
       // its negative branch to `never`.
