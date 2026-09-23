@@ -161,8 +161,8 @@ export class Sourced<T> {
    *
    * The generalizable rule is worth more than this line: A RUNTIME GUARD MUST
    * NOT BE BUILT ON A MARKER THE RUNTIME ERASES. The originally-proposed fix
-   * for DAN-904 was `instanceof`, which leans on `private` — and `private`
-   * being erased at runtime is the very defect DAN-904 exists to close. The fix
+   * for this brand (DAN-904) was `instanceof`, which leans on `private` — and `private`
+   * being erased at runtime is the very defect the brand exists to close. The fix
    * had inherited the bug's blind spot. The tell: the guard and the
    * vulnerability cite the same language feature.
    *

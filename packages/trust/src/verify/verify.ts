@@ -231,7 +231,7 @@ const preview = (v: unknown): string => (typeof v === "string" ? `${v.slice(0, 1
  *     It only proves the chain THROUGH that record's seq (membership); anything
  *     after it can still be truncated undetectably. `anchoredThrough` reports how
  *     far it proves. NEVER treat a receipt memo as full-chain proof — that was the
- *     pre-DAN-643 hole: every settlement writes a `swee:rcpt:` memo, so an attacker
+ *     old hole (DAN-643): every settlement writes a `swee:rcpt:` memo, so an attacker
  *     could truncate the tail and point an auditor at any earlier receipt memo,
  *     which still "appeared in" the truncated chain under the old membership check.
  *

@@ -165,7 +165,7 @@ export const makeInMemorySignedAuditLive = (
  * `mandateAudit` is the `MandateAuditService` that issue, use and revoke take,
  * and it signs and chains every event it records.
  *
- * Before DAN-1159 this returned only the signed surface, so it could not be
+ * Originally this returned only the signed surface (DAN-1159), so it could not be
  * wired in as the audit log at all. A host had to pick the unsigned JSONL store
  * (durable, but anyone who can append to the file can write, delete or blank a
  * revoke) or this one (signed, but no `isRevoked`). Signed or durable, never

@@ -108,7 +108,7 @@ export const MANDATE_AUDIT_DOMAIN = "swee.mandate-audit.v1"
  *
  * It binds the full authenticated envelope: the domain tag, the payload, the
  * chain link (previousHash), and the signing time (signedAt) — NOT the payload
- * alone. Signing the payload alone (pre-DAN-641) left previousHash and signedAt
+ * alone. Signing the payload alone, as the signer once did (DAN-641), left previousHash and signedAt
  * outside the signature, so an attacker holding a validly-signed chain could
  * delete/reorder/retime records and recompute the (public) previousHash links
  * with every signature still valid. Binding previousHash makes any relink break
@@ -149,7 +149,7 @@ export interface MandateSignerService {
     /**
      * Domain-separation tag for this record type (e.g. MANDATE_AUDIT_DOMAIN,
      * or @sweetrust/verify's RECEIPT_DOMAIN). Folded into the signed preimage so
-     * a signature is bound to its protocol context. Required since DAN-641.
+     * a signature is bound to its protocol context. Required on every record (DAN-641).
      */
     readonly domain: string
   }) => Signed<P>
@@ -177,7 +177,7 @@ const nowISO = (): ISO8601 => new Date().toISOString() as ISO8601
  * Signatures are of the form `inmem-<sha256-hex-of-signedPreimage>`.
  * publicKeyHex is a stable test marker. Verification simply re-computes
  * the expected signature and compares. Deterministic GIVEN the full envelope —
- * but since DAN-641 the envelope includes `signedAt` (wall-clock at sign time),
+ * but the envelope includes `signedAt`, the wall-clock at sign time (DAN-641), so
  * two separate `sign()` calls on the same payload produce DIFFERENT signatures
  * (different `signedAt`). That is correct by design; each still verifies. Do not
  * assert cross-call signature equality.

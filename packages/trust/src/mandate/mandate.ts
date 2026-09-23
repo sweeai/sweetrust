@@ -189,8 +189,8 @@ const checkGrantorNotRevoked = (
 }
 
 /**
- * assertRequestedCapsBackedByGrantorGrant — issue-time forged-scope defense
- * (DAN-639). The grantor's IN-MEMORY `capabilities` list is attacker-forgeable
+ * assertRequestedCapsBackedByGrantorGrant — issue-time forged-scope defense (DAN-639).
+ * The grantor's IN-MEMORY `capabilities` list is attacker-forgeable
  * (any-cast escape, untrusted-deserialization rehydrate) — it is the very
  * thing the per-function subset check above trusts, so that check cannot
  * defend the "dynamic capability lists from external sources" case its own
@@ -204,7 +204,7 @@ const checkGrantorNotRevoked = (
  * even in the claimed scope) keeps reporting `CapabilityNotInGrantorScope`;
  * this check adds the stronger `MandateScopeForged` verdict for a cap the
  * grantor CLAIMS in memory but was never actually granted. Mirrors the
- * use-time forged-scope defense in useCapability and the DAN-637/638 fixes:
+ * use-time forged-scope defense in useCapability and the audit-log fixes (DAN-637/638):
  * audit-log-is-truth must hold at EVERY security decision — here, issuance.
  */
 const assertRequestedCapsBackedByGrantorGrant = (
@@ -560,8 +560,8 @@ export const useCapability = <
 /**
  * revokeMandate — remove a mandate from the active pool.
  *
- * Per spec I8: the revoker must be in the delegation chain. Since DAN-1157 (F2)
- * that means PROVEN by possession, not claimed by name. The caller presents
+ * Per spec I8: the revoker must be in the delegation chain. Since the authority
+ * binding fix (DAN-1157, F2) that means PROVEN by possession, not claimed by name. The caller presents
  * `revokerScope`, a scope this module issued, and it must BE the target or one
  * of the target's ancestors (the chain is walked from the audit log via
  * parentMandateId). The old `revoker: GrantorId` is gone rather than
