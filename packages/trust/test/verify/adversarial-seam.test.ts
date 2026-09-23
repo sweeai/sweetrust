@@ -190,9 +190,30 @@ describe("DAN-1159 item 2 — the SIGNED path: a BigInt amount signs, exports an
   // throws on a BigInt, so before the fix the payment ran and the signed log
   // (and its JSONL export) never heard of it.
   test("a payment of 1 SUI in MIST lands on the signed chain", () => {
-    const { log, trustedKey } = buildLog([1_000_000_000n])
+    // Its own sink, not buildLog: buildLog's execute() stringifies the value
+    // itself, so it would throw inside the action and never test the receipt.
+    const keys = generateSigningKeypair()
+    const log = new SignedReceiptLog(
+      makeEd25519ReceiptSigner({ privateKeyPem: keys.privateKeyPem, publicKeyPem: keys.publicKeyPem }),
+    )
+    let executed = 0
+    const pay = makeSink<{ amount: Sourced<bigint> }, string>({
+      name: "pay",
+      requires: { amount: "verified" } as Record<"amount", Tier>,
+      mode: "enforce",
+      log,
+      execute: () => {
+        executed++
+        return "paid"
+      },
+    })
+    const out = pay({ amount: Sourced.fromAuthority(1_000_000_000n, "treasury") })
+    expect(executed).toBe(1)
+    expect(out.ok).toBe(true)
     expect(log.signed()).toHaveLength(1)
-    const report = verifySignedChain(roundtrip(log), { trustedSignerPublicKeyHex: trustedKey })
+    const report = verifySignedChain(roundtrip(log), {
+      trustedSignerPublicKeyHex: publicKeyHexFromPem(keys.publicKeyPem),
+    })
     expect(report.valid).toBe(true)
   })
 })
