@@ -239,23 +239,21 @@ export const makeJsonlSignedAuditLive = (
 }
 
 /**
- * Append-only JSONL audit log for production. NOT cryptographically signed —
- * see the signed variants above.
+ * Append-only JSONL audit log. NOT cryptographically signed: anyone who can
+ * append to the file can write or delete a revoke. Prefer
+ * `makeJsonlSignedAuditLive`, which is the same `MandateAuditService` and
+ * verifies every read.
+ *
+ * Reads fail CLOSED through `readJsonl` (DAN-1159, F5). This store used to read
+ * the whole file inside one try/catch and return [] on any failure, so one bad
+ * byte blanked the log: a direct `isRevoked` flipped from true to false, and
+ * `useCapability` misreported a corrupt log as `MandateNotIssued`.
  */
 export const makeJsonlAuditLive = (storePath: string): MandateAuditService => {
   mkdirSync(dirname(storePath), { recursive: true })
 
-  const readEvents = (): ReadonlyArray<MandateAuditEvent> => {
-    try {
-      const text = readFileSync(storePath, "utf-8")
-      return text
-        .split("\n")
-        .filter((l) => l.length > 0)
-        .map((l) => JSON.parse(l) as MandateAuditEvent)
-    } catch {
-      return []
-    }
-  }
+  const readEvents = (): ReadonlyArray<MandateAuditEvent> =>
+    readJsonl(storePath) as ReadonlyArray<MandateAuditEvent>
 
   return {
     record: (event) => {
