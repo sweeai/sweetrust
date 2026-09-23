@@ -124,3 +124,82 @@ describe("verifyAuditChain — adversarial (DAN-641 envelope signing)", () => {
     expect(check(chain.slice(0, 2), signer).valid).toBe(true)
   })
 })
+
+// ============================================================================
+// DAN-1159 item 3: every input comes back as a verdict.
+// ============================================================================
+// verifyAuditChain is what an operator points at a log that someone else could
+// have written to. Its sibling verifySignedChain learned this on 2026-07-25
+// (adversarial passes V2, V3): an empty chain is not a clean bill of health, and
+// a verifier that THROWS on hostile input cannot be told apart from a broken
+// verifier. This function never got either fix. `[]` folded to valid:true, and
+// null, a non-SPKI key and a BigInt all crashed it.
+describe("verifyAuditChain — every input comes back as a verdict (DAN-1159 item 3)", () => {
+  /** Run the verifier and fail the test with the thrown message instead of crashing it. */
+  const verdict = (log: unknown[], signer: MandateSignerService, pinned = signer.publicKeyHex) => {
+    let result: ReturnType<typeof verifyAuditChain> | undefined
+    expect(() => {
+      result = verifyAuditChain(log as SignedMandateAuditEvent[], signer, { trustedSignerPublicKeyHex: pinned })
+    }).not.toThrow()
+    return result!
+  }
+
+  test("an empty log is NOT valid: nothing to check is not a pass", () => {
+    const signer = ed25519Signer()
+    const result = verdict([], signer)
+    expect(result.valid).toBe(false)
+    expect(result.reason).toBe("empty-chain")
+    expect(result.firstInvalidIndex).toBeNull()
+  })
+
+  test("a null record is malformed, not a crash", () => {
+    const signer = ed25519Signer()
+    const result = verdict([null], signer)
+    expect(result).toMatchObject({ valid: false, firstInvalidIndex: 0, reason: "malformed-record" })
+  })
+
+  test("a non-object record (a string, a number) is malformed", () => {
+    const signer = ed25519Signer()
+    const [good] = buildChain(signer, EVENTS)
+    expect(verdict([good, "revoke M1"], signer)).toMatchObject({ valid: false, firstInvalidIndex: 1, reason: "malformed-record" })
+    expect(verdict([42], signer)).toMatchObject({ valid: false, firstInvalidIndex: 0, reason: "malformed-record" })
+  })
+
+  test("a pinned key that is not an SPKI key comes back malformed, not 'Failed to read asymmetric key'", () => {
+    // The pin is a string comparison, so a record carrying the same junk as the
+    // pin passes it and reaches createPublicKey. That is where it used to throw.
+    const signer = ed25519Signer()
+    const [good] = buildChain(signer, EVENTS)
+    const result = verdict([{ ...good!, signerPublicKeyHex: "abcd" }], signer, "abcd")
+    expect(result).toMatchObject({ valid: false, firstInvalidIndex: 0, reason: "malformed-record" })
+  })
+
+  test("a BigInt in a payload is malformed (canonicalJSON cannot encode it), not a crash", () => {
+    const signer = ed25519Signer()
+    const [good] = buildChain(signer, EVENTS)
+    const result = verdict([{ ...good!, payload: { ...good!.payload, amount: 10n } }], signer)
+    expect(result).toMatchObject({ valid: false, firstInvalidIndex: 0, reason: "malformed-record" })
+  })
+
+  test("a record that verifies but cannot be HASHED for the next link is malformed, not a crash", () => {
+    // The signature covers domain, payload, previousHash and signedAt. A field
+    // OUTSIDE that preimage leaves the signature valid, and only the next
+    // record's link computation (canonicalJSON of the whole record) meets it.
+    const signer = ed25519Signer()
+    const chain = buildChain(signer, EVENTS)
+    const hostile = [{ ...chain[0]!, extra: 1n }, chain[1]!]
+    const result = verdict(hostile, signer)
+    expect(result.valid).toBe(false)
+    expect(result.reason).toBe("malformed-record")
+  })
+
+  test("a malformed verdict says what could not be checked", () => {
+    const signer = ed25519Signer()
+    expect(verdict([null], signer)).toHaveProperty("detail", expect.stringContaining("record 0"))
+  })
+
+  test("CONTROL: an honest chain still verifies through the same wrapper", () => {
+    const signer = ed25519Signer()
+    expect(verdict(buildChain(signer, EVENTS), signer)).toMatchObject({ valid: true, reason: "ok" })
+  })
+})
