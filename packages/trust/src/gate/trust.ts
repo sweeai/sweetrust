@@ -436,10 +436,18 @@ export interface Receipt {
    * then threw. Without it the log has a hole shaped like "everything that went
    * wrong" — see makeSink. The action may or may not have taken effect; that
    * uncertainty is the point of recording it.
+   *
+   * `declassify-refused` is RESERVED, not yet produced (DAN-1159 item 4b). It
+   * is the evidence a declassifier's refusal should leave. Today the
+   * declassifiers take no log, so a refused ascent records nothing (SECURITY.md,
+   * "A declassifier's refusal leaves no receipt"). The member exists before the
+   * first publish because adding one later breaks every exhaustive switch;
+   * emitting it through an optional log is additive and can follow.
    */
   readonly decision:
     | "executed" | "refused" | "observed" | "warned"
     | "judgment-blocked" | "judgment-flagged" | "errored"
+    | "declassify-refused"
   readonly args: Record<string, { value: unknown; tier: Tier; provenance: string }>
   readonly reason?: string
   readonly prevHash: string
