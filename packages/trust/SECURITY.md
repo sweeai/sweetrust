@@ -39,6 +39,18 @@ enforcement belongs to the on-chain layer.
 Use the tiers to find and shape your trust boundaries, and to make refusals auditable. Do not use
 them as the only thing standing between an attacker and custody.
 
+### A mandate scope is a capability: whoever holds the object holds the authority
+
+Authority in `@swee/trust/mandate` is **possession of a scope object this module issued**. A
+copy, a JSON round trip or a hand-written literal is refused, however faithfully it copies the
+fields. Two things follow for a host:
+
+- **Hand each agent its own scope and nothing above it.** Passing an agent its parent's scope
+  object hands it the parent's authority. A child's `parentScope` is a detached view and carries
+  none, so the child itself is safe to hand over.
+- **A scope does not survive a process boundary.** A rehydrated scope cannot invoke. Authority
+  that must cross processes belongs to the on-chain layer. See `docs/adr/0001-authority-is-possession-of-an-issued-scope.md`.
+
 ### Tail truncation is catchable only by an anchor
 
 A signed chain that has had its most recent records removed is a **valid shorter chain.** Nothing
