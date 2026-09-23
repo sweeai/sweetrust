@@ -89,7 +89,12 @@ describe("multi-tier issue functions — happy path (spec I3)", () => {
       audit,
     )
     expect(projectScope.tier).toBe("project")
-    expect(projectScope.parentScope).toBe(orgScope)
+    // DAN-1157: parentScope is a detached VIEW of the grantor: same content, a
+    // different object. Until DAN-1157 this line pinned identity (`toBe`), which
+    // pinned the leak: the child carried its grantor's authority by reference.
+    // authority-binding.test.ts proves the view cannot invoke, revoke or issue.
+    expect(projectScope.parentScope).toEqual(orgScope)
+    expect(projectScope.parentScope).not.toBe(orgScope)
     expect(projectScope.parentMandateId).toBe(orgScope.id)
     expect(projectScope.capabilities.length).toBe(2)
   })
@@ -119,7 +124,9 @@ describe("multi-tier issue functions — happy path (spec I3)", () => {
       audit,
     )
     expect(agentScope.tier).toBe("agent")
-    expect(agentScope.parentScope).toBe(projectScope)
+    // DAN-1157: a detached view, not the grantor itself (see the project case above).
+    expect(agentScope.parentScope).toEqual(projectScope)
+    expect(agentScope.parentScope).not.toBe(projectScope)
     expect(agentScope.parentMandateId).toBe(projectScope.id)
     expect(agentScope.capabilities.length).toBe(1)
   })

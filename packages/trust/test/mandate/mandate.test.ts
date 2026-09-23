@@ -204,7 +204,7 @@ describe("revokeMandate", () => {
       { grantor: TEST_GRANTOR, capabilities: [CapA] as const, rationale: "test" },
       audit,
     )
-    revokeMandate({ mandateId: scope.id, revoker: TEST_GRANTOR, rationale: "cleanup" }, audit)
+    revokeMandate({ mandateId: scope.id, revokerScope: scope, rationale: "cleanup" }, audit)
     expect(audit.isRevoked(scope.id)).toBe(true)
   })
 
@@ -214,9 +214,16 @@ describe("revokeMandate", () => {
       { grantor: TEST_GRANTOR, capabilities: [CapA] as const, rationale: "test" },
       audit,
     )
+    // Two principals (DAN-1157): the stranger holds a GENUINE scope, just one
+    // in a different tree. Possession of a real scope is not authority over a
+    // mandate outside its chain.
+    const strangerScope = issueRootMandate(
+      { grantor: STRANGER, capabilities: [CapA] as const, rationale: "a separate tree" },
+      audit,
+    )
     const result = either(() =>
       revokeMandate(
-        { mandateId: scope.id, revoker: STRANGER, rationale: "unauthorized revocation attempt" },
+        { mandateId: scope.id, revokerScope: strangerScope, rationale: "unauthorized revocation attempt" },
         audit,
       ),
     )
@@ -232,7 +239,7 @@ describe("revokeMandate", () => {
       { grantor: TEST_GRANTOR, capabilities: [CapA] as const, rationale: "test" },
       audit,
     )
-    revokeMandate({ mandateId: scope.id, revoker: TEST_GRANTOR, rationale: "cleanup" }, audit)
+    revokeMandate({ mandateId: scope.id, revokerScope: scope, rationale: "cleanup" }, audit)
     const result = either(() => useCapability({ mandate: scope, capability: CapA }, audit))
     expect(result._tag).toBe("Left")
     if (result._tag === "Left") {
@@ -246,9 +253,9 @@ describe("revokeMandate", () => {
       { grantor: TEST_GRANTOR, capabilities: [CapA] as const, rationale: "test" },
       audit,
     )
-    revokeMandate({ mandateId: scope.id, revoker: TEST_GRANTOR, rationale: "first revoke" }, audit)
+    revokeMandate({ mandateId: scope.id, revokerScope: scope, rationale: "first revoke" }, audit)
     revokeMandate(
-      { mandateId: scope.id, revoker: TEST_GRANTOR, rationale: "second revoke (idempotent no-op)" },
+      { mandateId: scope.id, revokerScope: scope, rationale: "second revoke (idempotent no-op)" },
       audit,
     )
     const events = audit.query(scope.id)
@@ -273,7 +280,7 @@ describe("revokeMandate", () => {
     // Root grantor (TEST_GRANTOR) should be able to revoke child's mandate
     // because TEST_GRANTOR is an ancestor in the delegation chain.
     revokeMandate(
-      { mandateId: child.id, revoker: TEST_GRANTOR, rationale: "ancestor revocation" },
+      { mandateId: child.id, revokerScope: root, rationale: "ancestor revocation" },
       audit,
     )
     expect(audit.isRevoked(child.id)).toBe(true)

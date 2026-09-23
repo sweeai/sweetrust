@@ -112,7 +112,7 @@ describe("DAN-637: useCapability ancestor-revocation reconstructs from the audit
       },
       audit,
     )
-    revokeMandate({ mandateId: root.id, revoker: ARTHUR, rationale: "org kill switch" }, audit)
+    revokeMandate({ mandateId: root.id, revokerScope: root, rationale: "org kill switch" }, audit)
 
     const result = either(() => useCapability({ mandate: child, capability: CapA }, audit))
     expect(result._tag).toBe("Left")
@@ -125,7 +125,7 @@ describe("DAN-637: useCapability ancestor-revocation reconstructs from the audit
   test("revoke org, then use an agent-tier mandate issued via the typed path → AncestorMandateRevoked", () => {
     const audit = makeInMemoryAuditLive()
     const { orgScope, agentScope } = issueTypedChain(audit)
-    revokeMandate({ mandateId: orgScope.id, revoker: ARTHUR, rationale: "org kill switch" }, audit)
+    revokeMandate({ mandateId: orgScope.id, revokerScope: orgScope, rationale: "org kill switch" }, audit)
 
     const result = either(() => useCapability({ mandate: agentScope, capability: CapA }, audit))
     expect(result._tag).toBe("Left")
@@ -139,7 +139,7 @@ describe("DAN-637: useCapability ancestor-revocation reconstructs from the audit
     const audit = makeInMemoryAuditLive()
     const { projectScope, agentScope } = issueTypedChain(audit)
     revokeMandate(
-      { mandateId: projectScope.id, revoker: PROJECT_LEAD, rationale: "project shutdown" },
+      { mandateId: projectScope.id, revokerScope: projectScope, rationale: "project shutdown" },
       audit,
     )
 
@@ -154,7 +154,7 @@ describe("DAN-637: useCapability ancestor-revocation reconstructs from the audit
   test("forged {...realScope, parentScope:null} does NOT sever the revocation chain → AncestorMandateRevoked", () => {
     const audit = makeInMemoryAuditLive()
     const { orgScope, agentScope } = issueTypedChain(audit)
-    revokeMandate({ mandateId: orgScope.id, revoker: ARTHUR, rationale: "org kill switch" }, audit)
+    revokeMandate({ mandateId: orgScope.id, revokerScope: orgScope, rationale: "org kill switch" }, audit)
 
     // The battle-test PoC: real id + real capabilities pass the grant-event
     // subset check; the severed pointer used to defeat the ancestor walk.
@@ -179,7 +179,7 @@ describe("DAN-637: useCapability ancestor-revocation reconstructs from the audit
     const wire = JSON.stringify({ ...agentScope, parentScope: null })
     const rehydrated = JSON.parse(wire)
 
-    revokeMandate({ mandateId: orgScope.id, revoker: ARTHUR, rationale: "org kill switch" }, audit)
+    revokeMandate({ mandateId: orgScope.id, revokerScope: orgScope, rationale: "org kill switch" }, audit)
 
     const result = either(() =>
       useCapability({ mandate: rehydrated as any, capability: CapA }, audit),
@@ -194,7 +194,7 @@ describe("DAN-637: useCapability ancestor-revocation reconstructs from the audit
   test("leaf revoked directly still reports MandateRevoked (error-taxonomy precedence preserved)", () => {
     const audit = makeInMemoryAuditLive()
     const { agentScope } = issueTypedChain(audit)
-    revokeMandate({ mandateId: agentScope.id, revoker: AGENT_BOT, rationale: "leaf revoke" }, audit)
+    revokeMandate({ mandateId: agentScope.id, revokerScope: agentScope, rationale: "leaf revoke" }, audit)
 
     const result = either(() => useCapability({ mandate: agentScope, capability: CapA }, audit))
     expect(result._tag).toBe("Left")
@@ -249,21 +249,47 @@ describe("DAN-637 hardening: audit-log walks terminate on a cyclic parentMandate
       parentScope: null,
     }) as any
 
+  /**
+   * A GENUINE org scope whose log is then tampered so that its grant event
+   * names the org as its own parent.
+   *
+   * Until DAN-1157 these tests hand-built a scope literal for a grant written
+   * straight into the log. After DAN-1157 such a literal is a forgery by
+   * definition (it was never issued), so it could no longer exercise the
+   * success or revocation paths. The cycle therefore lives in the LOG, where an
+   * attacker with write access would put it, around a real scope. The literal
+   * survives in the last test below, pinned as a refusal.
+   */
+  const selfCyclicOrg = () => {
+    const base = makeInMemoryAuditLive()
+    let cyclicId: MandateId | null = null
+    const audit: MandateAuditService = {
+      record: (event) => base.record(event),
+      isRevoked: (id) => base.isRevoked(id),
+      query: (id) =>
+        id === cyclicId
+          ? base.query(id).map((e) => (e.type === "grant" ? { ...e, parentMandateId: id } : e))
+          : base.query(id),
+    }
+    const org = issueOrgMandate(
+      { grantor: ARTHUR, capabilities: [CapA] as const, rationale: "org" },
+      audit,
+    )
+    cyclicId = org.id // from here on, the log says the org is its own parent
+    return { audit, org }
+  }
+
   test("useCapability terminates (and records) on a self-cyclic log when unrevoked", () => {
-    const audit = makeInMemoryAuditLive()
-    recordSelfCyclicGrant(audit, "MAN_CYCLE")
+    const { audit, org } = selfCyclicOrg()
     // If the guard is missing this hangs forever; reaching the assertion proves termination.
-    useCapability({ mandate: cyclicScope("MAN_CYCLE"), capability: CapA }, audit)
-    expect(audit.query("MAN_CYCLE" as any).filter((e) => e.type === "invoke").length).toBe(1)
+    useCapability({ mandate: org, capability: CapA }, audit)
+    expect(audit.query(org.id).filter((e) => e.type === "invoke").length).toBe(1)
   })
 
   test("useCapability terminates AND still enforces revocation on a self-cyclic log", () => {
-    const audit = makeInMemoryAuditLive()
-    recordSelfCyclicGrant(audit, "MAN_CYCLE")
-    revokeMandate({ mandateId: "MAN_CYCLE" as any, revoker: ARTHUR, rationale: "kill" }, audit)
-    const result = either(() =>
-      useCapability({ mandate: cyclicScope("MAN_CYCLE"), capability: CapA }, audit),
-    )
+    const { audit, org } = selfCyclicOrg()
+    revokeMandate({ mandateId: org.id, revokerScope: org, rationale: "kill" }, audit)
+    const result = either(() => useCapability({ mandate: org, capability: CapA }, audit))
     expect(result._tag).toBe("Left")
     if (result._tag === "Left") {
       expect(result.left._tag).toBe("MandateRevoked")
@@ -271,12 +297,27 @@ describe("DAN-637 hardening: audit-log walks terminate on a cyclic parentMandate
   })
 
   test("revokeMandate terminates on a self-cyclic log", () => {
+    const { audit, org } = selfCyclicOrg()
+    // The org's holder presents the org scope, which is in the (cyclic) chain,
+    // so revocation is authorized and must complete rather than loop.
+    revokeMandate({ mandateId: org.id, revokerScope: org, rationale: "kill" }, audit)
+    expect(audit.isRevoked(org.id)).toBe(true)
+  })
+
+  test("a hand-built scope for a log-only mandate terminates AND is refused — it was never issued (DAN-1157)", () => {
     const audit = makeInMemoryAuditLive()
     recordSelfCyclicGrant(audit, "MAN_CYCLE")
-    // ARTHUR is the grantor in the (cyclic) chain, so revocation is authorized
-    // and must complete rather than loop.
-    revokeMandate({ mandateId: "MAN_CYCLE" as any, revoker: ARTHUR, rationale: "kill" }, audit)
-    expect(audit.isRevoked("MAN_CYCLE" as any)).toBe(true)
+    // Before DAN-1157 this exact call SUCCEEDED and recorded an invoke. The
+    // literal copies every field of a grant event an attacker can write or
+    // read, which is precisely the credential DAN-1157 stopped accepting.
+    const result = either(() =>
+      useCapability({ mandate: cyclicScope("MAN_CYCLE"), capability: CapA }, audit),
+    )
+    expect(result._tag).toBe("Left")
+    if (result._tag === "Left") {
+      expect(result.left._tag).toBe("MandateScopeForged")
+    }
+    expect(audit.query("MAN_CYCLE" as any).filter((e) => e.type === "invoke").length).toBe(0)
   })
 })
 
@@ -617,7 +658,7 @@ describe("DAN-640: useCapability fails CLOSED on a broken (missing mid-chain gra
   test("a complete, valid chain with ORG revoked still throws AncestorMandateRevoked (fix only fires on ACTUAL breaks)", () => {
     const audit = makeInMemoryAuditLive()
     const { orgScope, agentScope: realAgent } = issueTypedChain(audit)
-    revokeMandate({ mandateId: orgScope.id, revoker: ARTHUR, rationale: "kill" }, audit)
+    revokeMandate({ mandateId: orgScope.id, revokerScope: orgScope, rationale: "kill" }, audit)
     const result = either(() => useCapability({ mandate: realAgent, capability: CapA }, audit))
     expect(result._tag).toBe("Left")
     if (result._tag === "Left") {

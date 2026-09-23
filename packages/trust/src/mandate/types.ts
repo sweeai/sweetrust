@@ -155,6 +155,19 @@ export type MandateError =
       readonly _tag: "DirectConstructionRejected"
       readonly reason: string
     }
+  | {
+      // Raised at issue time when the grantor's tier cannot delegate the
+      // requested tier: agent → anything, org → agent (skipping project), or a
+      // non-org grantor through the legacy issueMandate, which stamps
+      // "organization" on what it mints. The compiler refuses these for typed
+      // callers; this is the runtime half for `as any` and JavaScript callers.
+      // `grantorTier` is read from an issued, frozen scope, so it is fact.
+      // (DAN-1157, F3.)
+      readonly _tag: "TierLadderViolation"
+      readonly grantorMandateId: MandateId
+      readonly grantorTier: MandateTier
+      readonly requestedTier: MandateTier
+    }
 
 /**
  * TriggerSource — forensic primitive distinguishing audit records that

@@ -94,7 +94,7 @@ const main = (): void => {
   revokeMandate(
     {
       mandateId: agentScope.id,
-      revoker: ARTHUR,
+      revokerScope: arthurScope,
       rationale: "demo cleanup; agent task complete",
     },
     audit,
