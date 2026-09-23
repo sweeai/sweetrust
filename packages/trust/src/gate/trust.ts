@@ -596,16 +596,43 @@ export type SinkResult<R> =
   | { readonly ok: true; readonly result: R; readonly receipt: Receipt }
   | { readonly ok: false; readonly refusal: string; readonly receipt: Receipt }
 
-/** See makeSink's `redact` option — applied to receipt rendering only. */
+/**
+ * The JSON a receipt records for a value. Identical to `JSON.stringify` except
+ * that a BigInt, which it refuses, is written as its digits plus "n", the way
+ * JavaScript writes the literal. Every Sui amount in MIST is a bigint.
+ *
+ * This lives HERE, in gate's receipt rendering, and deliberately not in
+ * mandate's `canonicalJSON`: that function defines signed bytes for the whole
+ * rail, and changing it would move every mandate signature (AGENTS.md, "One
+ * canonicalization across the rail"). By the time a receipt reaches a signer,
+ * its arguments are already plain JSON.
+ */
+const receiptJSON = (value: unknown): string | undefined =>
+  JSON.stringify(value, (_key, v: unknown) => (typeof v === "bigint" ? `${v}n` : v))
+
+/**
+ * See makeSink's `redact` option — applied to receipt rendering only.
+ *
+ * Returns a SNAPSHOT, the JSON form of the value at the moment of the call.
+ * It used to return the caller's object itself (DAN-1159 item 2), so a caller
+ * who edited that object after a successful call rewrote the receipt, and
+ * `verifyChain()` then reported the log as tampered. What the receipt holds is
+ * now exactly what its hash covers. For every value that serialized before,
+ * the hashed bytes are unchanged.
+ *
+ * Throws when the value cannot be serialized at all (a cycle, a throwing getter
+ * or `toJSON`). makeSink turns that into a violation BEFORE `execute()`.
+ */
 function renderForReceipt(value: unknown, policy: "raw" | "hash" | "truncate"): unknown {
+  const json = receiptJSON(value)
   if (policy === "hash") {
-    return "sha256:" + createHash("sha256").update(JSON.stringify(value) ?? "undefined").digest("hex")
+    return "sha256:" + createHash("sha256").update(json ?? "undefined").digest("hex")
   }
   if (policy === "truncate") {
-    const s = typeof value === "string" ? value : (JSON.stringify(value) ?? "undefined")
+    const s = typeof value === "string" ? value : typeof value === "bigint" ? `${value}n` : (json ?? "undefined")
     return s.length > 64 ? s.slice(0, 64) + "…" : s
   }
-  return value
+  return json === undefined ? undefined : JSON.parse(json)
 }
 
 /**
@@ -659,6 +686,25 @@ export function makeSink<Args extends Record<string, Sourced<any>>, R>(spec: {
       spec.redact !== undefined && Object.hasOwn(spec.redact, k)
         ? ((spec.redact as Record<string, "raw" | "hash" | "truncate" | undefined>)[k] ?? "raw")
         : "raw"
+
+    // No action without its receipt (DAN-1159 item 2). Every argument is
+    // rendered HERE, before any decision, so the receipt can always be
+    // written. The order used to be execute() first and serialize second, so an
+    // argument JSON.stringify refuses (a cycle; a BigInt before `receiptJSON`)
+    // threw inside log.append AFTER the side effect: the action ran and left no
+    // receipt, and the chain still verified. An argument that cannot be
+    // rendered is recorded as a placeholder and raised as a violation, and the
+    // adoption ladder decides as it does for any other: `enforce` refuses before
+    // execute(), `observe` and `warn` run it with the gap written down.
+    const record = (key: string, value: unknown): unknown => {
+      try {
+        return renderForReceipt(value, redactFor(key))
+      } catch (err) {
+        const why = (err instanceof Error ? err.message : String(err)).split("\n")[0]
+        violations.push(`${key} cannot be written to a receipt (${why}), so an action it feeds could not be evidenced`)
+        return `[unrecordable: ${why}]`
+      }
+    }
     for (const key of Object.keys(spec.requires) as Array<keyof Args & string>) {
       const arg = args[key]
       if (arg === undefined) {
@@ -687,7 +733,7 @@ export function makeSink<Args extends Record<string, Sourced<any>>, R>(spec: {
       // whether a violation refuses — the adoption ladder is unchanged.
       if (!Sourced.is(arg as unknown)) {
         rendered[key] = {
-          value: renderForReceipt(arg as unknown, redactFor(key)),
+          value: record(key, arg as unknown),
           tier: "untrusted",
           provenance: "FORGED — failed the Sourced brand check; not a value this rail issued",
         }
@@ -697,7 +743,7 @@ export function makeSink<Args extends Record<string, Sourced<any>>, R>(spec: {
         continue
       }
 
-      rendered[key] = { value: renderForReceipt(arg.value, redactFor(key)), tier: arg.tier, provenance: arg.describe() }
+      rendered[key] = { value: record(key, arg.value), tier: arg.tier, provenance: arg.describe() }
       if (!meetsTier(arg.tier, spec.requires[key])) {
         violations.push(`${key} requires ${spec.requires[key]} but is ${arg.describe()}`)
       }
@@ -739,8 +785,8 @@ export function makeSink<Args extends Record<string, Sourced<any>>, R>(spec: {
       // finding in itself.
       const isSourced = Sourced.is(arg as unknown)
       rendered[key] = isSourced
-        ? { value: renderForReceipt(arg.value, redactFor(key)), tier: arg.tier, provenance: `UNDECLARED — ${arg.describe()}` }
-        : { value: renderForReceipt(arg, redactFor(key)), tier: "untrusted", provenance: "UNDECLARED — not a Sourced value" }
+        ? { value: record(key, arg.value), tier: arg.tier, provenance: `UNDECLARED — ${arg.describe()}` }
+        : { value: record(key, arg), tier: "untrusted", provenance: "UNDECLARED — not a Sourced value" }
       violations.push(`${key} was passed but is not declared in requires — the sink has no stated appetite for it`)
     }
 
