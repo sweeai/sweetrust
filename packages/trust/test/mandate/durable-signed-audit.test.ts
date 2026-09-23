@@ -278,8 +278,8 @@ describe("F4 — corruption fails closed, and the store never forks its chain", 
 // So one bad byte blanked the log, and a DIRECT isRevoked flipped from true to
 // false. useCapability happened to survive (the grant vanished with the
 // revoke, so it refused MandateNotIssued), but a host that asks isRevoked
-// itself does not. The daemon's durability plan (sweeai daemon kernel.ts:146)
-// is exactly this store. The signed store is the one to use; this one must
+// itself does not. A host that adopts this store as its durable log inherits
+// exactly that failure. The signed store is the one to use; this one must
 // still never lie.
 describe("F5 — the unsigned JSONL store fails closed", () => {
   const revokedInUnsigned = (path: string) => {

@@ -1,8 +1,8 @@
 /**
  * @sweetrust/mandate v1.0 — multi-tier hierarchy + signed audit demo
  *
- * The AIE WF talk demo Act III: working code that demonstrates the moat
- * a frontier lab structurally cannot ship.
+ * Working code for the whole authority story: a three-tier hierarchy where every
+ * grant, use and revocation lands on one Ed25519-signed hash chain.
  *
  * Flow:
  *   1. Arthur issues a v1.0 organization-tier mandate with three capabilities

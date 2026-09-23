@@ -64,7 +64,7 @@ test/
 - **The root barrel is curated on purpose.** `src/index.ts` star-exports mandate and gate but names verify's surface by hand. Two `export *` clauses offering the same name make it ambiguous, and ESM resolves ambiguity by **silently omitting** the name — no error, no warning. Do not "simplify" it to three stars.
 - **TCB honesty.** Never claim unforgeability for this package. In-process TypeScript is observe/warn/dev-time authority; the Move cage owns unforgeable enforcement. Keep the honest-limits comment blocks in `src/gate/trust.ts` and `src/verify/verify.ts` intact.
 - **Receipt hash discipline.** `ReceiptLog.append`, `verifyChain`, and verify's interior-hash recomputation must agree byte-for-byte on JSON body key order. Changing the body shape is a three-site change — grep before touching.
-- **Wrap, never fork.** Integrations that need an external service live *outside* this package (`the issue-tracker adapter` is the model). That is what keeps the zero-dependency claim true.
+- **Wrap, never fork.** Integrations that need an external service live *outside* this package, as separate adapter packages. That is what keeps the zero-dependency claim true.
 - **Constitutional pre-check before persistence.** Any function that persists an authored string must run `constitutionalPreCheck` first. Inherited v0.0 I9 invariant.
 - **No `// @ts-ignore`.** Use `// @ts-expect-error` with a comment saying why the directive is load-bearing, on the line immediately preceding the offending expression. A `@ts-expect-error` in a test is a compile-time invariant proof — if TypeScript ever reports one as unused, that is a five-alarm fire meaning the type-level invariant regressed. Never silently delete one.
 

@@ -4,7 +4,7 @@
  * Per the mandate capability-declaration specification v0.0.
  *
  * Inheritance: per spec I9, this module imports the constitutional pre-check
- * primitive from ./security.ts (formerly the standalone @private/security package, folded back into mandate 2026-07-19 per the kernel audit). Mandate metadata (rationale strings) is exactly the attack
+ * primitive from ./security.ts (formerly a standalone package, folded back into mandate 2026-07-19). Mandate metadata (rationale strings) is exactly the attack
  * surface the pre-check exists to defend.
  */
 import { randomBytes } from "node:crypto"

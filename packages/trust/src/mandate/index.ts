@@ -62,6 +62,6 @@ export {
   type MandateSignerService,
 } from "./signer.ts"
 
-// Folded from @private/security (2026-07-19): constitutional prompt-injection pre-check.
+// Folded from a formerly standalone package (2026-07-19): constitutional prompt-injection pre-check.
 export { MandateFailure } from "./errors.ts"
 export * from "./security.ts"

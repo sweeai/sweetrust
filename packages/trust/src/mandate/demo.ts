@@ -27,8 +27,8 @@ import {
 import type { GrantorId, MandateError } from "./types.ts"
 
 // Example capabilities. In production these would be defined by domain
-// modules (e.g., @private/fs exports FileRead + FileWrite; @private/shell exports
-// ShellExec). For the demo we declare them here.
+// modules (e.g., a filesystem module exports FileRead + FileWrite; a shell
+// module exports ShellExec). For the demo we declare them here.
 const FileRead = defineCapability("demo/FileRead")
 const FileWrite = defineCapability("demo/FileWrite")
 const ShellExec = defineCapability("demo/ShellExec")

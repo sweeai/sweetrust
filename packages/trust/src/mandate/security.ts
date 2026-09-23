@@ -1,5 +1,5 @@
 /**
- * @private/security — foundational security primitives.
+ * Constitutional pre-check — foundational security primitives.
  *
  * v0.2.0 ships ONE primitive: constitutionalPreCheck — a compile-time-inlined
  * catalog of prompt-injection patterns (MIP-1, MIP-3, MIP-4, MIP-5; MIP-2 +

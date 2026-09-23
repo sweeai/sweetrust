@@ -1,6 +1,6 @@
 /**
- * F1 / F2 / F3 — the authority defects from
- * ~/workspace/SWEETRUST-AUDIT-2026-08-30-STOPSHIP.md.
+ * F1 / F2 / F3 — the authority defects found by the 2026-08-30 pre-publish
+ * stop-ship audit.
  *
  * 🔑 WHY THIS FILE EXISTS AT ALL.
  *

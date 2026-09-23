@@ -546,16 +546,16 @@ export class ReceiptLog {
   }
 }
 
-// ── Judgment seam (the a hackday lesson — complement, never compete) ──────────
+// ── Judgment seam (complement, never compete) ────────────────────────────────
 // Trust tiers + the cage catch bad PEDIGREE and out-of-bounds actions. Neither
 // catches "in-bounds but WRONG": a payment in-budget, to an allowlisted payee,
 // that still isn't what the principal meant. That gap is judgment's job — a
-// calibrated model scoring the action against declared intent. Two rules from
-// the a hackday hack day: (1) judgment is FALLIBLE (it can be fooled), so it must
+// calibrated model scoring the action against declared intent. Two rules govern
+// it: (1) judgment is FALLIBLE (it can be fooled), so it must
 // never be the only wall; (2) judgment is SELF-AWARE (it reports calibrated
 // confidence and, crucially, says "unsure") — an unsure verdict defers to a
-// human, it does not confidently block. We CONSUME judgment via this seam; we
-// do not build a judgment model (SWEE is not a model company).
+// human, it does not confidently block. We CONSUME judgment via this seam; this
+// package does not ship a judgment model.
 
 export interface JudgmentVerdict {
   readonly assessment: "match" | "mismatch" | "unsure"
@@ -570,9 +570,9 @@ export interface JudgmentProvider {
 }
 
 /**
- * A stand-in provider for the demo (act 4). Real integration = a calibrated
- * scorer (e.g. a hackday) behind the same interface — relationship-gated, swapped
- * in with zero call-site changes. Matches a declared allowlist of intended
+ * A stand-in provider for demos and tests. Real integration = an external
+ * calibrated scorer behind the same interface, swapped in with zero call-site
+ * changes. Matches a declared allowlist of intended
  * payees/amounts; anything outside it is "mismatch" (or "unsure" near the edge).
  */
 export function mockJudgmentProvider(intent: {
@@ -662,7 +662,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
   readonly log: ReceiptLog
   readonly execute: (args: Args) => R
   /**
-   * Optional judgment wall (the a hackday seam). Runs AFTER tier checks pass —
+   * Optional judgment wall (the judgment seam). Runs AFTER tier checks pass —
    * it exists to catch the in-bounds-but-wrong action the tiers structurally
    * cannot. `floor` is the confidence a "mismatch" must clear to block; below
    * it, or on "unsure", the action is FLAGGED (allowed, but the doubt is on the
