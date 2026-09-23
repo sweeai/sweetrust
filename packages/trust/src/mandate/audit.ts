@@ -13,13 +13,71 @@
  */
 import { appendFileSync, mkdirSync, readFileSync } from "node:fs"
 import { dirname } from "node:path"
-import { canonicalJSON, MANDATE_AUDIT_DOMAIN, sha256Hex, type MandateSignerService } from "./signer.ts"
+import {
+  canonicalJSON,
+  MANDATE_AUDIT_DOMAIN,
+  sha256Hex,
+  verifyAuditChain,
+  type MandateSignerService,
+} from "./signer.ts"
 import type {
   MandateAuditEvent,
   MandateAuditService,
+  MandateError,
   MandateId,
   SignedMandateAuditEvent,
 } from "./types.ts"
+
+type AuditLogCorrupt = Extract<MandateError, { readonly _tag: "AuditLogCorrupt" }>
+
+const corrupt = (
+  storePath: string,
+  line: number,
+  reason: AuditLogCorrupt["reason"],
+  detail?: string,
+): never => {
+  const error: AuditLogCorrupt = {
+    _tag: "AuditLogCorrupt",
+    storePath,
+    line,
+    reason,
+    ...(detail === undefined ? {} : { detail }),
+  }
+  throw error
+}
+
+/**
+ * Read a JSONL audit file, fail-CLOSED (DAN-1159). A missing file is an empty
+ * log. Every line must parse to an object, or the read throws `AuditLogCorrupt`
+ * naming it. The line is never skipped: dropping a revoke while keeping its
+ * grant resurrects a revoked mandate. And the file is never read as empty,
+ * which is what flipped `isRevoked` from true to false on one bad byte (F5).
+ * Any other I/O error propagates as itself: unreadable is not corrupt.
+ */
+const readJsonl = (storePath: string): ReadonlyArray<unknown> => {
+  let text: string
+  try {
+    text = readFileSync(storePath, "utf-8")
+  } catch (err) {
+    if ((err as { readonly code?: unknown }).code === "ENOENT") return []
+    throw err
+  }
+  const lines = text.split("\n")
+  // Every record ends in "\n", so an intact file splits to one trailing "".
+  if (lines[lines.length - 1] === "") lines.pop()
+  return lines.map((line, i) => {
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(line)
+    } catch (err) {
+      return corrupt(storePath, i + 1, "unparseable", err instanceof Error ? err.message : String(err))
+    }
+    if (typeof parsed !== "object" || parsed === null) {
+      return corrupt(storePath, i + 1, "unparseable", `line ${i + 1} is not a record`)
+    }
+    return parsed
+  })
+}
 
 /**
  * In-memory audit log. Tests use this; production uses JsonlAudit.
@@ -100,39 +158,84 @@ export const makeInMemorySignedAuditLive = (
   return { mandateAudit, signedAudit }
 }
 
+/**
+ * makeJsonlSignedAuditLive — the durable, signed audit log. Like
+ * `makeInMemorySignedAuditLive`, it returns BOTH surfaces over one file:
+ * `mandateAudit` is the `MandateAuditService` that issue, use and revoke take,
+ * and it signs and chains every event it records.
+ *
+ * Before DAN-1159 this returned only the signed surface, so it could not be
+ * wired in as the audit log at all. A host had to pick the unsigned JSONL store
+ * (durable, but anyone who can append to the file can write, delete or blank a
+ * revoke) or this one (signed, but no `isRevoked`). Signed or durable, never
+ * both (F4).
+ *
+ * Every read re-parses AND re-verifies the whole file against the store's
+ * pinned key, `signer.publicKeyHex`: the operator's key, or for a verifier-only
+ * signer, the operator's public key. Any failure throws `AuditLogCorrupt`,
+ * from `isRevoked` too, so a forged, deleted or unparseable line is refused,
+ * never obeyed and never hidden. Every append reads first, so the store refuses
+ * to append past corruption. It used to read a corrupt file as empty and sign
+ * the next record with previousHash null, a second genesis mid-file.
+ *
+ * Limits, stated rather than hidden: deleting the LAST lines leaves a valid
+ * shorter chain, which only an on-chain anchor detects (SECURITY.md). And
+ * appends are not locked across processes, so one store file needs one writer.
+ * Verifying on every read costs one Ed25519 verification per record per call.
+ * The previous version already re-parsed the whole file per call, so the
+ * complexity class is unchanged, but the constant is much larger.
+ */
 export const makeJsonlSignedAuditLive = (
   storePath: string,
   signer: MandateSignerService,
-): SignedMandateAuditService => {
+): { mandateAudit: MandateAuditService; signedAudit: SignedMandateAuditService } => {
   mkdirSync(dirname(storePath), { recursive: true })
+  const pin = { trustedSignerPublicKeyHex: signer.publicKeyHex }
 
   const readEvents = (): ReadonlyArray<SignedMandateAuditEvent> => {
-    try {
-      const text = readFileSync(storePath, "utf-8")
-      return text
-        .split("\n")
-        .filter((l) => l.length > 0)
-        .map((l) => JSON.parse(l) as SignedMandateAuditEvent)
-    } catch {
-      return []
+    const records = readJsonl(storePath) as ReadonlyArray<SignedMandateAuditEvent>
+    // A fresh store is an empty log, not an `empty-chain` verdict.
+    if (records.length === 0) return records
+    const verdict = verifyAuditChain(records, signer, pin)
+    if (!verdict.valid) {
+      // `empty-chain` is unreachable here, and every other failure names an index.
+      corrupt(
+        storePath,
+        (verdict.firstInvalidIndex ?? 0) + 1,
+        verdict.reason as AuditLogCorrupt["reason"],
+        verdict.detail,
+      )
     }
+    return records
   }
 
-  return {
-    recordSigned: (event) => {
-      const existing = readEvents()
-      const previousHash =
-        existing.length > 0
-          ? sha256Hex(canonicalJSON(existing[existing.length - 1]!))
-          : null
-      const signed = signer.sign({ payload: event, previousHash, domain: MANDATE_AUDIT_DOMAIN })
-      appendFileSync(storePath, JSON.stringify(signed) + "\n", "utf-8")
-      return signed
+  const signAndRecord = (event: MandateAuditEvent): SignedMandateAuditEvent => {
+    // Reading verifies, so corruption stops the append before anything is signed.
+    const existing = readEvents()
+    const previousHash =
+      existing.length > 0 ? sha256Hex(canonicalJSON(existing[existing.length - 1]!)) : null
+    const signed = signer.sign({ payload: event, previousHash, domain: MANDATE_AUDIT_DOMAIN })
+    appendFileSync(storePath, JSON.stringify(signed) + "\n", "utf-8")
+    return signed
+  }
+
+  const mandateAudit: MandateAuditService = {
+    record: (event) => {
+      signAndRecord(event)
     },
-    querySigned: (mandateId) =>
-      readEvents().filter((e) => e.payload.mandateId === mandateId),
+    query: (mandateId) =>
+      readEvents().filter((e) => e.payload.mandateId === mandateId).map((e) => e.payload),
+    isRevoked: (mandateId) =>
+      readEvents().some((e) => e.payload.type === "revoke" && e.payload.mandateId === mandateId),
+  }
+
+  const signedAudit: SignedMandateAuditService = {
+    recordSigned: (event) => signAndRecord(event),
+    querySigned: (mandateId) => readEvents().filter((e) => e.payload.mandateId === mandateId),
     listAllSigned: () => readEvents(),
   }
+
+  return { mandateAudit, signedAudit }
 }
 
 /**

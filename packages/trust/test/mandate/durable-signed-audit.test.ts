@@ -18,7 +18,7 @@ import { appendFileSync, mkdtempSync, readFileSync, writeFileSync } from "node:f
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, test } from "vitest"
-import { makeJsonlSignedAuditLive, type SignedMandateAuditService } from "../../src/mandate/audit.ts"
+import { makeJsonlSignedAuditLive } from "../../src/mandate/audit.ts"
 import {
   defineCapability,
   issueOrgMandate,
@@ -37,7 +37,6 @@ import {
 import type {
   GrantorId,
   MandateAuditEvent,
-  MandateAuditService,
   MandateId,
   SignedMandateAuditEvent,
 } from "../../src/mandate/types.ts"
@@ -58,11 +57,7 @@ const keypair = () => {
 const freshPath = () => join(mkdtempSync(join(tmpdir(), "sweetrust-durable-")), "audit.jsonl")
 
 /** The store under test, opened the way a host opens it. */
-const openStore = (path: string, signer: MandateSignerService) =>
-  makeJsonlSignedAuditLive(path, signer) as unknown as {
-    readonly mandateAudit: MandateAuditService
-    readonly signedAudit: SignedMandateAuditService
-  }
+const openStore = (path: string, signer: MandateSignerService) => makeJsonlSignedAuditLive(path, signer)
 
 /** Capture a throw so its shape can be asserted. */
 const thrown = (fn: () => unknown): any => {

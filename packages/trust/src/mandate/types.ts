@@ -168,6 +168,24 @@ export type MandateError =
       readonly grantorTier: MandateTier
       readonly requestedTier: MandateTier
     }
+  | {
+      // Raised by a durable (JSONL) audit store when its file cannot be
+      // trusted as a record: a line that does not parse, or, in the signed
+      // store, a chain that does not verify under the store's pinned key.
+      // Fail-CLOSED: every read throws, including a direct `isRevoked`, and
+      // the signed store refuses to append past it. A bad line is never
+      // skipped (dropping a revoke while keeping its grant resurrects a revoked
+      // mandate) and never read as an empty log (which flipped `isRevoked` from
+      // true to false, F5). An unreadable file (permissions, not a file)
+      // propagates its own I/O error instead: unreadable is not corrupt.
+      // (DAN-1159, F4.)
+      readonly _tag: "AuditLogCorrupt"
+      readonly storePath: string
+      /** 1-based line number in the store file. */
+      readonly line: number
+      readonly reason: "unparseable" | Exclude<VerifyAuditChainResult["reason"], "ok" | "empty-chain">
+      readonly detail?: string
+    }
 
 /**
  * TriggerSource — forensic primitive distinguishing audit records that
