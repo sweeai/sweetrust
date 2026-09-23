@@ -14,11 +14,11 @@
  * holds a key of its own but not the operator's.
  */
 import { generateKeyPairSync } from "node:crypto"
-import { appendFileSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, test } from "vitest"
-import { makeJsonlSignedAuditLive } from "../../src/mandate/audit.ts"
+import { makeJsonlAuditLive, makeJsonlSignedAuditLive } from "../../src/mandate/audit.ts"
 import {
   defineCapability,
   issueOrgMandate,
@@ -268,5 +268,58 @@ describe("F4 — corruption fails closed, and the store never forks its chain", 
     const store = openStore(path, signer)
     expect(store.mandateAudit.isRevoked("MAN_NONE" as MandateId)).toBe(false)
     expect(store.mandateAudit.query("MAN_NONE" as MandateId)).toEqual([])
+  })
+})
+
+// ============================================================================
+// F5 (DAN-1159 item 6): the UNSIGNED store fails closed too.
+// ============================================================================
+// It read the whole file inside one try/catch and returned [] on ANY failure.
+// So one bad byte blanked the log, and a DIRECT isRevoked flipped from true to
+// false. useCapability happened to survive (the grant vanished with the
+// revoke, so it refused MandateNotIssued), but a host that asks isRevoked
+// itself does not. The daemon's durability plan (sweeai daemon kernel.ts:146)
+// is exactly this store. The signed store is the one to use; this one must
+// still never lie.
+describe("F5 — the unsigned JSONL store fails closed", () => {
+  const revokedInUnsigned = (path: string) => {
+    const audit = makeJsonlAuditLive(path)
+    const org = issueOrgMandate({ grantor: OPERATOR, capabilities: [Deploy] as const, rationale: "org root" }, audit)
+    revokeMandate({ mandateId: org.id, revokerScope: org, rationale: "stop" }, audit)
+    return { audit, org }
+  }
+
+  test("one unparseable line makes a direct isRevoked THROW, not flip true to false", () => {
+    const path = freshPath()
+    const { audit, org } = revokedInUnsigned(path)
+    expect(audit.isRevoked(org.id)).toBe(true)
+    appendFileSync(path, "{not json\n")
+    const corrupt = { _tag: "AuditLogCorrupt", storePath: path, line: 3, reason: "unparseable" }
+    expect(thrown(() => audit.isRevoked(org.id))).toMatchObject(corrupt)
+    expect(thrown(() => audit.query(org.id))).toMatchObject(corrupt)
+  })
+
+  test("useCapability over a corrupt store says the LOG is corrupt, not that the mandate was never issued", () => {
+    const path = freshPath()
+    const { audit, org } = revokedInUnsigned(path)
+    appendFileSync(path, "{not json\n")
+    expect(thrown(() => useCapability({ mandate: org, capability: Deploy }, audit))).toMatchObject({
+      _tag: "AuditLogCorrupt",
+    })
+  })
+
+  test("a store path that cannot be READ is an I/O error, never an empty log", () => {
+    const path = freshPath()
+    mkdirSync(path) // a directory where the file should be: EISDIR
+    const audit = makeJsonlAuditLive(path)
+    expect(() => audit.isRevoked("MAN_NONE" as MandateId)).toThrow()
+  })
+
+  test("CONTROL: a missing or empty file is still an empty log", () => {
+    const missing = makeJsonlAuditLive(freshPath())
+    expect(missing.isRevoked("MAN_NONE" as MandateId)).toBe(false)
+    const emptyPath = freshPath()
+    writeFileSync(emptyPath, "")
+    expect(makeJsonlAuditLive(emptyPath).query("MAN_NONE" as MandateId)).toEqual([])
   })
 })
