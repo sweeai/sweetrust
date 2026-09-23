@@ -245,6 +245,13 @@ const assertRequestedCapsBackedByGrantorGrant = (
  * Per spec I9: rationale strings pass through constitutionalPreCheck before
  * any persistence. Malicious metadata throws immediately with no audit
  * pollution.
+ *
+ * @deprecated Use the tiered API: `issueOrgMandate` → `issueProjectMandate` →
+ * `issueAgentMandate`. This v0.0 entry point stamps tier `"organization"` on
+ * every scope it mints, so an organization's child claims to be an
+ * organization; the tiered functions record the tier the ladder actually
+ * grants. Kept only for v0.0 callers, and it may be removed before the first
+ * stable release (DAN-1159 item 4d).
  */
 export const issueMandate = <
   GrantorCaps extends ReadonlyArray<Capability>,
@@ -339,6 +346,11 @@ export const issueMandate = <
  * The grantor here is the human-in-the-loop (Arthur) — there is no parent
  * mandate, so parentMandateId is null. Subsequent issuances chain via
  * issueMandate.
+ *
+ * @deprecated Use `issueOrgMandate`, the root of the tiered API, and derive
+ * from it with `issueProjectMandate` and `issueAgentMandate`. Kept only for
+ * v0.0 callers, and it may be removed before the first stable release
+ * (DAN-1159 item 4d).
  */
 export const issueRootMandate = <Caps extends ReadonlyArray<Capability>>(args: {
   readonly grantor: GrantorId
