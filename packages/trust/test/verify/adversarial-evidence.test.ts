@@ -24,7 +24,10 @@ import {
   parseJSONL,
   type SignedReceipt,
   type ReceiptSigner,
+  type VerifyReport,
 } from "../../src/verify/verify.js"
+import { makeEd25519SignerLive, verifyAuditChain } from "../../src/mandate/index.ts"
+import type { SignedMandateAuditEvent } from "../../src/mandate/types.ts"
 
 const keys = generateSigningKeypair()
 const signer = makeEd25519ReceiptSigner(keys)
@@ -176,5 +179,133 @@ describe("V6 — parseJSONL rejects hostile input without crashing the caller", 
   it("malformed JSON reports the line, and does not leak a raw SyntaxError", () => {
     const good = logWith(1).exportJSONL()
     expect(() => parseJSONL(good + "{not json\n")).toThrow(/line 2/)
+  })
+})
+
+describe("V7 — every input SHAPE comes back as a verdict (DAN-1159 item 5)", () => {
+  // V3 made a malformed key or signature ENCODING a verdict. It never covered
+  // the shapes around them: a chain that is not an array, a record that is not
+  // an object, a key that is not a string, an anchor head that is not a string.
+  // Probed on the built dist/ before this block existed: every shape below
+  // threw, except the plain object, which verifySignedChain certified VALID.
+
+  /**
+   * Run the verifier and fail the test with the thrown message instead of
+   * crashing it. `opts` is a rest slot, not a default parameter: an explicit
+   * `undefined` must reach the verifier as undefined, and a default would
+   * silently swap in the honest pin.
+   */
+  const verdict = (records: unknown, ...rest: [opts?: unknown]): VerifyReport => {
+    const opts = rest.length === 0 ? { trustedSignerPublicKeyHex: trusted } : rest[0]
+    let report: VerifyReport | undefined
+    expect(() => {
+      report = verifySignedChain(records as SignedReceipt[], opts as Parameters<typeof verifySignedChain>[1])
+    }).not.toThrow()
+    return report!
+  }
+  const MALFORMED_CHAIN = { valid: false, firstInvalidIndex: null, reason: "malformed-record", anchoredThrough: null }
+
+  it("ATTACK: a plain object is not a chain, and it used to verify as one", () => {
+    // `{}.length` is undefined: `=== 0` misses the empty-chain guard, `i <
+    // undefined` never enters the loop, and control falls through to valid:true.
+    // A caller that hands over the parsed wrapper instead of its array gets a
+    // clean bill of health for evidence nobody checked.
+    expect(verdict({})).toMatchObject(MALFORMED_CHAIN)
+    expect(verdict({ records: logWith(2).signed() })).toMatchObject(MALFORMED_CHAIN)
+  })
+
+  it("ATTACK: null or undefined in place of the chain is malformed, not a crash", () => {
+    expect(verdict(null)).toMatchObject(MALFORMED_CHAIN)
+    expect(verdict(undefined)).toMatchObject(MALFORMED_CHAIN)
+  })
+
+  it("ATTACK: a null or undefined record is malformed at its index, not a crash", () => {
+    const [good] = logWith(1).signed()
+    expect(verdict([null])).toMatchObject({ valid: false, firstInvalidIndex: 0, reason: "malformed-record" })
+    expect(verdict([undefined])).toMatchObject({ valid: false, firstInvalidIndex: 0, reason: "malformed-record" })
+    expect(verdict([good, null])).toMatchObject({ valid: false, firstInvalidIndex: 1, reason: "malformed-record" })
+  })
+
+  it("ATTACK: a signer key that is missing or not a string is untrusted, and the detail does not crash on it", () => {
+    // The pin comparison already rejects these. It was the `.slice` in the
+    // detail message that threw, so the verdict was lost inside its own reason.
+    const [good] = logWith(1).signed()
+    const keyless: Record<string, unknown> = { ...good! }
+    delete keyless["signerPublicKeyHex"]
+    for (const record of [keyless, { ...good!, signerPublicKeyHex: null }, { ...good!, signerPublicKeyHex: 123 }]) {
+      const report = verdict([record])
+      expect(report).toMatchObject({ valid: false, firstInvalidIndex: 0, reason: "untrusted-signer" })
+      expect(report.detail).toContain("record 0")
+    }
+  })
+
+  it("a pin that is missing or not a string verifies NOTHING: fail-closed, as a verdict", () => {
+    const chain = logWith(1).signed()
+    for (const opts of [{ trustedSignerPublicKeyHex: undefined }, { trustedSignerPublicKeyHex: 123 }, undefined]) {
+      expect(verdict(chain, opts)).toMatchObject({ valid: false, firstInvalidIndex: 0, reason: "untrusted-signer" })
+    }
+  })
+
+  it("ATTACK: a genuine record carrying a field canonicalJSON cannot encode is malformed at THAT record", () => {
+    // The field sits outside the signed preimage, so the signature still
+    // verifies and only the wrapper link hash meets it. verifyAuditChain learned
+    // this in DAN-1159 item 3; this is the same lesson, carried across.
+    const chain = logWith(2).signed()
+    expect(verdict([{ ...chain[0]!, extra: 1n }, chain[1]!])).toMatchObject({ valid: false, firstInvalidIndex: 0, reason: "malformed-record" })
+    expect(verdict([chain[0]!, { ...chain[1]!, extra: 1n }])).toMatchObject({ valid: false, firstInvalidIndex: 1, reason: "malformed-record" })
+  })
+
+  it("a validly SIGNED record whose payload is not a receipt is malformed, not a crash", () => {
+    // Only the key holder can produce this (a buggy signer, not a forger). The
+    // auditor still gets a verdict instead of a TypeError from receiptBody.
+    const bogus = signer.sign(null as unknown as Receipt, null)
+    expect(verdict([bogus])).toMatchObject({ valid: false, firstInvalidIndex: 0, reason: "malformed-record" })
+  })
+
+  it("ATTACK: an anchor whose head is not a string fails the ANCHOR, not the verifier", () => {
+    // An anchor that is present but unusable proves nothing, so the verdict is
+    // anchor-not-found: the same fail-closed reading the `kind` dispatch gives
+    // an unknown kind. `null` is present, not absent.
+    const chain = logWith(2).signed()
+    for (const anchor of [{ kind: "anchor", head: undefined }, { kind: "anchor", head: 123 }, { kind: "receipt", head: 123 }, null]) {
+      expect(verdict(chain, { trustedSignerPublicKeyHex: trusted, anchor })).toMatchObject({
+        valid: false, reason: "anchor-not-found", anchoredThrough: null,
+      })
+    }
+  })
+
+  it("CONTROL: an honest sealed chain still verifies through the same wrapper", () => {
+    const chain = logWith(2).signed()
+    const head = chain.at(-1)!.payload.hash
+    expect(verdict(chain, { trustedSignerPublicKeyHex: trusted, anchor: { kind: "anchor", head } })).toMatchObject({
+      valid: true, reason: "ok", anchoredThrough: 1,
+    })
+  })
+})
+
+describe("V7 parity — both verifiers give the SAME verdict for the same hostile shape", () => {
+  // The stop-ship audit's root pattern: a fix made in one verifier never
+  // reached its sibling. V2 and V3 hardened verifySignedChain in July and
+  // verifyAuditChain waited until DAN-1159 item 3; item 3's link-hash guard then
+  // waited for item 5. This is the tripwire: harden one, and the other goes red.
+  const mandateSigner = makeEd25519SignerLive(keys)
+  const outcome = (fn: () => { valid: boolean; reason: string; firstInvalidIndex: number | null }) => {
+    try {
+      const { valid, reason, firstInvalidIndex } = fn()
+      return { valid, reason, firstInvalidIndex }
+    } catch (err) {
+      return { threw: err instanceof Error ? err.message : String(err) }
+    }
+  }
+  const shapes: ReadonlyArray<readonly [string, unknown]> = [
+    ["{}", {}], ["null", null], ["undefined", undefined],
+    ["[null]", [null]], ["[undefined]", [undefined]], ["[42]", [42]], ['["revoke"]', ["revoke"]],
+  ]
+
+  it.each(shapes)("%s", (_label, shape) => {
+    const receipt = outcome(() => verifySignedChain(shape as SignedReceipt[], { trustedSignerPublicKeyHex: trusted }))
+    const audit = outcome(() => verifyAuditChain(shape as SignedMandateAuditEvent[], mandateSigner, { trustedSignerPublicKeyHex: trusted }))
+    expect(receipt).toMatchObject({ valid: false })
+    expect(receipt).toEqual(audit)
   })
 })

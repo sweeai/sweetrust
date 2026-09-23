@@ -203,3 +203,39 @@ describe("verifyAuditChain — every input comes back as a verdict (DAN-1159 ite
     expect(verdict(buildChain(signer, EVENTS), signer)).toMatchObject({ valid: true, reason: "ok" })
   })
 })
+
+describe("verifyAuditChain — the CONTAINER gets a verdict too (DAN-1159 item 5, the F6 residual)", () => {
+  // Item 3 made every ELEMENT shape a verdict and measured it on arrays. The
+  // container itself was never checked: `{}.length` is undefined, so the
+  // empty-chain guard and the loop both skip it and the function returns
+  // valid:true for a log nobody read.
+  // `opts` is a rest slot, not a default parameter: an explicit `undefined`
+  // must reach the verifier as undefined, and a default would silently swap
+  // in the honest pin.
+  const verdict = (log: unknown, signer: MandateSignerService, ...rest: [opts?: unknown]) => {
+    const opts = rest.length === 0 ? { trustedSignerPublicKeyHex: signer.publicKeyHex } : rest[0]
+    let result: ReturnType<typeof verifyAuditChain> | undefined
+    expect(() => {
+      result = verifyAuditChain(log as SignedMandateAuditEvent[], signer, opts as { readonly trustedSignerPublicKeyHex: string })
+    }).not.toThrow()
+    return result!
+  }
+  const MALFORMED_LOG = { valid: false, firstInvalidIndex: null, reason: "malformed-record" }
+
+  test("a plain object is not a log, and it used to verify as one", () => {
+    const signer = ed25519Signer()
+    expect(verdict({}, signer)).toMatchObject(MALFORMED_LOG)
+    expect(verdict({ records: buildChain(signer, EVENTS) }, signer)).toMatchObject(MALFORMED_LOG)
+  })
+
+  test("null in place of the log is malformed, not a crash", () => {
+    expect(verdict(null, ed25519Signer())).toMatchObject(MALFORMED_LOG)
+  })
+
+  test("a missing opts pins nothing, so nothing verifies: fail-closed, as a verdict", () => {
+    const signer = ed25519Signer()
+    expect(verdict(buildChain(signer, EVENTS), signer, undefined)).toMatchObject({
+      valid: false, firstInvalidIndex: 0, reason: "untrusted-signer",
+    })
+  })
+})
