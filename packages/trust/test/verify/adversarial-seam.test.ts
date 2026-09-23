@@ -184,3 +184,15 @@ describe("CLAIM 4 — truncation + anchor", () => {
     expect(rep.anchoredThrough).toBe(1)
   })
 })
+
+describe("DAN-1159 item 2 — the SIGNED path: a BigInt amount signs, exports and verifies", () => {
+  // The production shape. SignedReceiptLog signs through canonicalJSON, which
+  // throws on a BigInt, so before the fix the payment ran and the signed log
+  // (and its JSONL export) never heard of it.
+  test("a payment of 1 SUI in MIST lands on the signed chain", () => {
+    const { log, trustedKey } = buildLog([1_000_000_000n])
+    expect(log.signed()).toHaveLength(1)
+    const report = verifySignedChain(roundtrip(log), { trustedSignerPublicKeyHex: trustedKey })
+    expect(report.valid).toBe(true)
+  })
+})

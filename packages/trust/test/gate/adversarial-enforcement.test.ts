@@ -9,6 +9,7 @@
 // Each block states the advertised guarantee, then attacks it.
 // ============================================================================
 
+import { createHash } from "node:crypto"
 import { describe, it, expect } from "vitest"
 import {
   Sourced,
@@ -214,5 +215,134 @@ describe("A5 — the receipt log hands out its live array, and truncation is sil
     const log = build()
     expect(log.head()).toBe(log.all().at(-1)?.hash)
     expect(new ReceiptLog().head()).toBe("genesis")
+  })
+})
+
+// ============================================================================
+// DAN-1159 item 2: no action without its receipt.
+// ============================================================================
+// ADVERTISED (makeSink's doc comment): "Every decision, either way, lands in the
+// receipt log."
+//
+// ATTACK: pass an argument JSON.stringify cannot encode. makeSink ran
+// `execute()` and only THEN serialized the receipt, so a BigInt (every Sui
+// amount in MIST is one) or a circular object threw inside `log.append`, AFTER
+// the side effect: executed=1, receipts=0, and the chain still verified. The
+// `errored` branch rendered the same arguments and threw the same way.
+//
+// Two neighbors share the root (the receipt held live, unserialized values):
+// the `hash` / `truncate` policies threw on a BigInt before execute, recording
+// nothing, and the `raw` policy stored the caller's object BY REFERENCE, so a
+// caller editing it afterwards rewrote the evidence and broke the chain.
+describe("DAN-1159 item 2 — no action without its receipt", () => {
+  const paySink = (opts: {
+    mode?: "observe" | "warn" | "enforce"
+    redact?: "raw" | "hash" | "truncate"
+    log?: ReceiptLog
+    execute?: () => string
+  } = {}) => {
+    const log = opts.log ?? new ReceiptLog()
+    let executed = 0
+    const pay = makeSink<{ amount: Sourced<unknown> }, string>({
+      name: "pay",
+      requires: { amount: "verified" },
+      mode: opts.mode ?? "enforce",
+      log,
+      ...(opts.redact ? { redact: { amount: opts.redact } } : {}),
+      execute: () => {
+        executed++
+        return opts.execute ? opts.execute() : "sent"
+      },
+    })
+    const call = (value: unknown) => pay({ amount: Sourced.fromAuthority(value, "treasury") })
+    return { log, call, executed: () => executed }
+  }
+
+  const circular = () => {
+    const o: Record<string, unknown> = { to: "0xabc" }
+    o.self = o
+    return o
+  }
+
+  it("a BigInt amount (Sui MIST) executes AND leaves a receipt that records it", () => {
+    const { log, call, executed } = paySink()
+    const out = call(1_000_000_000n)
+    expect(out.ok).toBe(true)
+    expect(executed()).toBe(1)
+    expect(log.all()).toHaveLength(1)
+    expect(log.all()[0]!.args.amount!.value).toBe("1000000000n")
+    expect(log.verifyChain()).toBe(true)
+  })
+
+  it("a BigInt nested inside an argument object is recorded too", () => {
+    const { log, call } = paySink()
+    call({ to: "0xabc", amount: 5n })
+    expect(log.all()[0]!.args.amount!.value).toEqual({ to: "0xabc", amount: "5n" })
+    expect(log.verifyChain()).toBe(true)
+  })
+
+  it("a circular argument is REFUSED in enforce mode, BEFORE execute(), and the refusal is on the receipt", () => {
+    const { log, call, executed } = paySink()
+    const out = call(circular())
+    expect(executed()).toBe(0)
+    expect(out.ok).toBe(false)
+    if (!out.ok) expect(out.refusal).toContain("cannot be written to a receipt")
+    expect(log.all()).toHaveLength(1)
+    expect(log.all()[0]!.decision).toBe("refused")
+    expect(String(log.all()[0]!.args.amount!.value)).toMatch(/^\[unrecordable: /)
+    expect(log.verifyChain()).toBe(true)
+  })
+
+  it("in observe mode a circular argument still executes, and its receipt says what could not be recorded", () => {
+    const { log, call, executed } = paySink({ mode: "observe" })
+    const out = call(circular())
+    expect(out.ok).toBe(true)
+    expect(executed()).toBe(1)
+    expect(log.all()).toHaveLength(1)
+    expect(log.all()[0]!.decision).toBe("warned")
+    expect(log.all()[0]!.reason).toContain("cannot be written to a receipt")
+    expect(log.verifyChain()).toBe(true)
+  })
+
+  it("an execute() that throws on a BigInt-bearing call leaves an `errored` receipt and rethrows ITS error", () => {
+    const { log, call, executed } = paySink({ execute: () => { throw new Error("rpc timeout") } })
+    expect(() => call(7n)).toThrow("rpc timeout")
+    expect(executed()).toBe(1)
+    expect(log.all().map((r) => r.decision)).toEqual(["errored"])
+    expect(log.verifyChain()).toBe(true)
+  })
+
+  it("a BigInt under the `hash` and `truncate` policies is recorded, not thrown before the receipt", () => {
+    for (const redact of ["hash", "truncate"] as const) {
+      const { log, call, executed } = paySink({ redact })
+      expect(() => call(42n)).not.toThrow()
+      expect(executed()).toBe(1)
+      expect(log.all()).toHaveLength(1)
+    }
+    const truncated = paySink({ redact: "truncate" })
+    truncated.call(42n)
+    expect(truncated.log.all()[0]!.args.amount!.value).toBe("42n")
+  })
+
+  it("the receipt is a SNAPSHOT: editing the argument object afterwards changes neither the receipt nor its chain", () => {
+    const { log, call } = paySink()
+    const order = { to: "0xabc", amount: 5 }
+    call(order)
+    order.amount = 5000
+    expect(log.all()[0]!.args.amount!.value).toEqual({ to: "0xabc", amount: 5 })
+    expect(log.verifyChain()).toBe(true)
+  })
+
+  it("CONTROL: plain JSON values record exactly as before, and the `hash` digest is unchanged", () => {
+    const { log, call } = paySink()
+    call("0xabc")
+    call(12.5)
+    call({ b: 1, a: [true, null] })
+    expect(log.all().map((r) => r.args.amount!.value)).toEqual(["0xabc", 12.5, { b: 1, a: [true, null] }])
+
+    const hashed = paySink({ redact: "hash" })
+    hashed.call({ to: "0xabc", amount: 5 })
+    const expected = "sha256:" + createHash("sha256").update(JSON.stringify({ to: "0xabc", amount: 5 })).digest("hex")
+    expect(hashed.log.all()[0]!.args.amount!.value).toBe(expected)
   })
 })
