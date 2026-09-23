@@ -402,8 +402,40 @@ export const verifyAuditChain = (
   signer: MandateSignerService,
   opts: { readonly trustedSignerPublicKeyHex: string },
 ): import("./types.ts").VerifyAuditChainResult => {
+  // An empty log used to fold to valid:true, the loop's identity element and
+  // the strongest claim it can make. An operator handed an empty file and told
+  // "valid" has been told something false. Same lesson verifySignedChain learned
+  // in adversarial pass V2 (2026-07-25); this function never got it (DAN-1159).
+  if (log.length === 0) {
+    return {
+      valid: false,
+      firstInvalidIndex: null,
+      reason: "empty-chain" as const,
+      detail: "no records were presented — there is nothing here to verify, which is not the same as nothing being wrong",
+    }
+  }
+
+  // Every malformed input comes back as a verdict, never a throw. A crash here
+  // surfaces in the operator's tool with no way to tell "this log is bad" from
+  // "this verifier is broken" (verifySignedChain's pass V3). It used to throw on
+  // a null record, a record key that is not SPKI, and anything canonicalJSON
+  // cannot encode (a BigInt, a cycle).
+  const malformed = (i: number, what: string, err?: unknown) => ({
+    valid: false,
+    firstInvalidIndex: i,
+    reason: "malformed-record" as const,
+    detail: err === undefined ? what : `${what}: ${err instanceof Error ? err.message : String(err)}`,
+  })
+
+  // The link each record must carry: null for the first, then the hash of the
+  // whole previous SIGNED record.
+  let expectedPreviousHash: string | null = null
   for (let i = 0; i < log.length; i++) {
-    const record = log[i]!
+    const candidate: unknown = log[i]
+    if (typeof candidate !== "object" || candidate === null) {
+      return malformed(i, `record ${i} is ${candidate === null ? "null" : `a ${typeof candidate}`}, not a signed record`)
+    }
+    const record = candidate as SignedMandateAuditEvent
 
     // Empty / missing signature
     if (!record.signature || record.signature.length === 0) {
@@ -427,7 +459,12 @@ export const verifyAuditChain = (
 
     // Signature verification (covers domain + payload + previousHash +
     // signedAt via signedPreimage — DAN-641).
-    const sigOk = signer.verify(record)
+    let sigOk: boolean
+    try {
+      sigOk = signer.verify(record)
+    } catch (err) {
+      return malformed(i, `record ${i} could not be checked`, err)
+    }
     if (!sigOk) {
       return {
         valid: false,
@@ -447,26 +484,24 @@ export const verifyAuditChain = (
       }
     }
 
-    // Hash-chain verification (skip for first record)
-    if (i > 0) {
-      const previousRecord = log[i - 1]!
-      const expectedPreviousHash = sha256Hex(canonicalJSON(previousRecord))
-      if (record.previousHash !== expectedPreviousHash) {
-        return {
-          valid: false,
-          firstInvalidIndex: i,
-          reason: "hash-chain-broken" as const,
-        }
+    // Hash-chain verification: the first record must carry null, every later
+    // one the hash of its predecessor.
+    if (record.previousHash !== expectedPreviousHash) {
+      return {
+        valid: false,
+        firstInvalidIndex: i,
+        reason: "hash-chain-broken" as const,
       }
-    } else {
-      // First record MUST have null previousHash
-      if (record.previousHash !== null) {
-        return {
-          valid: false,
-          firstInvalidIndex: i,
-          reason: "hash-chain-broken" as const,
-        }
-      }
+    }
+
+    // The next link hashes the WHOLE record, which includes fields outside the
+    // signed preimage. A field canonicalJSON cannot encode leaves the signature
+    // valid and makes this record unlinkable, so it is malformed HERE, at the
+    // record that carries it, not at its successor.
+    try {
+      expectedPreviousHash = sha256Hex(canonicalJSON(record))
+    } catch (err) {
+      return malformed(i, `record ${i} cannot be hashed for the next link`, err)
     }
   }
 

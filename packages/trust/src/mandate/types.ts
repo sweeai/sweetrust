@@ -307,6 +307,12 @@ export interface VerifyAuditChainResult {
     | "missing-signature"
     | "untrusted-signer"
     | "domain-mismatch"
+    /** No records at all. Nothing to check is not a pass (DAN-1159). */
+    | "empty-chain"
+    /** A record too malformed to check: not an object, a bad key or signature encoding, a value canonicalJSON cannot encode. */
+    | "malformed-record"
+  /** Human-readable context for `empty-chain` and `malformed-record`. Never parse it. */
+  readonly detail?: string
 }
 
 /**
