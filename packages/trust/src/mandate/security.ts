@@ -30,8 +30,12 @@
  * The catalog covers ASCII-English instruction-override patterns +
  * NFKC-normalized Unicode confusables. Multilingual paraphrase (CJK, RTL
  * scripts) and natural-language paraphrase ("never mind what was said") are
- * deliberately out of scope — defense in depth via sentinel framing (parent
- * spec I1) + tool_choice forcing (I2) + conservative-fail (I7) handles them.
+ * deliberately out of scope. They are left to the HOST's defense in depth,
+ * none of which this package provides: sentinel framing (parent spec I1),
+ * constraining the model's output shape (I2) and conservative-fail (I7).
+ * I2 was written as forced `tool_choice`; some current models reject that
+ * outright (Opus 5.5 returns a 400 for anything but "auto"), so a host must
+ * not count on it being available.
  */
 
 export const CATALOG_VERSION = "0.2.0"

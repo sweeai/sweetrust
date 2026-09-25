@@ -93,6 +93,14 @@ receipt log.
 breaking change. Nothing produces it yet. Until something does, log a declassifier's refusal
 yourself if you need the evidence.
 
+### The prompt-injection pre-check is a pattern catalog, not a defense
+
+`constitutionalPreCheck` catches known instruction-override patterns in English and hidden
+Unicode tricks, before an authored string is persisted. It does not catch paraphrase ("never mind
+what was said") or other languages, by design. Those need defenses in your own harness, such as
+framing untrusted text clearly and constraining what the model may output. Do not rely on forcing
+a tool call for that: some current models reject forced `tool_choice`.
+
 ### `asserted` is not reachable
 
 Four tiers are documented; three are produced. No factory or declassifier currently emits
