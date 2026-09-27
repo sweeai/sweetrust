@@ -1,4 +1,4 @@
-# Security — `@swee/trust`
+# Security — `sweetrust`
 
 ## Reporting a vulnerability
 
@@ -41,7 +41,7 @@ them as the only thing standing between an attacker and custody.
 
 ### A mandate scope is a capability: whoever holds the object holds the authority
 
-Authority in `@swee/trust/mandate` is **possession of a scope object this module issued**. A
+Authority in `sweetrust/mandate` is **possession of a scope object this module issued**. A
 copy, a JSON round trip or a hand-written literal is refused, however faithfully it copies the
 fields. Two things follow for a host:
 

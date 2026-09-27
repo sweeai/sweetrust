@@ -4,7 +4,7 @@ Swee's open-source packages. Everything published under the **`@swee`** scope li
 
 | Package | What it is |
 |---|---|
-| [`@swee/trust`](packages/trust) | Trust rails for AI agents — issue authority, enforce it, prove what happened. Zero runtime dependencies. |
+| [`sweetrust`](packages/trust) | Trust rails for AI agents — issue authority, enforce it, prove what happened. Zero runtime dependencies. |
 
 ## Why one repository
 

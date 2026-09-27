@@ -1,6 +1,6 @@
-# @swee/trust — ARCHITECTURE.md
+# sweetrust — ARCHITECTURE.md
 
-> Living document describing how `@swee/trust` works NOW. Updated alongside CHANGELOG when an architectural change ships. Per the ARCHITECTURE convention: each subsystem section carries STATUS / FLOW / SOURCE / LAST VERIFIED metadata so staleness is visible.
+> Living document describing how `sweetrust` works NOW. Updated alongside CHANGELOG when an architectural change ships. Per the ARCHITECTURE convention: each subsystem section carries STATUS / FLOW / SOURCE / LAST VERIFIED metadata so staleness is visible.
 >
 > **Scope note (2026-07-30):** this file was `@sweetrust/mandate`'s. The three packages merged into one, so it now covers the whole rail. Sections 1–4 and 8 are mandate's, carried over with their original LAST VERIFIED dates intact; sections 9 and 10 (gate, verify) were added at the merge. **A date that has not moved is telling the truth** — do not refresh one without re-verifying the section.
 
@@ -9,7 +9,7 @@
 One package, three primitives, one direction of flow:
 
 ```
-  @swee/trust/mandate  ──▶  @swee/trust/gate  ──▶  @swee/trust/verify
+  sweetrust/mandate  ──▶  sweetrust/gate  ──▶  sweetrust/verify
    issue authority        enforce it at         prove it happened
    in bounded tiers       the sink boundary     to a stranger
 ```
@@ -73,7 +73,7 @@ Enforcement: extraction boundary → `Sourced` tag → (optional declassifier) �
 - **SOURCE:** `src/{demo,multi-tier-demo}.ts`. Each is intentionally readable as a narration of the flow it runs.
 - **LAST VERIFIED:** 2026-05-04 (all three run end-to-end without errors; output formatted for stage clarity).
 
-### 9. Enforcement kernel — `@swee/trust/gate`
+### 9. Enforcement kernel — `sweetrust/gate`
 
 - **STATUS:** LIVE
 - **FLOW:** Extraction boundary → `Sourced<T>` tag carrying tier + provenance (origin, ancestry, audit chain, optional confidence) → tags propagate through combination, taking the **minimum** tier (Rule 1: taint is sticky) → optionally through one of exactly three declassifiers (Rule 3) → sink appetite check (Rule 4, fail-closed) → judgment seam → `ReceiptLog.append`. Every SINK decision lands on the log, allow *and* refuse. Two gaps are documented in `SECURITY.md` § *Honest limits*: a declassifier's refusal leaves no receipt (`"declassify-refused"` is reserved, not produced), and neither does an action whose signer throws after `execute()`. `fromLLM` returns untrusted unconditionally (Rule 2: inference is not evidence). Adoption ladder `observe → warn → enforce` (Rule 5) lets it be installed into a running system without breaking it.
@@ -83,7 +83,7 @@ Enforcement: extraction boundary → `Sourced` tag → (optional declassifier) �
 - **TCB honesty:** in-process TypeScript is observe/warn/dev-time authority. Code that can import this module and lie about an authority name can mint verified values. Unforgeable enforcement belongs to the Move `SpendCage` (testnet `0x5c1588…fdfa`). The honest-limits comment block in the source is load-bearing — do not remove it.
 - **LAST VERIFIED:** 2026-08-31 pre-publish adversarial audit — **two further unconditional fail-opens found in `enforce` mode against built `dist/`**, both invisible to the then-169-test suite, both now closed with regressions proven red against the pre-fix code. Package total 177/177. (Prior: 2026-07-25 pass, five fail-opens; 51/51 at that date.)
 
-### 10. Evidence kernel — `@swee/trust/verify`
+### 10. Evidence kernel — `sweetrust/verify`
 
 - **STATUS:** LIVE
 - **FLOW:** Wraps gate's `ReceiptLog` with authorship. `SignedReceiptLog extends ReceiptLog` and drops into `makeSink`'s `log:` — wrap, never fork. Each receipt is Ed25519-signed at append time through mandate's signer. **Two chains, both checked:** the interior kernel chain (`Receipt.prevHash`/`hash`, computed by gate) and the wrapper chain (`Signed.previousHash = sha256(canonicalJSON(previous signed record))`, per mandate audit-chain semantics, spec I8). `exportJSONL` produces the artifact handed to an auditor; `verifySignedChain` re-checks every signature, both hash links, and sequence, holding only public material.

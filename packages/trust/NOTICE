@@ -1,4 +1,4 @@
-@swee/trust
+sweetrust
 Copyright 2026 Daniel Ahn (Swee Inc.)
 
 Licensed under the Apache License, Version 2.0.
@@ -7,8 +7,8 @@ This package was formed 2026-07-30 by merging three previously separate
 packages, each Apache-2.0 and each carrying the same copyright. None of the
 three was ever published; the merge broke no consumer.
 
-  @sweetrust/mandate  ->  @swee/trust/mandate
-  @sweetrust/gate     ->  @swee/trust/gate
-  @sweetrust/verify   ->  @swee/trust/verify
+  @sweetrust/mandate  ->  sweetrust/mandate
+  @sweetrust/gate     ->  sweetrust/gate
+  @sweetrust/verify   ->  sweetrust/verify
 
 No third-party attribution obligations were carried by any of them.

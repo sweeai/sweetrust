@@ -75,7 +75,7 @@ export function generateSigningKeypair(): { privateKeyPem: string; publicKeyPem:
   }
 }
 
-// Moved to `mandate/signer.ts` (DAN-905) so `@swee/trust/mandate` can satisfy its
+// Moved to `mandate/signer.ts` (DAN-905) so `sweetrust/mandate` can satisfy its
 // own `verifyAuditChain`, whose `trustedSignerPublicKeyHex` is required. Still
 // exported here — this is a published entry point and dropping the name would
 // break consumers for no gain.

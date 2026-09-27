@@ -237,7 +237,7 @@ export interface Ed25519SignerConfig {
  * `trustedSignerPublicKeyHex`.
  *
  * 🛑 LIVES HERE ON PURPOSE (DAN-905). It used to live in `verify/verify.ts`,
- * which meant `@swee/trust/mandate` shipped `verifyAuditChain` with a MANDATORY
+ * which meant `sweetrust/mandate` shipped `verifyAuditChain` with a MANDATORY
  * hex argument and no exported way to produce one — a consumer following the
  * README's own advice to import from the narrow subpath got a hard
  * `SyntaxError: does not provide an export named 'publicKeyHexFromPem'` and had

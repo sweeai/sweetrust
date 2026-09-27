@@ -1,4 +1,4 @@
-# @swee/trust
+# sweetrust
 
 **Trust rails for AI agents.** Issue authority, enforce it, prove what happened.
 
@@ -8,7 +8,7 @@ SweeMandate signs  ──▶  SweeGate enforces  ──▶  SweeVerify proves
 ```
 
 ```bash
-npm i @swee/trust
+npm i sweetrust
 ```
 
 Zero runtime dependencies. Node builtins only (`node:crypto`, `node:fs`, `node:path`). Nothing else enters your tree.
@@ -25,27 +25,27 @@ This package makes three questions answerable at runtime, by the code that actua
 
 | Question | Answered by |
 |---|---|
-| **Who authorized this, and were they allowed to?** | `@swee/trust/mandate` |
-| **Where did this value come from, and what did it survive?** | `@swee/trust/gate` |
-| **Can a stranger check any of this after the fact?** | `@swee/trust/verify` |
+| **Who authorized this, and were they allowed to?** | `sweetrust/mandate` |
+| **Where did this value come from, and what did it survive?** | `sweetrust/gate` |
+| **Can a stranger check any of this after the fact?** | `sweetrust/verify` |
 
 ---
 
 ## Install one thing, import what you need
 
 ```ts
-import { issueOrgMandate }  from "@swee/trust/mandate"   // authority
-import { Sourced, makeSink } from "@swee/trust/gate"     // enforcement
-import { verifySignedChain } from "@swee/trust/verify"   // evidence
+import { issueOrgMandate }  from "sweetrust/mandate"   // authority
+import { Sourced, makeSink } from "sweetrust/gate"     // enforcement
+import { verifySignedChain } from "sweetrust/verify"   // evidence
 
-import * as trust           from "@swee/trust"            // or the whole rail
+import * as trust           from "sweetrust"            // or the whole rail
 ```
 
-Each subpath is a separate bundle entry. Importing `@swee/trust/gate` does **not** pull mandate or verify into your build. Decoupling was sacred before these were one package and it stayed that way through the merge — what changed is that you install one thing instead of assembling three.
+Each subpath is a separate bundle entry. Importing `sweetrust/gate` does **not** pull mandate or verify into your build. Decoupling was sacred before these were one package and it stayed that way through the merge — what changed is that you install one thing instead of assembling three.
 
 ---
 
-## `@swee/trust/gate` — enforcement
+## `sweetrust/gate` — enforcement
 
 Values carry their provenance, and privileged operations can demand it.
 
@@ -57,7 +57,7 @@ Values carry their provenance, and privileged operations can demand it.
 - **`ReceiptLog`** — every decision, allow *and* refuse, lands on a hash-chained tamper-evident log.
 
 <!-- readme-check: prelude
-import type { Sourced as S } from "@swee/trust/gate"
+import type { Sourced as S } from "sweetrust/gate"
 declare const raw: string
 declare const extracted: { account: string }
 declare const PAYEE_REGISTRY: ReadonlyMap<string, S<string>>
@@ -66,7 +66,7 @@ declare const amount: S<number>
 declare const settle: (to: string, amount: number) => string
 -->
 ```ts
-import { Sourced, allowlisted, makeSink, ReceiptLog } from "@swee/trust/gate"
+import { Sourced, allowlisted, makeSink, ReceiptLog } from "sweetrust/gate"
 
 const log = new ReceiptLog()
 const pay = makeSink<{ to: Sourced<string>; amount: Sourced<number> }, string>({
@@ -95,7 +95,7 @@ Implements the trust-types specification §4–§5.
 
 ---
 
-## `@swee/trust/mandate` — authority
+## `sweetrust/mandate` — authority
 
 Power of attorney for machines: delegated in bounded tiers, every act on a signed record.
 
@@ -113,7 +113,7 @@ import {
   makeInMemorySignedAuditLive, makeEd25519SignerLive, verifyAuditChain,
   publicKeyHexFromPem,
   type GrantorId,
-} from "@swee/trust/mandate"
+} from "sweetrust/mandate"
 import { generateKeyPairSync } from "node:crypto"
 
 const CapRead  = defineCapability("MyApp/CapRead")
@@ -155,7 +155,7 @@ console.log(verifyAuditChain(signedAudit.listAllSigned(), signer, {
 
 ---
 
-## `@swee/trust/verify` — evidence
+## `sweetrust/verify` — evidence
 
 `gate` ends where the receipt is hashed. This is the next wall.
 
@@ -164,7 +164,7 @@ console.log(verifyAuditChain(signedAudit.listAllSigned(), signer, {
 3. **Verify** — `verifySignedChain` re-checks every signature, every hash link, and optionally an on-chain anchor, holding **only public material**. The signing machine can be compromised afterwards and the evidence still stands or falls on its own.
 
 <!-- readme-check: prelude
-import type { Sourced as S } from "@swee/trust/gate"
+import type { Sourced as S } from "sweetrust/gate"
 declare const execute: (args: { to: S<string> }) => string
 declare const file: string
 declare const publishedKey: string
@@ -172,8 +172,8 @@ declare const memoFromChain: string
 -->
 ```ts
 import { SignedReceiptLog, makeEd25519ReceiptSigner, generateSigningKeypair,
-         verifySignedChain, parseJSONL, parseAnchorMemo } from "@swee/trust/verify"
-import { makeSink } from "@swee/trust/gate"
+         verifySignedChain, parseJSONL, parseAnchorMemo } from "sweetrust/verify"
+import { makeSink } from "sweetrust/gate"
 
 const log = new SignedReceiptLog(makeEd25519ReceiptSigner(generateSigningKeypair()))
 const pay = makeSink({ name: "pay", requires: { to: "verified" }, mode: "enforce", log, execute })
@@ -232,7 +232,7 @@ The test for anything new: **could one person self-serve this?** If yes, it is f
 
 Two reasons the line sits here rather than at the language boundary. Published Move bytecode on a permissionless chain is public and callable by anyone with gas — it was never a sellable artifact, so charging for it would only have taxed adoption. And a free tier without enforcement is an advisory guardrail, which is the exact failure this project exists to eliminate. **Nothing free will ever depend on anything paid.**
 
-**The free column is real today** — six Move modules on testnet, anchoring and chain verification in `@swee/trust/verify`, 177 passing tests, a live testnet weld. Use all of it.
+**The free column is real today** — six Move modules on testnet, anchoring and chain verification in `sweetrust/verify`, 177 passing tests, a live testnet weld. Use all of it.
 
 **The paid column is not something you can buy yet.** Note what it actually describes: *operating* and *vouching for* what the free column already does. The capabilities exist; the service around them does not. There is no server running, no uptime commitment, and nobody to call. It is listed here so the boundary is legible before there is anything to sell, rather than negotiated later, feature by feature.
 

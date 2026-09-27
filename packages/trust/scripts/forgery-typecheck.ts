@@ -3,7 +3,7 @@
  *
  * 🛑 IT CHECKS `dist/`, NOT `src/`. That is not a stylistic preference, it is
  * the entire reason this file exists. DAN-904 was found against the PACKED
- * `@swee/trust@0.3.0` tarball in a fresh consumer and could not be reproduced
+ * `sweetrust@0.3.0` tarball in a fresh consumer and could not be reproduced
  * against the source tree, because the source tree is what hides it: the
  * compiler sees the real class, while a consumer sees whatever survived
  * declaration emit. The fix — an ECMAScript-private `#brand` — is nominal only
@@ -42,10 +42,10 @@ const PKG = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 
 /** Keep in step with `exports` in package.json — same map readme-typecheck uses. */
 const ENTRIES: Record<string, string> = {
-  "@swee/trust": "./dist/index.d.mts",
-  "@swee/trust/mandate": "./dist/mandate.d.mts",
-  "@swee/trust/gate": "./dist/gate.d.mts",
-  "@swee/trust/verify": "./dist/verify.d.mts",
+  "sweetrust": "./dist/index.d.mts",
+  "sweetrust/mandate": "./dist/mandate.d.mts",
+  "sweetrust/gate": "./dist/gate.d.mts",
+  "sweetrust/verify": "./dist/verify.d.mts",
 }
 
 const die = (...lines: Array<string>): never => {
@@ -86,7 +86,7 @@ const compilerOptions = {
  * nominality and start measuring the confound.
  */
 const SINK = `
-import { makeSink, ReceiptLog, Sourced } from "@swee/trust"
+import { makeSink, ReceiptLog, Sourced } from "sweetrust"
 
 const pay = makeSink<{ to: Sourced<string> }, string>({
   name: "pay",

@@ -1,14 +1,14 @@
 /**
- * @swee/trust — the whole rail, in import order.
+ * sweetrust — the whole rail, in import order.
  *
  *   SweeMandate signs  ->  SweeGate enforces  ->  SweeVerify proves
  *
  * This is the convenience entry. Each primitive is also reachable on its own
  * subpath, and importing one does NOT pull the others into your bundle:
  *
- *   import { issueOrgMandate } from "@swee/trust/mandate"
- *   import { Sourced, makeSink } from "@swee/trust/gate"
- *   import { verifySignedChain } from "@swee/trust/verify"
+ *   import { issueOrgMandate } from "sweetrust/mandate"
+ *   import { Sourced, makeSink } from "sweetrust/gate"
+ *   import { verifySignedChain } from "sweetrust/verify"
  *
  * Decoupling stayed sacred through the 2026-07-30 merge: the three used to be
  * three npm packages, and every one of them still stands alone. What changed is

@@ -7,8 +7,8 @@
  * there, and the first anyone hears about it is a consumer's import coming back
  * `undefined`.
  *
- * `@swee/trust/verify` re-exports `canonicalJSON` and `sha256Hex` from
- * `@swee/trust/mandate` on purpose — one canonicalization across the rail. That
+ * `sweetrust/verify` re-exports `canonicalJSON` and `sha256Hex` from
+ * `sweetrust/mandate` on purpose — one canonicalization across the rail. That
  * makes this failure mode LIVE in this package rather than hypothetical, and it
  * is why `src/index.ts` names verify's surface by hand.
  *

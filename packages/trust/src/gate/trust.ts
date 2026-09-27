@@ -1,4 +1,4 @@
-// @swee/trust/gate — the enforcement kernel (trust-types spec v1.1, §4–§5)
+// sweetrust/gate — the enforcement kernel (trust-types spec v1.1, §4–§5)
 // ============================================================================
 // Types constrain SHAPE. Nothing constrains PEDIGREE — until values carry
 // their provenance. Sourced<T> tags ride values from the extraction boundary

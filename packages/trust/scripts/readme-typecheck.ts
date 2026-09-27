@@ -48,10 +48,10 @@ const README = join(PKG, "README.md")
  * subpath absent here fails to resolve, which is the correct outcome.
  */
 const ENTRIES: Record<string, string> = {
-  "@swee/trust": "./dist/index.d.mts",
-  "@swee/trust/mandate": "./dist/mandate.d.mts",
-  "@swee/trust/gate": "./dist/gate.d.mts",
-  "@swee/trust/verify": "./dist/verify.d.mts",
+  "sweetrust": "./dist/index.d.mts",
+  "sweetrust/mandate": "./dist/mandate.d.mts",
+  "sweetrust/gate": "./dist/gate.d.mts",
+  "sweetrust/verify": "./dist/verify.d.mts",
 }
 
 const die = (...lines: Array<string>): never => {
@@ -84,7 +84,7 @@ const blocks: Array<Block> = []
 /**
  * 🛑 EVERY TYPESCRIPT FENCE LANGUAGE, not just ```ts.
  *
- * This was `/```ts\n/` and matched nothing else. @swee/trust's own README happens
+ * This was `/```ts\n/` and matched nothing else. sweetrust's own README happens
  * to use ```ts throughout, so the gate worked — but nine sibling READMEs in the
  * same organisation write ```typescript, and a block fenced that way here would have been
  * INVISIBLE to this checker while looking checked to every human reading the
@@ -147,7 +147,7 @@ for (const b of checked) {
  * type checking while reporting 44 passes. Isolated, the same corpus produced
  * 31 real failures, including two READMEs claiming an API their package does not export.
  *
- * @swee/trust's four blocks all parse TODAY, so this gate has been working. It
+ * sweetrust's four blocks all parse TODAY, so this gate has been working. It
  * would have stopped working, silently and permanently, the first time anyone
  * documented a signature the way three sibling packages already do — and the
  * symptom of the failure is that the output gets QUIETER.

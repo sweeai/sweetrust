@@ -17,7 +17,7 @@ defenses has a recorded mutation witness in the `23c67d1` commit message.
 
 ## Context
 
-`@swee/trust/mandate` bound authority to strings. `useCapability` trusted the caller-supplied
+`sweetrust/mandate` bound authority to strings. `useCapability` trusted the caller-supplied
 `mandate.id`; `revokeMandate` trusted a `revoker: GrantorId`. Both strings are printed in the audit
 log that every audit reader can see. So the least-privileged agent could invoke as its ancestors
 (F1) and permanently revoke the org root (F2). The tier ladder existed only at compile time (F3).

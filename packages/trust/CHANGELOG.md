@@ -1,4 +1,4 @@
-# Changelog — `@swee/trust`
+# Changelog — `sweetrust`
 
 All notable changes to this package. Format follows [Keep a Changelog](https://keepachangelog.com);
 this package follows [Semantic Versioning](https://semver.org).
@@ -49,6 +49,9 @@ this package follows [Semantic Versioning](https://semver.org).
 
 ### Changed
 
+- **Breaking:** the package is named `sweetrust`, with subpaths `sweetrust/mandate`, `sweetrust/gate`
+  and `sweetrust/verify`. It was planned as `@swee/trust`, but the `@swee` npm scope belongs to
+  another user. The 0.3.0 entry below still uses the old name.
 - **Breaking:** `revokeMandate` takes `revokerScope` (the scope you hold) in place of `revoker`
   (a name). It succeeds when that scope is the target or one of its ancestors.
 - **Breaking:** issued scopes and their capability lists are frozen.

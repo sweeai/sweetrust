@@ -1,7 +1,7 @@
 {
-  "name": "@swee/trust",
+  "name": "sweetrust",
   "version": "0.3.0",
-  "description": "Trust rails for AI agents: issue authority, enforce it, prove what happened. SweeMandate signs (type-enforced multi-tier capability mandates on an Ed25519-signed hash chain), SweeGate enforces (Sourced<T> provenance tiers, audited declassifiers, fail-closed sinks, tamper-evident receipts), SweeVerify proves (signed receipt chains re-checkable from public material alone, with a Sui anchor convention that makes tail truncation detectable). Zero runtime dependencies — node builtins only. Import the whole rail or one primitive: @swee/trust, @swee/trust/mandate, @swee/trust/gate, @swee/trust/verify.",
+  "description": "Trust rails for AI agents: issue authority, enforce it, prove what happened. SweeMandate signs (type-enforced multi-tier capability mandates on an Ed25519-signed hash chain), SweeGate enforces (Sourced<T> provenance tiers, audited declassifiers, fail-closed sinks, tamper-evident receipts), SweeVerify proves (signed receipt chains re-checkable from public material alone, with a Sui anchor convention that makes tail truncation detectable). Zero runtime dependencies — node builtins only. Import the whole rail or one primitive: sweetrust, sweetrust/mandate, sweetrust/gate, sweetrust/verify.",
   "type": "module",
   "main": "./dist/index.mjs",
   "types": "./dist/index.d.mts",

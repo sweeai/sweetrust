@@ -1,13 +1,13 @@
-# @swee/trust — AGENTS.md
+# sweetrust — AGENTS.md
 
-> Package contract for any agent (human or AI) working inside `@swee/trust`. Read
+> Package contract for any agent (human or AI) working inside `sweetrust`. Read
 > end-to-end before touching anything here.
 
 ## What this package is
 
-**The trust rail: `@swee/trust/mandate` issues authority · `@swee/trust/gate` enforces it · `@swee/trust/verify` proves it happened.** One npm package, three subpath exports, zero runtime dependencies.
+**The trust rail: `sweetrust/mandate` issues authority · `sweetrust/gate` enforces it · `sweetrust/verify` proves it happened.** One npm package, three subpath exports, zero runtime dependencies.
 
-Until 2026-07-30 these were three packages (`@sweetrust/mandate`, `@sweetrust/gate`, `@sweetrust/verify`). All three were unpublished, so the merge was free. The reasoning: `npm i @swee/trust` is a product; three scoped installs is a build system the user has to assemble. Import-level decoupling was preserved — each subpath is its own bundle entry, and importing one does not pull the others.
+Until 2026-07-30 these were three packages (`@sweetrust/mandate`, `@sweetrust/gate`, `@sweetrust/verify`). All three were unpublished, so the merge was free. The reasoning: `npm i sweetrust` is a product; three scoped installs is a build system the user has to assemble. Import-level decoupling was preserved — each subpath is its own bundle entry, and importing one does not pull the others.
 
 ## Corrections applied at the merge — do not reintroduce these
 
@@ -37,9 +37,9 @@ The lesson worth keeping: **all five of these were true when written.** An `AGEN
 ```
 src/
   index.ts        the whole-rail barrel (curated — see below)
-  mandate/        authority   → subpath "@swee/trust/mandate"
-  gate/           enforcement → subpath "@swee/trust/gate"
-  verify/         evidence    → subpath "@swee/trust/verify"
+  mandate/        authority   → subpath "sweetrust/mandate"
+  gate/           enforcement → subpath "sweetrust/gate"
+  verify/         evidence    → subpath "sweetrust/verify"
 test/
   index-barrel.test.ts   guards the barrel against silent export loss
   mandate/ gate/ verify/ mirror src/
