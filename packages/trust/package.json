@@ -1,7 +1,7 @@
 {
   "name": "sweetrust",
   "version": "0.3.0",
-  "description": "Trust rails for AI agents: issue authority, enforce it, prove what happened. SweeMandate signs (type-enforced multi-tier capability mandates on an Ed25519-signed hash chain), SweeGate enforces (Sourced<T> provenance tiers, audited declassifiers, fail-closed sinks, tamper-evident receipts), SweeVerify proves (signed receipt chains re-checkable from public material alone, with a Sui anchor convention that makes tail truncation detectable). Zero runtime dependencies — node builtins only. Import the whole rail or one primitive: sweetrust, sweetrust/mandate, sweetrust/gate, sweetrust/verify.",
+  "description": "Trust rails for AI agents: issue authority, enforce it, prove what happened. SweeMandate signs (type-enforced multi-tier capability mandates on an Ed25519-signed hash chain), SweeGate enforces (Sourced<T> provenance tiers, audited declassifiers, fail-closed sinks, tamper-evident receipts), SweeVerify proves (signed receipt chains re-checkable from public material alone, with a Sui anchor convention that makes tail truncation detectable). No runtime dependencies outside sweetrust/sui, which needs @mysten/sui as an optional peer. Import the whole rail or one primitive: sweetrust, sweetrust/mandate, sweetrust/gate, sweetrust/verify, sweetrust/sui.",
   "type": "module",
   "main": "./dist/index.mjs",
   "types": "./dist/index.d.mts",
@@ -25,6 +25,11 @@
       "types": "./dist/verify.d.mts",
       "import": "./dist/verify.mjs",
       "default": "./dist/verify.mjs"
+    },
+    "./sui": {
+      "types": "./dist/sui.d.mts",
+      "import": "./dist/sui.mjs",
+      "default": "./dist/sui.mjs"
     },
     "./package.json": "./package.json"
   },
@@ -73,6 +78,7 @@
     "typecheck:forgery": "node --experimental-strip-types scripts/forgery-typecheck.ts"
   },
   "devDependencies": {
+    "@mysten/sui": "2.33.1",
     "@types/node": "^22.0.0",
     "fast-check": "^3.23.2",
     "tsdown": "^0.21.10",
@@ -82,5 +88,13 @@
   "publishConfig": {
     "access": "public"
   },
-  "sideEffects": false
+  "sideEffects": false,
+  "peerDependencies": {
+    "@mysten/sui": "^2.33.1"
+  },
+  "peerDependenciesMeta": {
+    "@mysten/sui": {
+      "optional": true
+    }
+  }
 }
