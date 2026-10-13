@@ -300,15 +300,21 @@ describe("ReceiptLog", () => {
     expect(log.verifyChain()).toBe(true)
   })
 
-  test("tamper-evidence, observed not asserted: mutating a past event breaks the chain", () => {
+  test("tamper-evidence, observed not asserted: altering a past event breaks the chain", () => {
     const log = new ReceiptLog()
     log.append(entry("pay", "executed"))
     log.append(entry("pay", "executed"))
-    const events = (log as unknown as { events: Array<{ decision: string }> }).events
-    const original = events[0]!.decision
-    events[0]!.decision = "refused"
+    const events = (log as unknown as { events: Array<Record<string, unknown>> }).events
+    // Since the 2026-10-13 gate audit a committed receipt is deep-frozen, so
+    // the field assignment this test used to make (`events[0].decision = …`)
+    // throws instead of tampering. The alteration is now made the way a
+    // compromised host would have to make it: by REPLACING the stored record.
+    // The claim under test is unchanged — the chain detects the altered event.
+    const original = events[0]!
+    expect(Object.isFrozen(original)).toBe(true)
+    events[0] = { ...original, decision: "refused" }
     expect(log.verifyChain()).toBe(false)
-    events[0]!.decision = original
+    events[0] = original
     expect(log.verifyChain()).toBe(true)
   })
 })

@@ -537,6 +537,17 @@ export function receiptBody(e: Omit<Receipt, "hash">): string {
   })
 }
 
+/** Freeze an object graph in place. `seen` guards against a cyclic graph handed
+ * straight to append(): receiptBody() rejects one before commit() runs, but
+ * a `toJSON` can hide a cycle from JSON.stringify and not from a walk. */
+function deepFreeze<T>(root: T, seen = new WeakSet<object>()): T {
+  if (typeof root !== "object" || root === null || seen.has(root)) return root
+  seen.add(root)
+  Object.freeze(root)
+  for (const v of Object.values(root)) deepFreeze(v, seen)
+  return root
+}
+
 export class ReceiptLog {
   private events: Receipt[] = []
   /**
@@ -570,9 +581,20 @@ export class ReceiptLog {
     return { ...entry, seq, prevHash, hash }
   }
 
-  /** Commit a receipt from nextReceipt(). The only mutation point. */
+  /**
+   * Commit a receipt from nextReceipt(). The only mutation point.
+   *
+   * The receipt is deep-frozen here (the 2026-10-13 gate audit). all() has
+   * returned a COPY of the array since A5, but the elements were the log's own
+   * objects, so anyone holding one could edit it in place — and the sharp
+   * version, `receipt.args = { toJSON: () => original }`, hid an argument from
+   * the in-memory receipt while receiptBody() still serialized the original and
+   * verifyChain() stayed green. What append() returns and what all() hands out
+   * is now one frozen object, and nothing holding it can change what the log
+   * says. A receipt's args are plain JSON trees by the time they get here.
+   */
   protected commit(receipt: Receipt): Receipt {
-    this.events.push(receipt)
+    this.events.push(deepFreeze(receipt))
     this.appended++
     return receipt
   }

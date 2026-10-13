@@ -186,10 +186,19 @@ describe("A5 — the receipt log hands out its live array, and truncation is sil
     return log
   }
 
-  it("mutating a past event does break the chain — the guarantee holds here", () => {
+  it("altering a past event does break the chain — the guarantee holds here", () => {
     const log = build()
-    const events = log.all() as Receipt[]
-    ;(events[1] as { reason: string }).reason = "under cap"
+    // This test used to assign `events[1].reason` on the object all() handed
+    // out, which only worked because all() returned the LIVE receipt objects —
+    // the hole the 2026-10-13 gate audit closed (receipts are deep-frozen at
+    // commit). The assignment now throws; the alteration is made by replacing
+    // the stored record, and the chain still detects it.
+    const handedOut = log.all()[1]!
+    expect(() => {
+      ;(handedOut as { reason: string }).reason = "under cap"
+    }).toThrow(TypeError)
+    const internal = (log as unknown as { events: Receipt[] }).events
+    internal[1] = { ...internal[1]!, reason: "under cap" }
     expect(log.verifyChain()).toBe(false)
   })
 

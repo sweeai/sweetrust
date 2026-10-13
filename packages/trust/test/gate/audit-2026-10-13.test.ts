@@ -260,3 +260,65 @@ describe("#11 — the log owns seq, prevHash and hash; an entry cannot supply th
     expect(log.all().map((r) => r.seq)).toEqual([0, 1])
   })
 })
+
+// ── #12 LOW — all() copied the array but handed out the live Receipt objects ─
+// A5 (2026-07-25) made all() return a copy of the ARRAY. The elements were
+// still the log's own objects, so a holder could edit a receipt in place. The
+// sharp version: swap `args` for `{ toJSON: () => original }` — the in-memory
+// receipt no longer carries the argument, yet receiptBody() still serializes
+// the original and verifyChain() stays green. Receipts are now deep-frozen at
+// commit; what append() returns and what all() hands out is the same frozen
+// object, and nothing holding it can change what the log says.
+describe("#12 — a committed receipt is deep-frozen", () => {
+  const paid = () => {
+    const log = new ReceiptLog()
+    const pay = makeSink<{ to: Sourced<string> }, string>({
+      name: "pay",
+      requires: { to: "verified" },
+      mode: "enforce",
+      log,
+      execute: () => "sent",
+    })
+    const r = pay({ to: Sourced.fromAuthority("ACME", "reg") })
+    return { log, receipt: r.receipt }
+  }
+
+  it("the receipt, its args bag and each argument record are frozen", () => {
+    const { log, receipt } = paid()
+    expect(Object.isFrozen(receipt)).toBe(true)
+    expect(Object.isFrozen(receipt.args)).toBe(true)
+    expect(Object.isFrozen(receipt.args.to)).toBe(true)
+    expect(log.all()[0]).toBe(receipt) // one object, not a copy that could drift
+    expect(Object.isFrozen(log.all()[0])).toBe(true)
+  })
+
+  it("ATTACK: the toJSON swap that kept the chain green while hiding the argument now throws", () => {
+    const { log, receipt } = paid()
+    const original = receipt.args
+    expect(() => {
+      ;(receipt as { args: unknown }).args = { toJSON: () => original }
+    }).toThrow(TypeError)
+    expect(() => {
+      ;(receipt as { decision: string }).decision = "refused"
+    }).toThrow(TypeError)
+    expect(() => {
+      ;(receipt.args.to as { value: unknown }).value = "attacker@evil.test"
+    }).toThrow(TypeError)
+    expect(receipt.args.to!.value).toBe("ACME")
+    expect(log.verifyChain()).toBe(true)
+  })
+
+  it("a receipt appended directly with nested args is frozen all the way down", () => {
+    const log = new ReceiptLog()
+    const r = log.append({
+      at: "t",
+      sink: "s",
+      decision: "executed",
+      args: { k: { value: { nested: [1, { deep: true }] }, tier: "verified", provenance: "p" } },
+    })
+    const v = r.args.k!.value as { nested: [number, { deep: boolean }] }
+    expect(Object.isFrozen(v)).toBe(true)
+    expect(Object.isFrozen(v.nested)).toBe(true)
+    expect(Object.isFrozen(v.nested[1])).toBe(true)
+  })
+})
