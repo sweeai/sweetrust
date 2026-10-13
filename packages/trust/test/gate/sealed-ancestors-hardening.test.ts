@@ -31,11 +31,35 @@ describe("the sealed ancestor Set still behaves like a Set in every read path", 
     expect([...a.entries()].length).toBe(2)
   })
 
-  it("forEach works and receives the right arguments", () => {
+  it("forEach works and receives the right arguments — all three of them", () => {
+    // This test used to look at the FIRST argument only, and so measured half
+    // of what its name claims. A Set's forEach hands the callback (value, key,
+    // set): the third argument is the Set being iterated, and until the
+    // 2026-10-13 gate audit that was the RAW inner Set, not the sealed view —
+    // the one reference through which add/delete/clear still worked.
     const a = sample().provenance.ancestors
     const seen: string[] = []
-    a.forEach((v) => seen.push(v))
+    const thirds: unknown[] = []
+    a.forEach((v, k, set) => {
+      seen.push(v)
+      expect(k).toBe(v) // a Set's key IS its value
+      thirds.push(set)
+    })
     expect(seen.sort()).toEqual(["channel:email-inbound", "llm:Extract"])
+    for (const set of thirds) expect(set).toBe(a) // the sealed view, never the raw Set
+  })
+
+  it("the Set forEach hands its callback cannot mutate the ancestry", () => {
+    const a = sample().provenance.ancestors
+    let leaked: Set<string> | undefined
+    a.forEach((_v, _k, set) => {
+      leaked = set as Set<string>
+    })
+    expect(leaked).toBeDefined()
+    expect(() => leaked!.delete("llm:Extract")).toThrow(/immutable/)
+    expect(() => leaked!.add("authority:forged")).toThrow(/immutable/)
+    expect(() => leaked!.clear()).toThrow(/immutable/)
+    expect(a.size).toBe(2)
   })
 
   it("is still a Set to instanceof and to Set-consuming code", () => {
