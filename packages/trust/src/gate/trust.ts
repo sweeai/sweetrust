@@ -98,11 +98,24 @@ let construct: <T>(value: T, tier: Tier, provenance: Provenance) => Sourced<T>
  */
 function sealAncestors(source: Iterable<string>): ReadonlySet<string> {
   const inner = new Set(source) // copy: the caller's Set is never our Set
-  return new Proxy(inner, {
+  const sealed = new Proxy(inner, {
     get(target, prop) {
       if (prop === "add" || prop === "delete" || prop === "clear") {
         return () => {
           throw new TypeError(`Sourced.provenance.ancestors is immutable (attempted ${String(prop)})`)
+        }
+      }
+      // forEach is the one Set read that hands its RECEIVER to caller code: the
+      // callback's third argument is the Set being iterated. Bound to `target`
+      // like every other method, that was the raw inner Set, and
+      // `ancestors.forEach((_v, _k, set) => set.delete(…))` walked straight
+      // past the three traps above (the 2026-10-13 gate audit). The callback
+      // now receives the sealed view, so the mutators throw there too. Every
+      // other method is safe to bind to the raw Set: `has`/`size` return
+      // scalars and the iterators yield strings, never the Set.
+      if (prop === "forEach") {
+        return (cb: (value: string, key: string, set: ReadonlySet<string>) => void, thisArg?: unknown) => {
+          target.forEach((v, k) => cb.call(thisArg, v, k, sealed))
         }
       }
       const v = Reflect.get(target, prop, target)
@@ -111,6 +124,7 @@ function sealAncestors(source: Iterable<string>): ReadonlySet<string> {
     set: () => false,
     deleteProperty: () => false,
   }) as ReadonlySet<string>
+  return sealed
 }
 
 export class Sourced<T> {
