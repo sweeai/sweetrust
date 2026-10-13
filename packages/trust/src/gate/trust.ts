@@ -1205,7 +1205,12 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
       }
     }
 
-    const decision = violations.length > 0 ? "warned" : cfg.mode === "observe" ? "observed" : "executed"
+    // The decision names the MODE that let the call through. The old order
+    // (`violations.length > 0 ? "warned" : …`) labelled an observe-mode call
+    // WITH violations "warned", so `observed` only ever labelled a clean call
+    // and a dirty one read as if the sink were in warn mode (the 2026-10-13
+    // gate audit). The violations are on the receipt's reason either way.
+    const decision = cfg.mode === "observe" ? "observed" : violations.length > 0 ? "warned" : "executed"
 
     // The operation runs before the receipt can describe its outcome, so a
     // throw used to leave NO record at all (adversarial pass V5, 2026-07-25):

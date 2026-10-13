@@ -416,10 +416,16 @@ describe("makeSink", () => {
   })
 
   test("observe: violations execute anyway, recorded as observed (Rule 5 on-ramp)", () => {
+    // Until the 2026-10-13 gate audit this test passed a CLEAN call, so it
+    // never exercised the violation it names — and the kernel labelled an
+    // observe-mode call WITH violations "warned". It now passes an under-tier
+    // argument: the call executes, the label is `observed`, and the reasons
+    // ride along on the receipt.
     const log = new ReceiptLog()
-    const r = paySink(log, "observe")({ to: verified(), amount: corroboratedAmount() })
+    const r = paySink(log, "observe")({ to: untrusted(), amount: corroboratedAmount() })
     expect(r.ok).toBe(true)
     expect(r.receipt.decision).toBe("observed")
+    expect(r.receipt.reason).toContain("requires verified")
   })
 
   test("warn: violations execute but the receipt says warned + carries the reasons", () => {

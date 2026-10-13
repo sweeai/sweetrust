@@ -310,7 +310,7 @@ describe("DAN-1159 item 2 — no action without its receipt", () => {
     expect(out.ok).toBe(true)
     expect(executed()).toBe(1)
     expect(log.all()).toHaveLength(1)
-    expect(log.all()[0]!.decision).toBe("warned")
+    expect(log.all()[0]!.decision).toBe("observed") // "warned" until the 2026-10-13 gate audit (#20)
     expect(log.all()[0]!.reason).toContain("cannot be written to a receipt")
     expect(log.verifyChain()).toBe(true)
   })

@@ -1150,3 +1150,38 @@ describe("#5 — an async action that rejects leaves an `errored` receipt behind
     expect(thrower.log.all().map((x) => x.decision)).toEqual(["errored"])
   })
 })
+
+// ── #20 DOC — observe mode labelled a call WITH violations "warned" ──────────
+// The label was `violations.length > 0 ? "warned" : mode === "observe" ?
+// "observed" : "executed"`, so `observed` only ever labelled a CLEAN
+// observe-mode call, and a dirty one read as if the sink were in warn mode.
+// The decision names the MODE the sink was in when it let the call through,
+// and the violations are on the receipt either way.
+describe("#20 — the decision names the mode: observe → observed, warn → warned", () => {
+  const sink = (mode: "observe" | "warn") => {
+    const log = new ReceiptLog()
+    const pay = makeSink<{ to: Sourced<string> }, string>({ name: "pay", requires: { to: "verified" }, mode, log, execute: () => "sent" })
+    return { log, pay }
+  }
+
+  it("observe + violation → observed, with the violation on the receipt", () => {
+    const { pay } = sink("observe")
+    const r = pay({ to: Sourced.fromChannel("evil", "email") })
+    expect(r.ok).toBe(true)
+    expect(r.receipt.decision).toBe("observed")
+    expect(r.receipt.reason).toContain("requires verified")
+  })
+
+  it("observe + clean → observed, with no reason", () => {
+    const { pay } = sink("observe")
+    const r = pay({ to: Sourced.fromAuthority("ACME", "reg") })
+    expect(r.receipt.decision).toBe("observed")
+    expect(r.receipt.reason).toBeUndefined()
+  })
+
+  it("warn + violation → warned; warn + clean → executed (unchanged)", () => {
+    const { pay } = sink("warn")
+    expect(pay({ to: Sourced.fromChannel("evil", "email") }).receipt.decision).toBe("warned")
+    expect(pay({ to: Sourced.fromAuthority("ACME", "reg") }).receipt.decision).toBe("executed")
+  })
+})
