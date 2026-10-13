@@ -408,3 +408,34 @@ describe("2026-10-13 verify audit, finding 5 — a getter record is read once, b
     }
   })
 })
+
+describe("2026-10-13 verify audit, finding 3 — each signer's verify() pins its own signature shape", () => {
+  test("Ed25519 signer and verifier: a signature that is not 128 lowercase hex characters throws, so the chain reports malformed-record", () => {
+    const signer = ed25519Signer()
+    const { publicKey, privateKey } = generateKeyPairSync("ed25519")
+    void privateKey
+    const verifier = makeEd25519VerifierLive({ publicKeyPem: publicKey.export({ format: "pem", type: "spki" }) as string })
+    const [good] = buildChain(signer, EVENTS)
+    for (const bad of [good!.signature.toUpperCase(), good!.signature + "zz", good!.signature + "a", good!.signature.slice(1), " " + good!.signature]) {
+      const rec = { ...good!, signature: bad }
+      expect(() => signer.verify(rec), bad).toThrow(/128 lowercase hex/)
+      expect(() => verifier.verify(rec), bad).toThrow(/128 lowercase hex/)
+      expect(check([rec], signer), bad).toMatchObject({ valid: false, firstInvalidIndex: 0, reason: "malformed-record" })
+    }
+    expect(signer.verify(good!)).toBe(true)
+  })
+
+  test("in-memory signer: a signature that is not inmem- plus 64 lowercase hex characters throws, so the chain reports malformed-record", () => {
+    const signer = makeInMemorySignerLive()
+    const [good] = buildChain(signer, EVENTS)
+    for (const bad of [good!.signature.toUpperCase(), good!.signature + "zz", "inmem-", good!.signature.slice("inmem-".length)]) {
+      const rec = { ...good!, signature: bad }
+      expect(() => signer.verify(rec), bad).toThrow(/inmem-/)
+      expect(check([rec], signer), bad).toMatchObject({ valid: false, firstInvalidIndex: 0, reason: "malformed-record" })
+    }
+    // A well-formed but WRONG signature is still a mismatch, not malformed.
+    const wrong = { ...good!, signature: "inmem-" + "0".repeat(64) }
+    expect(signer.verify(wrong)).toBe(false)
+    expect(check([wrong], signer).reason).toBe("signature-mismatch")
+  })
+})

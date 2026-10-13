@@ -261,3 +261,47 @@ describe("finding 5 — each field was read several times, and a getter can answ
     }
   })
 })
+
+describe("finding 3 — the signature is decoded leniently, so byte-different signatures verify", () => {
+  // Buffer.from(s, "hex") stops at the first non-hex character and accepts an
+  // array or a {type:"Buffer"} object outright, so many strings that are not
+  // the signature decode to the signature's bytes. On the last record nothing
+  // else pins those bytes. An Ed25519 signature is exactly 64 bytes: 128
+  // lowercase hex characters, or it is not a signature.
+  const variants: ReadonlyArray<readonly [string, (s: string) => unknown]> = [
+    ["uppercase hex", (s) => s.toUpperCase()],
+    ["trailing non-hex garbage", (s) => s + "zz-not-hex"],
+    ["trailing space", (s) => s + " "],
+    ["trailing newline", (s) => s + "\n"],
+    ["byte array instead of hex", (s) => Array.from(Buffer.from(s, "hex"))],
+    ["{type:'Buffer',data:[...]}", (s) => ({ type: "Buffer", data: Array.from(Buffer.from(s, "hex")) })],
+    ["odd length (extra nibble)", (s) => s + "a"],
+    ["inmem- prefixed", (s) => "inmem-" + s],
+    ["127 characters", (s) => s.slice(1)],
+  ]
+
+  it.each(variants)("ATTACK: %s on the LAST record is malformed-record, on a MIDDLE record too", (_label, mutate) => {
+    const last = loose(session().records)
+    last[2]!["signature"] = mutate(last[2]!["signature"] as string)
+    expect(verdict(last)).toMatchObject({ valid: false, firstInvalidIndex: 2, reason: "malformed-record" })
+    const mid = loose(session().records)
+    mid[1]!["signature"] = mutate(mid[1]!["signature"] as string)
+    expect(verdict(mid)).toMatchObject({ valid: false, firstInvalidIndex: 1, reason: "malformed-record" })
+  })
+
+  it("an empty signature is still missing-signature, not malformed", () => {
+    const t = loose(session(1).records)
+    t[0]!["signature"] = ""
+    expect(verdict(t)).toMatchObject({ valid: false, firstInvalidIndex: 0, reason: "missing-signature" })
+  })
+
+  it("parity: verifyAuditChain refuses an uppercase-plus-garbage signature for the same reason", () => {
+    const t = loose(auditChain())
+    t[1]!["signature"] = (t[1]!["signature"] as string).toUpperCase() + "GARBAGE"
+    const b = auditVerdict(t)
+    expect(b).toMatchObject({ valid: false, firstInvalidIndex: 1, reason: "malformed-record" })
+    const r = loose(session(1).records)
+    r[0]!["signature"] = (r[0]!["signature"] as string).toUpperCase() + "GARBAGE"
+    sameVerdict(verdict(r), auditVerdict(r))
+  })
+})

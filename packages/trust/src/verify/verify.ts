@@ -220,6 +220,10 @@ const preview = (v: unknown): string => (typeof v === "string" ? `${v.slice(0, 1
 // list; the parity test in test/verify/adversarial-envelope.test.ts holds the
 // two verdicts together.
 const ENVELOPE_KEYS: ReadonlyArray<string> = ["payload", "signature", "signerPublicKeyHex", "signedAt", "previousHash", "domain"]
+// The exact text of an Ed25519 signature as mandate's signer emits it. The
+// Ed25519 factories in mandate/signer.ts hold the same literal; it is a fact
+// about the algorithm (64 bytes), not a convention that can drift.
+const ED25519_SIGNATURE_HEX = /^[0-9a-f]{128}$/
 const envelopeKeyProblem = (keys: ReadonlyArray<string>): string | null => {
   const stray = keys.filter((k) => !ENVELOPE_KEYS.includes(k))
   if (stray.length > 0) return `carries a key outside the signed envelope: ${stray.map((k) => JSON.stringify(k)).join(", ")}`
@@ -344,6 +348,15 @@ export function verifySignedChain(
     // Envelope shape, before any byte of it is trusted.
     const shape = envelopeKeyProblem(keys)
     if (shape !== null) return malformed(i, `record ${i} ${shape}`)
+    // Signature shape, before any decoding. Buffer.from(s, "hex") stops at the
+    // first non-hex character and accepts arrays and {type:"Buffer"} objects,
+    // so uppercase, trailing garbage, a byte array and an odd-length string all
+    // decoded to the genuine bytes and VERIFIED on the last record (the
+    // 2026-10-13 verify audit). An Ed25519 signature is 64 bytes: 128 lowercase
+    // hex characters, as the signer emits them, or it is not a signature.
+    if (typeof r.signature !== "string" || !ED25519_SIGNATURE_HEX.test(r.signature)) {
+      return malformed(i, `record ${i} signature is not 128 lowercase hex characters`)
+    }
     // This function is what an auditor points at a file from an UNTRUSTED
     // party, so every malformed input has to come back as a verdict. It used to
     // throw: `createPublicKey` on a hex string that is not an SPKI key raises

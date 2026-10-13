@@ -171,6 +171,23 @@ export interface MandateSignerService {
 
 const nowISO = (): ISO8601 => new Date().toISOString() as ISO8601
 
+// Each signer pins the EXACT text of its own signatures before decoding one.
+// Buffer.from(s, "hex") stops at the first non-hex character and accepts
+// arrays and {type:"Buffer"} objects, so uppercase, trailing garbage, a byte
+// array and an odd-length string all decoded to the genuine bytes and verified
+// (the 2026-10-13 verify audit). A malformed shape THROWS rather than returning
+// false: verifyAuditChain reports a throw as malformed-record, which is what a
+// value that is not a signature is, where false would say signature-mismatch.
+// verifySignedChain holds the same Ed25519 literal for its own edVerify path.
+const ED25519_SIGNATURE_HEX = /^[0-9a-f]{128}$/
+const IN_MEMORY_SIGNATURE = /^inmem-[0-9a-f]{64}$/
+const assertEd25519SignatureShape = (signature: unknown): string => {
+  if (typeof signature !== "string" || !ED25519_SIGNATURE_HEX.test(signature)) {
+    throw new Error("MandateSigner: signature is not 128 lowercase hex characters")
+  }
+  return signature
+}
+
 /**
  * makeInMemorySignerLive — test signer (a pure function of the signed envelope).
  *
@@ -208,6 +225,9 @@ export const makeInMemorySignerLive = (
     // Each field is read once (the 2026-10-13 verify audit): the preimage is
     // built from these locals, never from a second read of a live object.
     const { signature, payload, previousHash, signedAt, domain } = signed
+    if (typeof signature !== "string" || !IN_MEMORY_SIGNATURE.test(signature)) {
+      throw new Error("MandateSigner: signature is not inmem- followed by 64 lowercase hex characters")
+    }
     const expected = "inmem-" + sha256Hex(signedPreimage({ domain, payload, previousHash, signedAt }))
     return signature === expected
   },
@@ -308,12 +328,12 @@ export const makeEd25519SignerLive = (
       // Each field is read once (the 2026-10-13 verify audit): a getter cannot
       // answer the key import with one value and the preimage with another.
       const { signature, signerPublicKeyHex, payload, previousHash, signedAt, domain } = signed
+      const signatureBuffer = Buffer.from(assertEd25519SignatureShape(signature), "hex")
       const recordPublicKey = createPublicKey({
         key: Buffer.from(signerPublicKeyHex, "hex"),
         format: "der",
         type: "spki",
       })
-      const signatureBuffer = Buffer.from(signature, "hex")
       return edVerify(null, Buffer.from(signedPreimage({ domain, payload, previousHash, signedAt })), recordPublicKey, signatureBuffer)
     },
   }
@@ -366,12 +386,12 @@ export const makeEd25519VerifierLive = (
       // v0.2.1 work per spec I11).
       // Each field is read once (the 2026-10-13 verify audit).
       const { signature, signerPublicKeyHex, payload, previousHash, signedAt, domain } = signed
+      const signatureBuffer = Buffer.from(assertEd25519SignatureShape(signature), "hex")
       const recordPublicKey = createPublicKey({
         key: Buffer.from(signerPublicKeyHex, "hex"),
         format: "der",
         type: "spki",
       })
-      const signatureBuffer = Buffer.from(signature, "hex")
       return edVerify(null, Buffer.from(signedPreimage({ domain, payload, previousHash, signedAt })), recordPublicKey, signatureBuffer)
     },
   }
