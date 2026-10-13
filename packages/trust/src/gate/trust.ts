@@ -816,6 +816,11 @@ export function mockJudgmentProvider(intent: {
 // ── Sinks (§4 Rule 4 + §6.5 adoption ladder) ────────────────────────────────
 
 export type EnforcementMode = "observe" | "warn" | "enforce"
+const MODES: ReadonlySet<string> = new Set<EnforcementMode>(["observe", "warn", "enforce"])
+
+/** Name a value in a TypeError without dereferencing it. */
+const preview = (v: unknown): string =>
+  typeof v === "string" ? JSON.stringify(v) : typeof v === "symbol" ? v.toString() : v === null ? "null" : typeof v === "object" ? "<object>" : typeof v === "function" ? "<function>" : String(v)
 
 export type SinkResult<R> =
   | { readonly ok: true; readonly result: R; readonly receipt: Receipt }
@@ -914,6 +919,27 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
     judgment: ownJudgment === undefined ? undefined : Object.freeze({ provider: ownJudgment.provider, floor: ownJudgment.floor }),
     redact: copyOwn<"raw" | "hash" | "truncate" | undefined>(own("redact")),
   })
+
+  // ── Validate at construction: a misconfigured sink never exists ──────────
+  // The call body used to test `mode === "enforce"` and `mode === "observe"`
+  // and let everything else fall through to the WARN path, so "ENFORCE",
+  // "strict", undefined and null all executed an under-tier argument with a
+  // receipt that said "warned" (the 2026-10-13 gate audit). The deployment
+  // that hits this reads its mode from an environment variable. A TypeError
+  // here is the only moment the misconfiguration is one line away from its
+  // cause; at call time it is a silently permissive sink.
+  const where = `makeSink(${preview(cfg.name)})`
+  if (typeof cfg.mode !== "string" || !MODES.has(cfg.mode)) {
+    throw new TypeError(`${where}: mode must be one of "observe" | "warn" | "enforce", got ${preview(cfg.mode)}`)
+  }
+  if (typeof cfg.log !== "object" || cfg.log === null || typeof cfg.log.append !== "function") {
+    throw new TypeError(`${where}: log must be a ReceiptLog (an object with an append() method), got ${preview(cfg.log)}`)
+  }
+  for (const [key, tier] of Object.entries(cfg.requires)) {
+    if (!isTier(tier)) {
+      throw new TypeError(`${where}: requires.${key} must be one of ${TIERS.map((t) => `"${t}"`).join(" | ")}, got ${preview(tier)}`)
+    }
+  }
 
   return (args: Args): SinkResult<R> => {
     // `Object.create(null)` rather than `{}`: `rendered` is keyed by ATTACKER-
