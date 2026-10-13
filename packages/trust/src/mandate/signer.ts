@@ -25,7 +25,7 @@
  *   - No whitespace
  *   - Identical input produces identical bytes (deterministic signing)
  */
-import { createHash, createPrivateKey, createPublicKey, sign as edSign, verify as edVerify } from "node:crypto"
+import { createHash, createPrivateKey, createPublicKey, sign as edSign, verify as edVerify, type KeyObject } from "node:crypto"
 import type {
   ISO8601,
   Signed,
@@ -40,31 +40,60 @@ import type {
  * over) and for hash-chaining (producing the bytes the SHA-256 hash is
  * computed over). The two operations MUST agree on canonicalization or
  * verification will fail spuriously.
+ *
+ * It follows JSON.stringify's SerializeJSONProperty step for step, so that a
+ * signature made over an in-memory value still verifies after the value has
+ * been through JSON.stringify and JSON.parse (an export, a store file). The
+ * steps that matter, in order: `toJSON(key)` is called ONCE on an object (a
+ * function included) or a BigInt, and its result is NOT asked for toJSON
+ * again; a boxed Number / String / Boolean / BigInt is unwrapped; then the
+ * primitives; then arrays and plain objects, whose keys are sorted (the one
+ * permitted difference). Before the 2026-10-13 verify audit the first two
+ * steps were wrong: toJSON was applied recursively and without its key, and a
+ * boxed String signed as {"0":"a","1":"b"} while its export read "ab", so an
+ * honest record failed to verify the moment it left memory.
  */
-const canon = (value: unknown): string | undefined => {
-  // Honor toJSON() before anything else (Date, URL, custom carriers) — exactly
-  // as JSON.stringify does. Without this, a Date signs as "{}" but round-trips
-  // as its ISO string, breaking the invariant below.
-  if (value !== null && typeof value === "object") {
+const unbox = (value: object): unknown => {
+  // Internal-slot tests, in JSON.stringify's order. `valueOf` is called on the
+  // PROTOTYPE so it answers for the slot alone, then the conversion is the
+  // spec's (ToNumber / ToString honour an instance override, as stringify does).
+  try { Number.prototype.valueOf.call(value); return Number(value) } catch { /* no [[NumberData]] */ }
+  try { String.prototype.valueOf.call(value); return String(value) } catch { /* no [[StringData]] */ }
+  try { return Boolean.prototype.valueOf.call(value) } catch { /* no [[BooleanData]] */ }
+  try { return BigInt.prototype.valueOf.call(value) } catch { /* no [[BigIntData]] */ }
+  return value
+}
+
+const canon = (value: unknown, key: string): string | undefined => {
+  // Step 2: toJSON, once, with the key. Objects include functions here, and
+  // BigInt is the one primitive stringify asks (so a BigInt.prototype.toJSON
+  // installed by the host is honoured). The result is used as-is below: a
+  // carrier returned by a carrier is serialized as a plain object.
+  if ((typeof value === "object" && value !== null) || typeof value === "function" || typeof value === "bigint") {
     const toJSON = (value as { toJSON?: unknown }).toJSON
-    if (typeof toJSON === "function") {
-      return canon((value as { toJSON: () => unknown }).toJSON())
-    }
+    if (typeof toJSON === "function") value = (toJSON as (this: unknown, k: string) => unknown).call(value, key)
   }
-  if (value === null || typeof value !== "object") {
-    // Matches JSON.stringify for every primitive, including the edge cases:
-    // NaN/Infinity → "null", undefined/function/symbol → undefined (dropped
-    // or nulled by the callers below), bigint → throws, as stringify does.
-    return JSON.stringify(value)
-  }
+  // Step 4: a boxed primitive is its primitive.
+  if (typeof value === "object" && value !== null) value = unbox(value)
+  // Steps 5 to 9: the primitives. NaN/Infinity are null; a BigInt throws, as
+  // stringify does; undefined, function and symbol are nothing (dropped as a
+  // key, null as an element, by the two callers below).
+  if (value === null) return "null"
+  if (value === true) return "true"
+  if (value === false) return "false"
+  if (typeof value === "string") return JSON.stringify(value)
+  if (typeof value === "number") return Number.isFinite(value) ? String(value) : "null"
+  if (typeof value === "bigint") throw new TypeError("Do not know how to serialize a BigInt")
+  if (typeof value !== "object") return undefined
   if (Array.isArray(value)) {
     // JSON.stringify renders undefined/function/symbol ELEMENTS as null —
     // never as a hole. "[1,,2]" is not JSON; "[1,null,2]" is. Iterate by INDEX,
     // not Array.prototype.map: .map skips elision holes, so `?? "null"` never
     // fires for a true hole (`[1,,2]`), emitting invalid JSON. Indexing visits
-    // holes as `undefined` → canon → "null" (DAN-646).
+    // holes as `undefined` → canon → "null" (DAN-646). The key handed to an
+    // element's toJSON is its index as a string, as stringify hands it.
     const parts: string[] = []
-    for (let i = 0; i < value.length; i++) parts.push(canon(value[i]) ?? "null")
+    for (let i = 0; i < value.length; i++) parts.push(canon(value[i], String(i)) ?? "null")
     return "[" + parts.join(",") + "]"
   }
   // Keys whose values serialize to nothing (undefined, function, symbol) are
@@ -73,17 +102,19 @@ const canon = (value: unknown): string | undefined => {
   const record = value as Record<string, unknown>
   const parts: string[] = []
   for (const k of Object.keys(record).sort()) {
-    const s = canon(record[k])
+    const s = canon(record[k], k)
     if (s !== undefined) parts.push(JSON.stringify(k) + ":" + s)
   }
   return "{" + parts.join(",") + "}"
 }
 
-// INVARIANT (property-tested in test/canonical-property.test.ts): for any
-// JSON-representable value x, canonicalJSON(x) parses as JSON and
-// JSON.parse(canonicalJSON(x)) deep-equals JSON.parse(JSON.stringify(x)).
-// Key order is the ONLY permitted difference (canonical = sorted).
-export const canonicalJSON = (value: unknown): string => canon(value) as string
+// INVARIANT (property-tested in test/mandate/canonical-property.test.ts, with
+// boxed primitives, nested toJSON carriers and key-reading toJSON among the
+// generators since the 2026-10-13 verify audit): for any JSON-representable
+// value x, canonicalJSON(x) parses as JSON and JSON.parse(canonicalJSON(x))
+// deep-equals JSON.parse(JSON.stringify(x)). Key order is the ONLY permitted
+// difference (canonical = sorted). The top-level key is "", as stringify's is.
+export const canonicalJSON = (value: unknown): string => canon(value, "") as string
 
 /**
  * sha256Hex — compute SHA-256 hash of a string, return as hex.
@@ -171,6 +202,23 @@ export interface MandateSignerService {
 
 const nowISO = (): ISO8601 => new Date().toISOString() as ISO8601
 
+// Each signer pins the EXACT text of its own signatures before decoding one.
+// Buffer.from(s, "hex") stops at the first non-hex character and accepts
+// arrays and {type:"Buffer"} objects, so uppercase, trailing garbage, a byte
+// array and an odd-length string all decoded to the genuine bytes and verified
+// (the 2026-10-13 verify audit). A malformed shape THROWS rather than returning
+// false: verifyAuditChain reports a throw as malformed-record, which is what a
+// value that is not a signature is, where false would say signature-mismatch.
+// verifySignedChain holds the same Ed25519 literal for its own edVerify path.
+const ED25519_SIGNATURE_HEX = /^[0-9a-f]{128}$/
+const IN_MEMORY_SIGNATURE = /^inmem-[0-9a-f]{64}$/
+const assertEd25519SignatureShape = (signature: unknown): string => {
+  if (typeof signature !== "string" || !ED25519_SIGNATURE_HEX.test(signature)) {
+    throw new Error("MandateSigner: signature is not 128 lowercase hex characters")
+  }
+  return signature
+}
+
 /**
  * makeInMemorySignerLive — test signer (a pure function of the signed envelope).
  *
@@ -190,7 +238,24 @@ const nowISO = (): ISO8601 => new Date().toISOString() as ISO8601
  */
 export const makeInMemorySignerLive = (
   publicKeyHex: string = "inmem-test-pubkey",
-): MandateSignerService => ({
+): MandateSignerService => {
+  // The marker must not be a real key. verifyAuditChain trusts whatever the
+  // caller's signer.verify says, so an in-memory signer whose marker was the
+  // operator's SPKI hex passed the pin gate and then accepted an "inmem-"
+  // signature anyone can compute, under the operator's real pin (the
+  // 2026-10-13 verify audit). Decoding is deliberately lenient here: anything
+  // that could be read as a public key is refused.
+  let parsesAsKey = false
+  try {
+    createPublicKey({ key: Buffer.from(publicKeyHex, "hex"), format: "der", type: "spki" })
+    parsesAsKey = true
+  } catch {
+    // not a key: the marker is fine
+  }
+  if (parsesAsKey) {
+    throw new Error("makeInMemorySignerLive: the marker parses as an SPKI public key; a test marker must never be a real key")
+  }
+  return {
   publicKeyHex,
   sign: <P>({ payload, previousHash, domain }: { payload: P; previousHash: string | null; domain: string }): Signed<P> => {
     const signedAt = nowISO()
@@ -205,10 +270,17 @@ export const makeInMemorySignerLive = (
     }
   },
   verify: <P>(signed: Signed<P>): boolean => {
-    const expected = "inmem-" + sha256Hex(signedPreimage(signed))
-    return signed.signature === expected
+    // Each field is read once (the 2026-10-13 verify audit): the preimage is
+    // built from these locals, never from a second read of a live object.
+    const { signature, payload, previousHash, signedAt, domain } = signed
+    if (typeof signature !== "string" || !IN_MEMORY_SIGNATURE.test(signature)) {
+      throw new Error("MandateSigner: signature is not inmem- followed by 64 lowercase hex characters")
+    }
+    const expected = "inmem-" + sha256Hex(signedPreimage({ domain, payload, previousHash, signedAt }))
+    return signature === expected
   },
-})
+  }
+}
 
 /**
  * Ed25519SignerConfig — operator-supplied signing key material.
@@ -251,24 +323,53 @@ export interface Ed25519SignerConfig {
  * fewer.
  */
 export const publicKeyHexFromPem = (publicKeyPem: string): string =>
-  createPublicKey(publicKeyPem).export({ format: "der", type: "spki" }).toString("hex")
+  createPublicKey(assertPublicPem(publicKeyPem, "publicKeyPem")).export({ format: "der", type: "spki" }).toString("hex")
+
+// Key material is checked where it is handed over (the 2026-10-13 verify
+// audit). Construction used to accept a private and a public key that were
+// not a pair (every record then failed to verify, after the actions had run),
+// ed448 / P-256 / RSA keys through the Ed25519 factories, and a PRIVATE key
+// where a public one was asked for: createPublicKey derives the public half
+// from a private PEM without complaint, so a verifier wired with the operator's
+// private key kept working and nobody noticed. The messages name the slot and
+// the algorithm, never the key.
+const assertEd25519 = (key: KeyObject, slot: string): KeyObject => {
+  if (key.asymmetricKeyType !== "ed25519") {
+    throw new Error(`MandateSigner: ${slot} is ${key.asymmetricKeyType ?? "not an asymmetric key"}, not ed25519`)
+  }
+  return key
+}
+const assertPublicPem = (pem: string, slot: string): string => {
+  if (/-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(pem)) {
+    throw new Error(`MandateSigner: ${slot} is a PRIVATE key PEM; a public (SPKI) key was expected`)
+  }
+  return pem
+}
 
 /**
  * makeEd25519SignerLive — production signer using node:crypto's Ed25519.
  *
- * Sign operation: canonical JSON → Buffer → ed25519 sign with private key
- * → hex-encoded signature.
+ * Sign operation: signedPreimage (canonical JSON of the ENVELOPE: domain,
+ * payload, previousHash, signedAt) → Buffer → ed25519 sign with the private
+ * key → 128 lowercase hex characters.
  *
- * Verify operation: canonical JSON of payload → Buffer → ed25519 verify
- * against the public key declared on the record (NOT the factory's
- * publicKeyHex; that's the signer's own key, which may differ during
- * key rotation — v0.2.1 work).
+ * Verify operation: the same preimage, rebuilt from one read of the record →
+ * Buffer → ed25519 verify against the public key declared on the record (NOT
+ * the factory's publicKeyHex; that's the signer's own key, which may differ
+ * during key rotation — v0.2.1 work). It used to say "canonical JSON of the
+ * payload" here; the payload alone has not been the signed bytes since the
+ * envelope moved into the preimage (corrected in the 2026-10-13 verify audit).
  */
 export const makeEd25519SignerLive = (
   config: Ed25519SignerConfig,
 ): MandateSignerService => {
-  const privateKey = createPrivateKey(config.privateKeyPem)
-  const publicKey = createPublicKey(config.publicKeyPem)
+  const privateKey = assertEd25519(createPrivateKey(config.privateKeyPem), "privateKeyPem")
+  const publicKey = assertEd25519(createPublicKey(assertPublicPem(config.publicKeyPem, "publicKeyPem")), "publicKeyPem")
+  // The two must be a PAIR. Signing with one key and stamping records with
+  // another produced a store that no pin could ever verify.
+  if (!createPublicKey(privateKey).export({ format: "der", type: "spki" }).equals(publicKey.export({ format: "der", type: "spki" }))) {
+    throw new Error("MandateSigner: privateKeyPem and publicKeyPem are not a pair; records signed with this private key would carry a public key that cannot verify them")
+  }
   // Hex-encode the SPKI-DER-serialized public key. Ed25519 raw keys are 32
   // bytes; the SPKI wrapper adds ~12 bytes of ASN.1 structure for a total
   // of ~44 bytes (88 hex chars). Verify (below) re-imports via the same
@@ -302,13 +403,16 @@ export const makeEd25519SignerLive = (
       // signer's own key. This is what enables verifier-only consumers and
       // future key rotation. (Authorship — i.e. that the record was signed by
       // the EXPECTED operator key — is the caller's pin; see DAN-642.)
+      // Each field is read once (the 2026-10-13 verify audit): a getter cannot
+      // answer the key import with one value and the preimage with another.
+      const { signature, signerPublicKeyHex, payload, previousHash, signedAt, domain } = signed
+      const signatureBuffer = Buffer.from(assertEd25519SignatureShape(signature), "hex")
       const recordPublicKey = createPublicKey({
-        key: Buffer.from(signed.signerPublicKeyHex, "hex"),
+        key: Buffer.from(signerPublicKeyHex, "hex"),
         format: "der",
         type: "spki",
       })
-      const signatureBuffer = Buffer.from(signed.signature, "hex")
-      return edVerify(null, Buffer.from(signedPreimage(signed)), recordPublicKey, signatureBuffer)
+      return edVerify(null, Buffer.from(signedPreimage({ domain, payload, previousHash, signedAt })), recordPublicKey, signatureBuffer)
     },
   }
 }
@@ -340,7 +444,7 @@ export interface Ed25519VerifierConfig {
 export const makeEd25519VerifierLive = (
   config: Ed25519VerifierConfig,
 ): MandateSignerService => {
-  const publicKey = createPublicKey(config.publicKeyPem)
+  const publicKey = assertEd25519(createPublicKey(assertPublicPem(config.publicKeyPem, "publicKeyPem")), "publicKeyPem")
   const publicKeyDer = publicKey.export({ format: "der", type: "spki" })
   const publicKeyHex = publicKeyDer.toString("hex")
 
@@ -358,13 +462,15 @@ export const makeEd25519VerifierLive = (
       // public key; the operator decides which keys to trust at the
       // application layer (allow-list via verifyAuditChain caller, future
       // v0.2.1 work per spec I11).
+      // Each field is read once (the 2026-10-13 verify audit).
+      const { signature, signerPublicKeyHex, payload, previousHash, signedAt, domain } = signed
+      const signatureBuffer = Buffer.from(assertEd25519SignatureShape(signature), "hex")
       const recordPublicKey = createPublicKey({
-        key: Buffer.from(signed.signerPublicKeyHex, "hex"),
+        key: Buffer.from(signerPublicKeyHex, "hex"),
         format: "der",
         type: "spki",
       })
-      const signatureBuffer = Buffer.from(signed.signature, "hex")
-      return edVerify(null, Buffer.from(signedPreimage(signed)), recordPublicKey, signatureBuffer)
+      return edVerify(null, Buffer.from(signedPreimage({ domain, payload, previousHash, signedAt })), recordPublicKey, signatureBuffer)
     },
   }
 }
@@ -443,6 +549,22 @@ export const verifyAuditChain = (
     detail: err === undefined ? what : `${what}: ${err instanceof Error ? err.message : String(err)}`,
   })
 
+  // A signed record is EXACTLY these six own keys. The signature covers four
+  // of them and the next record's link hash covers all six, so a seventh key
+  // sits under neither: on the last record nothing ever read it, and
+  // makeJsonlSignedAuditLive, which re-verifies on every read, then signed the
+  // next link over it and made the injected text permanent (the 2026-10-13
+  // verify audit). verifySignedChain keeps the same list; a parity test holds
+  // the two verdicts together.
+  const ENVELOPE_KEYS: ReadonlyArray<string> = ["payload", "signature", "signerPublicKeyHex", "signedAt", "previousHash", "domain"]
+  const envelopeKeyProblem = (keys: ReadonlyArray<string>): string | null => {
+    const stray = keys.filter((k) => !ENVELOPE_KEYS.includes(k))
+    if (stray.length > 0) return `carries a key outside the signed envelope: ${stray.map((k) => JSON.stringify(k)).join(", ")}`
+    const missing = ENVELOPE_KEYS.filter((k) => !keys.includes(k))
+    if (missing.length > 0) return `is missing envelope key ${missing.map((k) => JSON.stringify(k)).join(", ")}`
+    return null
+  }
+
   // The link each record must carry: null for the first, then the hash of the
   // whole previous SIGNED record.
   let expectedPreviousHash: string | null = null
@@ -451,7 +573,21 @@ export const verifyAuditChain = (
     if (typeof candidate !== "object" || candidate === null) {
       return malformed(i, `record ${i} is ${candidate === null ? "null" : `a ${typeof candidate}`}, not a signed record`)
     }
-    const record = candidate as SignedMandateAuditEvent
+    // Every field is read ONCE, here, and only these locals are judged, by this
+    // function and by the signer.verify() it hands the snapshot to. A getter or
+    // Proxy used to answer the pin check with one key and the signature with
+    // another, and a getter that threw on a later read escaped as an exception
+    // (the 2026-10-13 verify audit). Object.keys runs in the same try, so a
+    // hostile ownKeys trap is a verdict too.
+    let record: SignedMandateAuditEvent
+    let keys: ReadonlyArray<string>
+    try {
+      const { payload, signature, signerPublicKeyHex, signedAt, previousHash, domain } = candidate as SignedMandateAuditEvent
+      keys = Object.keys(candidate)
+      record = { payload, signature, signerPublicKeyHex, signedAt, previousHash, domain }
+    } catch (err) {
+      return malformed(i, `record ${i} could not be read`, err)
+    }
 
     // Empty / missing signature
     if (!record.signature || record.signature.length === 0) {
@@ -464,15 +600,24 @@ export const verifyAuditChain = (
 
     // Pinned-key check BEFORE signature verification (DAN-638/642). A record
     // signed by any key other than the pinned one is rejected regardless of
-    // whether its self-referential signature validates. A missing `opts` pins
-    // nothing, so nothing verifies: fail-closed, as a verdict (DAN-1159 item 5).
-    if (record.signerPublicKeyHex !== opts?.trustedSignerPublicKeyHex) {
+    // whether its self-referential signature validates. A pin that is not a
+    // string pins NOTHING, and the gate says so itself: the bare comparison let
+    // a record with no key match a missing pin (undefined === undefined), and
+    // under the in-memory signer, whose signature is a public function of the
+    // envelope, a keyless forged revoke came back valid:true (the 2026-10-13
+    // verify audit).
+    const pin: unknown = opts?.trustedSignerPublicKeyHex
+    if (typeof pin !== "string" || record.signerPublicKeyHex !== pin) {
       return {
         valid: false,
         firstInvalidIndex: i,
         reason: "untrusted-signer" as const,
       }
     }
+
+    // Envelope shape, before any byte of it is trusted.
+    const shape = envelopeKeyProblem(keys)
+    if (shape !== null) return malformed(i, `record ${i} ${shape}`)
 
     // Signature verification (covers domain + payload + previousHash +
     // signedAt via signedPreimage — DAN-641).

@@ -31,9 +31,11 @@ export * from "./mandate/index.ts"
 export * from "./gate/index.ts"
 
 // ── SweeVerify — evidence ─────────────────────────────────────────────────
-// canonicalJSON and sha256Hex are omitted here ON PURPOSE — they are mandate's,
-// and the star export above already provides the identical binding.
+// canonicalJSON, sha256Hex and signedPreimage are omitted here ON PURPOSE —
+// they are mandate's, and the star export above already provides the identical
+// binding. RECEIPT_DOMAIN is verify's own, so it is named.
 export {
+  RECEIPT_DOMAIN,
   generateSigningKeypair,
   publicKeyHexFromPem,
   makeEd25519ReceiptSigner,

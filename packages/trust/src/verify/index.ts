@@ -10,10 +10,14 @@
  */
 
 export {
-  // one canonicalization across the rail (re-exported from @sweetrust/mandate)
+  // one canonicalization, and one signed preimage, across the rail
+  // (re-exported from @sweetrust/mandate)
   canonicalJSON,
   sha256Hex,
-  // signing
+  signedPreimage,
+  // signing. RECEIPT_DOMAIN is what a bring-your-own ReceiptSigner must fold
+  // into the preimage; it was unreachable from this entry until 2026-10-13.
+  RECEIPT_DOMAIN,
   generateSigningKeypair,
   publicKeyHexFromPem,
   makeEd25519ReceiptSigner,

@@ -95,6 +95,38 @@ this package follows [Semantic Versioning](https://semver.org).
   injected key where it is authored, and every issuer screens the keys it is about to record, so a
   bare string through an `as any` is caught too. Both throw `MaliciousMandateMetadata` with the
   already-reserved `inputKind: "capability-identifier"`.
+- **A signed record is exactly its six fields, and both verifiers now say so** (the 2026-10-13
+  verify audit). A seventh key on the LAST record of a chain was authenticated by nothing: the
+  signature covers four fields, the next link covers all six, and nothing came after the head.
+  Both `verifySignedChain` and `verifyAuditChain` returned `valid: true` for it, and
+  `makeJsonlSignedAuditLive` then signed the next record's link over the injected text, making
+  it permanent. Any key outside `payload, signature, signerPublicKeyHex, signedAt, previousHash,
+  domain` is now `malformed-record`, with the key named in `detail`, and the store refuses to
+  read or append past it.
+- **The pin gate refuses on its own.** `signerPublicKeyHex !== trustedSignerPublicKeyHex` was
+  false when both were undefined, so a keyless record walked through; under the in-memory
+  signer a keyless forged revoke was `valid: true`. A pin that is not a string is now
+  `untrusted-signer` before anything else is read.
+- **A signature is 128 lowercase hex characters, or it is not a signature.** Hex decoding was
+  lenient, so uppercase, trailing garbage, a byte array and an odd-length string all decoded to
+  the genuine bytes and verified on the head record. All three Ed25519 paths check the shape
+  before decoding; the in-memory signer pins `inmem-` plus 64. An empty signature is still
+  `missing-signature`.
+- **Each record field is read once.** A getter or Proxy could answer the pin with the operator's
+  key and the crypto with the attacker's, or swap a forged payload in after the signature check
+  and have a seal over the forgery accepted; a getter that threw on a later read escaped as an
+  exception. Both verifiers and all three signer `verify()`s now snapshot the six fields in one
+  read and judge only that; a throwing getter is `malformed-record`.
+- **`verifySignedChain` refuses options it does not know.** A caller still passing the retired
+  `anchoredHead` got no anchor check and no signal, so a truncated chain verified. Any key other
+  than `trustedSignerPublicKeyHex` and `anchor` is `malformed-record` naming it.
+- **`makeInMemorySignerLive` refuses a marker that parses as a public key.** With the operator's
+  real key hex as its marker, an `inmem-` signature anyone can compute verified under the
+  operator's real pin.
+- **Key material is validated where it is handed over.** `makeEd25519SignerLive` and
+  `makeEd25519VerifierLive` accept Ed25519 keys only, the signer checks its private and public
+  keys are a pair, and `publicKeyHexFromPem` and both factories refuse a PRIVATE key PEM in a
+  public slot. Before this a mismatched pair signed a store no pin could verify.
 
 ### Added
 
@@ -114,6 +146,9 @@ this package follows [Semantic Versioning](https://semver.org).
 - An `errored` receipt for an async action whose promise rejects, appended when it settles, with
   the rejection's message and the decision it follows.
 - `humanConfirm`'s question states the value's full length when the value is cut.
+- `RECEIPT_DOMAIN` and `signedPreimage` from `sweetrust/verify` and from the root. `ReceiptSigner`
+  was public, but the domain tag a bring-your-own signer must fold into the preimage, and the
+  preimage definition itself, could not be imported from either entry.
 
 ### Changed
 
@@ -170,6 +205,20 @@ this package follows [Semantic Versioning](https://semver.org).
   (40 bits) while the types called ids "collision-free". An issuer also refuses an id the log
   already has an event for and draws again, so an id is never minted twice into one log. Ids stay
   sortable by their millisecond prefix; anything that parses the suffix width must accept 16.
+- `canonicalJSON` follows `JSON.stringify` for boxed primitives and `toJSON`: a boxed
+  `String`/`Number`/`Boolean` serializes as its primitive, `toJSON(key)` is called once with its
+  key and its result is not asked again. A record signed over such a value used to fail to verify
+  after an export. No persisted chain changes: a record that has been through JSON carries none
+  of these, and on such values the bytes are identical to before.
+- `parseJSONL` numbers an error line as the file numbers it, blank lines included, and accepts one
+  leading byte-order mark. `exportJSONL` escapes U+2028, U+2029 and U+0085 as `\uXXXX`; the
+  parsed values and both hashes are unchanged, and a line-splitting reader can no longer split a
+  record.
+- A record with a stray key in the MIDDLE of a chain reports `malformed-record` at its own index.
+  It used to surface at the next record as `hash-chain-broken`.
+- Both Ed25519 factories and `publicKeyHexFromPem` throw at construction on key material they
+  used to accept silently (see Security). `makeInMemorySignerLive` throws on a marker that is a
+  real key.
 
 ### Deprecated
 

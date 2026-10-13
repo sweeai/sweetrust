@@ -41,8 +41,10 @@ import {
 } from "../mandate/index.ts"
 import { type Receipt, ReceiptLog, receiptBody } from "../gate/index.ts"
 
-// Re-exported so consumers of the receipt rail share ONE canonicalization.
-export { canonicalJSON, sha256Hex }
+// Re-exported so consumers of the receipt rail share ONE canonicalization, and
+// (since the 2026-10-13 verify audit) ONE preimage: a bring-your-own
+// ReceiptSigner must sign exactly the bytes verifySignedChain checks.
+export { canonicalJSON, sha256Hex, signedPreimage }
 
 /**
  * RECEIPT_DOMAIN — domain-separation tag folded into the signed preimage of
@@ -147,33 +149,57 @@ export class SignedReceiptLog extends ReceiptLog {
 
   /** The auditor artifact: one signed receipt per line. */
   exportJSONL(): string {
-    return this.signedEvents.map((r) => JSON.stringify(r)).join("\n") + (this.signedEvents.length ? "\n" : "")
+    return this.signedEvents.map((r) => jsonLine(r)).join("\n") + (this.signedEvents.length ? "\n" : "")
   }
 }
 
+// JSON.stringify leaves U+2028, U+2029 and U+0085 raw, and they are legal
+// inside a JSON string. They are also line terminators to Python's
+// splitlines() and to some editors, which then split one record into two
+// lines. Escaped as \uXXXX they parse back to the identical string, so the
+// parsed values and both hashes are unchanged; only the text differs (the
+// 2026-10-13 verify audit). JSON.stringify already escapes every terminator
+// below U+0020, so these three are the whole set.
+const JSONL_LINE_TERMINATORS = /[\u2028\u2029\u0085]/g
+const jsonLine = (record: unknown): string =>
+  JSON.stringify(record).replace(JSONL_LINE_TERMINATORS, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`)
+
+/**
+ * The sanctioned reader for an exported artifact. It must be fed the file's
+ * bytes as written: the interior receipt hash is over the record's own JSON
+ * text, so a re-serialized file (sorted keys, pretty-printed) reports
+ * `hash-mismatch` even when every value is honest. SECURITY.md § Honest limits.
+ */
 export function parseJSONL(text: string): SignedReceipt[] {
-  return text
-    .split("\n")
-    .filter((line) => line.trim().length > 0)
-    .map((line, i) => {
-      // Say WHICH line. A bare SyntaxError from JSON.parse tells an auditor
-      // holding a 40,000-line artifact nothing they can act on.
-      let parsed: unknown
-      try {
-        parsed = JSON.parse(line)
-      } catch (err) {
-        throw new Error(`line ${i + 1}: not valid JSON — ${err instanceof Error ? err.message : String(err)}`)
-      }
-      const r = parsed as SignedReceipt
-      if (
-        typeof r !== "object" || r === null ||
-        typeof r.signature !== "string" || typeof r.signerPublicKeyHex !== "string" ||
-        typeof r.payload !== "object" || r.payload === null || typeof r.payload.hash !== "string"
-      ) {
-        throw new Error(`line ${i + 1}: not a SignedReceipt`)
-      }
-      return r
-    })
+  // One leading byte-order mark is tolerated: editors and some HTTP stacks
+  // add it, and JSON.parse rejects it (the 2026-10-13 verify audit).
+  const lines = (text.charCodeAt(0) === 0xfeff ? text.slice(1) : text).split("\n")
+  const out: SignedReceipt[] = []
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!
+    if (line.trim().length === 0) continue
+    // Say WHICH line, numbered as the FILE numbers it, blank lines included. A
+    // bare SyntaxError from JSON.parse tells an auditor holding a 40,000-line
+    // artifact nothing they can act on, and a number counted after the blank
+    // lines were dropped sent them to the wrong place (the 2026-10-13 verify
+    // audit).
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(line)
+    } catch (err) {
+      throw new Error(`line ${i + 1}: not valid JSON — ${err instanceof Error ? err.message : String(err)}`)
+    }
+    const r = parsed as SignedReceipt
+    if (
+      typeof r !== "object" || r === null ||
+      typeof r.signature !== "string" || typeof r.signerPublicKeyHex !== "string" ||
+      typeof r.payload !== "object" || r.payload === null || typeof r.payload.hash !== "string"
+    ) {
+      throw new Error(`line ${i + 1}: not a SignedReceipt`)
+    }
+    out.push(r)
+  }
+  return out
 }
 
 // ── Third-party verification ─────────────────────────────────────────────────
@@ -211,6 +237,28 @@ export interface VerifyReport {
 // reporting it, and the verdict was lost (DAN-1159 item 5).
 const typeName = (v: unknown): string => (v === null ? "null" : typeof v)
 const preview = (v: unknown): string => (typeof v === "string" ? `${v.slice(0, 16)}…` : `<${typeName(v)}>`)
+
+// A signed record is EXACTLY these six own keys. The signature covers four of
+// them and the next record's link hash covers all six, so a seventh key sits
+// under neither: on the last record nothing ever read it, and a store that
+// re-verifies on read then signed the next link over it, making the injected
+// text permanent (the 2026-10-13 verify audit). verifyAuditChain keeps the same
+// list; the parity test in test/verify/adversarial-envelope.test.ts holds the
+// two verdicts together.
+const ENVELOPE_KEYS: ReadonlyArray<string> = ["payload", "signature", "signerPublicKeyHex", "signedAt", "previousHash", "domain"]
+// The exact text of an Ed25519 signature as mandate's signer emits it. The
+// Ed25519 factories in mandate/signer.ts hold the same literal; it is a fact
+// about the algorithm (64 bytes), not a convention that can drift.
+const ED25519_SIGNATURE_HEX = /^[0-9a-f]{128}$/
+// The whole of verifySignedChain's options bag. Grows only with the signature.
+const VERIFY_OPTS_KEYS: ReadonlyArray<string> = ["trustedSignerPublicKeyHex", "anchor"]
+const envelopeKeyProblem = (keys: ReadonlyArray<string>): string | null => {
+  const stray = keys.filter((k) => !ENVELOPE_KEYS.includes(k))
+  if (stray.length > 0) return `carries a key outside the signed envelope: ${stray.map((k) => JSON.stringify(k)).join(", ")}`
+  const missing = ENVELOPE_KEYS.filter((k) => !keys.includes(k))
+  if (missing.length > 0) return `is missing envelope key ${missing.map((k) => JSON.stringify(k)).join(", ")}`
+  return null
+}
 
 /**
  * Re-verify an exported chain holding ONLY public material.
@@ -251,6 +299,22 @@ export function verifySignedChain(
     anchor?: { kind: "anchor" | "receipt"; head: string }
   },
 ): VerifyReport {
+  // The options bag is exactly {trustedSignerPublicKeyHex, anchor?}. An
+  // unknown key used to be ignored: a JS caller still passing the retired
+  // `anchoredHead` got no anchor check and no signal, so a truncated chain
+  // verified (the 2026-10-13 verify audit). A caller error is a verdict that
+  // names the key, before the chain is read at all.
+  const bag: unknown = opts
+  if (typeof bag === "object" && bag !== null) {
+    const unknownKeys = Object.keys(bag).filter((k) => !VERIFY_OPTS_KEYS.includes(k))
+    if (unknownKeys.length > 0) {
+      return {
+        valid: false, firstInvalidIndex: null, reason: "malformed-record", anchoredThrough: null,
+        detail: `unknown option ${unknownKeys.map((k) => JSON.stringify(k)).join(", ")}: verifySignedChain takes trustedSignerPublicKeyHex and anchor`,
+      }
+    }
+  }
+
   // The container is checked before anything is read from it. A plain object
   // used to VERIFY: `{}.length` is undefined, so `=== 0` missed the empty-chain
   // guard below, `i < undefined` never entered the loop, and control fell
@@ -276,9 +340,12 @@ export function verifySignedChain(
     }
   }
 
-  // The pin is only ever COMPARED, never assumed to be a string. A missing or
-  // non-string pin matches no genuine record, so nothing verifies against it:
-  // fail-closed, and a verdict rather than a crash in the detail message.
+  // The pin is only ever COMPARED, never assumed to be a string, and a pin that
+  // is not a string pins NOTHING. The comparison alone was not enough: a record
+  // with no key matched a missing pin (undefined === undefined), and only
+  // createPublicKey(undefined) throwing downstream kept that forgery out, as
+  // malformed-record by accident (the 2026-10-13 verify audit). The gate below
+  // refuses a non-string pin on its own, as untrusted-signer.
   const pin: unknown = opts?.trustedSignerPublicKeyHex
   const malformed = (i: number, what: string, err?: unknown): VerifyReport => ({
     valid: false, firstInvalidIndex: i, reason: "malformed-record", anchoredThrough: null,
@@ -287,20 +354,52 @@ export function verifySignedChain(
 
   let prevInteriorHash = "genesis"
   let prevWrapperHash: string | null = null
+  // The interior head of every VERIFIED record, taken from its snapshot. The
+  // anchor checks below read these, never the live records again: a payload
+  // getter that swapped in a forgery after the signature check used to satisfy
+  // a seal over the forgery (the 2026-10-13 verify audit).
+  const verifiedHeads: Array<{ readonly hash: string; readonly seq: number }> = []
   for (let i = 0; i < records.length; i++) {
     const candidate: unknown = records[i]
     if (typeof candidate !== "object" || candidate === null) {
       return malformed(i, `record ${i} is not a signed record (got ${typeName(candidate)})`)
     }
-    const r = candidate as SignedReceipt
+    // Every field is read ONCE, here, and only these locals are judged. A
+    // getter or Proxy used to answer the pin check with one key and the
+    // signature with another, or swap the payload after it was verified, and a
+    // getter that threw on a later read escaped as an exception (the
+    // 2026-10-13 verify audit). `r` is a plain snapshot; `keys` is the own-key
+    // set the envelope check judges. Object.keys runs in the same try, so a
+    // hostile ownKeys trap is a verdict too.
+    let r: SignedReceipt
+    let keys: ReadonlyArray<string>
+    try {
+      const { payload, signature, signerPublicKeyHex, signedAt, previousHash, domain } = candidate as SignedReceipt
+      keys = Object.keys(candidate)
+      r = { payload, signature, signerPublicKeyHex, signedAt, previousHash, domain }
+    } catch (err) {
+      return malformed(i, `record ${i} could not be read`, err)
+    }
     if (!r.signature || r.signature.length === 0) {
       return { valid: false, firstInvalidIndex: i, reason: "missing-signature", anchoredThrough: null }
     }
-    if (r.signerPublicKeyHex !== pin) {
+    if (typeof pin !== "string" || r.signerPublicKeyHex !== pin) {
       return {
         valid: false, firstInvalidIndex: i, reason: "untrusted-signer", anchoredThrough: null,
         detail: `record ${i} signed by ${preview(r.signerPublicKeyHex)}, expected ${preview(pin)}`,
       }
+    }
+    // Envelope shape, before any byte of it is trusted.
+    const shape = envelopeKeyProblem(keys)
+    if (shape !== null) return malformed(i, `record ${i} ${shape}`)
+    // Signature shape, before any decoding. Buffer.from(s, "hex") stops at the
+    // first non-hex character and accepts arrays and {type:"Buffer"} objects,
+    // so uppercase, trailing garbage, a byte array and an odd-length string all
+    // decoded to the genuine bytes and VERIFIED on the last record (the
+    // 2026-10-13 verify audit). An Ed25519 signature is 64 bytes: 128 lowercase
+    // hex characters, as the signer emits them, or it is not a signature.
+    if (typeof r.signature !== "string" || !ED25519_SIGNATURE_HEX.test(r.signature)) {
+      return malformed(i, `record ${i} signature is not 128 lowercase hex characters`)
     }
     // This function is what an auditor points at a file from an UNTRUSTED
     // party, so every malformed input has to come back as a verdict. It used to
@@ -345,11 +444,14 @@ export function verifySignedChain(
       return { valid: false, firstInvalidIndex: i, reason: "hash-chain-broken", anchoredThrough: null }
     }
     prevInteriorHash = payload.hash
-    // The next wrapper link hashes the WHOLE record, which includes fields
-    // outside the signed preimage. A field canonicalJSON cannot encode (a
-    // BigInt, a cycle) leaves the signature valid and makes this record
-    // unlinkable, so it is malformed HERE, at the record that carries it.
-    // verifyAuditChain learned this in DAN-1159 item 3; it never came back here.
+    verifiedHeads.push({ hash: payload.hash, seq: payload.seq })
+    // The next wrapper link hashes the WHOLE record. The snapshot IS the whole
+    // record once the envelope check passed: the same six keys, the same
+    // values, and canonicalJSON sorts, so the bytes match what the writer
+    // hashed. A value canonicalJSON cannot encode (a BigInt, a cycle) leaves
+    // the signature valid and makes this record unlinkable, so it is malformed
+    // HERE, at the record that carries it. verifyAuditChain learned this in
+    // DAN-1159 item 3; it never came back here.
     try {
       prevWrapperHash = sha256Hex(canonicalJSON(r))
     } catch (err) {
@@ -378,25 +480,25 @@ export function verifySignedChain(
       // SEAL: the anchored head must BE the head of the presented chain. Head-
       // equality — not membership — is what catches tail truncation, since a
       // truncated chain ends on a different (earlier) record.
-      const last = records.at(-1)
-      if (!last || last.payload.hash !== head) {
+      const last = verifiedHeads.at(-1)
+      if (!last || last.hash !== head) {
         return {
           valid: false, firstInvalidIndex: null, reason: "anchor-not-found", anchoredThrough: null,
           detail: `sealing anchor ${preview(head)} is not the head of the presented chain — records after it were removed, or the wrong chain was presented`,
         }
       }
-      return { valid: true, firstInvalidIndex: null, reason: "ok", anchoredThrough: last.payload.seq }
+      return { valid: true, firstInvalidIndex: null, reason: "ok", anchoredThrough: last.seq }
     }
     // RECEIPT: a per-decision head. It proves the chain THROUGH its own seq only —
     // membership, never full-chain. Records after it may still be truncated.
-    const hit = records.findIndex((r) => r.payload.hash === head)
+    const hit = verifiedHeads.findIndex((h) => h.hash === head)
     if (hit === -1) {
       return {
         valid: false, firstInvalidIndex: null, reason: "anchor-not-found", anchoredThrough: null,
         detail: `receipt memo ${preview(head)} does not appear in the presented chain — the wrong chain was presented, or records up to it were removed`,
       }
     }
-    return { valid: true, firstInvalidIndex: null, reason: "ok", anchoredThrough: records[hit]!.payload.seq }
+    return { valid: true, firstInvalidIndex: null, reason: "ok", anchoredThrough: verifiedHeads[hit]!.seq }
   }
 
   return { valid: true, firstInvalidIndex: null, reason: "ok", anchoredThrough: null }
