@@ -140,6 +140,14 @@ artifact rather than the source, and the findings are recorded rather than quiet
   recorded the legitimate one. And a membership test using `in` walked `Object.prototype`, so an
   argument named `constructor` or `__proto__` was invisible to enforcement and to the receipt.
   Both closed, with regressions proven to fail against the pre-fix code before being accepted.
+- **2026-10-13** — a twenty-finding pass over the gate kernel against the built `dist/`. One HIGH:
+  the sealed ancestry Set handed out its raw, mutable self as `forEach`'s third argument, so the
+  independence check could be laundered. Six MEDIUM: any truthy `humanConfirm` answer confirmed
+  (a Promise, the string `"no"`); `execute()` re-read the caller's object after the check; a mode
+  outside the ladder behaved as `warn`; an async rejection was recorded as `executed`; the
+  declassifiers threw on a BigInt; a throwing or unscorable judgment provider executed. The rest
+  LOW and documentation. All twenty closed, each with a regression watched red against the pre-fix
+  source before its fix was accepted.
 
 🔑 **The lesson we keep relearning, offered because it will apply to your code too:** a check and
 the decision it authorizes must name the same binding. If you compare A and act on B, you have not
