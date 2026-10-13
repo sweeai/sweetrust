@@ -231,3 +231,32 @@ describe("#10 — any tier outside the lattice floors the combination to untrust
     expect(meetsTier("verified", "verified")).toBe(true)
   })
 })
+
+// ── #11 LOW — append() let the caller's entry override seq / prevHash / hash ─
+// `nextReceipt` built `{ seq, prevHash, hash, ...entry }`: the spread came
+// LAST, so an entry carrying those three fields replaced the log's own. The
+// stored receipt said hash "deadbeef", head() returned it, and verifyChain()
+// went false on a log nobody had tampered with after the fact. `Omit<>` hides
+// the fields from TypeScript, not from JavaScript.
+describe("#11 — the log owns seq, prevHash and hash; an entry cannot supply them", () => {
+  it("fields smuggled on the entry are ignored, and the chain still verifies", () => {
+    const log = new ReceiptLog()
+    const r0 = log.append({ at: "t0", sink: "pay", decision: "executed", args: {} })
+    const r1 = log.append({
+      at: "t1",
+      sink: "pay",
+      decision: "executed",
+      args: {},
+      hash: "deadbeef",
+      seq: 0,
+      prevHash: "genesis",
+    } as never)
+    expect(r1.seq).toBe(1)
+    expect(r1.prevHash).toBe(r0.hash)
+    expect(r1.hash).not.toBe("deadbeef")
+    expect(r1.hash).toMatch(/^[0-9a-f]{64}$/)
+    expect(log.head()).toBe(r1.hash)
+    expect(log.verifyChain()).toBe(true)
+    expect(log.all().map((r) => r.seq)).toEqual([0, 1])
+  })
+})

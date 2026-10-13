@@ -561,9 +561,13 @@ export class ReceiptLog {
   protected nextReceipt(entry: Omit<Receipt, "seq" | "prevHash" | "hash">): Receipt {
     const prevHash = this.events.at(-1)?.hash ?? "genesis"
     const seq = this.events.length
-    const body = receiptBody({ seq, prevHash, ...entry })
+    // The entry is spread FIRST and the log's three fields are set after it.
+    // The other order let an entry that carried `seq`, `prevHash` or `hash`
+    // replace the log's own (the 2026-10-13 gate audit): `Omit<>` hides those
+    // fields from TypeScript, not from JavaScript.
+    const body = receiptBody({ ...entry, seq, prevHash })
     const hash = createHash("sha256").update(body).digest("hex")
-    return { seq, prevHash, hash, ...entry }
+    return { ...entry, seq, prevHash, hash }
   }
 
   /** Commit a receipt from nextReceipt(). The only mutation point. */
