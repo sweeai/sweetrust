@@ -616,3 +616,56 @@ describe("#18 — corroborate never lowers a tier", () => {
     }
   })
 })
+
+// ── #9 LOW — allowlisted handed out the registry's live value object ─────────
+// Since 2026-08-31 allowlisted returns the REGISTRY's record (the object you
+// checked is the object you promote). That is the invariant; the consequence
+// nobody wrote down is that the caller now holds the registry's own value
+// object by reference, and `result.value.value.iban = "DE99-EVIL"` rewrote the
+// registry — after which the evil candidate allowlisted. An authority's record
+// is immutable from the moment it is one: fromAuthority freezes an object
+// value in place (shallow; plain objects and arrays).
+describe("#9 — fromAuthority freezes an object value, so an allowlisted hand-out cannot rewrite the registry", () => {
+  it("the value object passed to fromAuthority is frozen in place", () => {
+    const record = { iban: "DE11-GOOD" }
+    const s = Sourced.fromAuthority(record, "payee-registry")
+    expect(s.value).toBe(record)
+    expect(Object.isFrozen(record)).toBe(true)
+    expect(() => {
+      ;(record as { iban: string }).iban = "DE99-EVIL"
+    }).toThrow(TypeError)
+    const list = Sourced.fromAuthority(["a", "b"], "reg")
+    expect(Object.isFrozen(list.value)).toBe(true)
+  })
+
+  it("ATTACK: mutating the object allowlisted returns no longer poisons the registry", () => {
+    const registry = new Map([["Acme", Sourced.fromAuthority({ iban: "DE11-GOOD" }, "payee-registry")]])
+    const r = allowlisted(Sourced.fromChannel({ iban: "DE11-GOOD" }, "email"), registry, "Acme", "payee-registry")
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    expect(r.value.value).toBe(registry.get("Acme")!.value) // identity: the 2026-08-31 invariant stands
+    expect(() => {
+      ;(r.value.value as { iban: string }).iban = "DE99-EVIL"
+    }).toThrow(TypeError)
+    expect(registry.get("Acme")!.value.iban).toBe("DE11-GOOD")
+    expect(allowlisted(Sourced.fromChannel({ iban: "DE99-EVIL" }, "email"), registry, "Acme", "payee-registry").ok).toBe(false)
+  })
+
+  it("primitives, null and ArrayBuffer views pass through untouched", () => {
+    expect(Sourced.fromAuthority("x", "reg").value).toBe("x")
+    expect(Sourced.fromAuthority(5n, "reg").value).toBe(5n)
+    expect(Sourced.fromAuthority(null, "reg").value).toBe(null)
+    // Object.freeze throws on a typed array with elements; a key or digest
+    // handed in as bytes must still be an authority value.
+    const bytes = new Uint8Array([1, 2, 3])
+    expect(() => Sourced.fromAuthority(bytes, "reg")).not.toThrow()
+    expect(Object.isFrozen(bytes)).toBe(false)
+  })
+
+  it("CONTROL: fromChannel and fromLLM do not freeze — an untrusted value is the caller's to keep editing", () => {
+    const o = { x: 1 }
+    Sourced.fromChannel(o, "web")
+    Sourced.fromLLM(o, "Fn", [])
+    expect(Object.isFrozen(o)).toBe(false)
+  })
+})

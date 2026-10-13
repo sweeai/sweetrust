@@ -101,6 +101,15 @@ what was said") or other languages, by design. Those need defenses in your own h
 framing untrusted text clearly and constraining what the model may output. Do not rely on forcing
 a tool call for that: some current models reject forced `tool_choice`.
 
+### `allowlisted` hands you the registry's own object, and `fromAuthority` freezes it
+
+`allowlisted` returns the registry's record, never your candidate: the object it compared is the
+object it promotes, and `result.value.value` IS the value object you put in the registry, by
+reference. So that nothing holding the result can rewrite the registry through it,
+`Sourced.fromAuthority` freezes an object or array value **in place, shallowly**, the moment it
+becomes an authority value. Nested objects, Maps and Sets inside it are not frozen; typed arrays are
+left alone. If you keep editing a record after wrapping it, wrap a copy.
+
 ### `asserted` is not reachable
 
 Four tiers are documented; three are produced. No factory or declassifier currently emits

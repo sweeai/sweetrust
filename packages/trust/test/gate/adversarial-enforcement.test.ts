@@ -336,9 +336,20 @@ describe("DAN-1159 item 2 — no action without its receipt", () => {
   })
 
   it("the receipt is a SNAPSHOT: editing the argument object afterwards changes neither the receipt nor its chain", () => {
-    const { log, call } = paySink()
+    // Built from a CHANNEL, not an authority: since the 2026-10-13 gate audit
+    // (#9) `fromAuthority` freezes an object value in place, so the edit below
+    // would throw on an authority value. The claim under test — the receipt
+    // holds a snapshot, not the caller's object — is unchanged.
+    const log = new ReceiptLog()
+    const pay = makeSink<{ amount: Sourced<unknown> }, string>({
+      name: "pay",
+      requires: { amount: "untrusted" },
+      mode: "enforce",
+      log,
+      execute: () => "sent",
+    })
     const order = { to: "0xabc", amount: 5 }
-    call(order)
+    pay({ amount: Sourced.fromChannel(order, "webhook") })
     order.amount = 5000
     expect(log.all()[0]!.args.amount!.value).toEqual({ to: "0xabc", amount: 5 })
     expect(log.verifyChain()).toBe(true)

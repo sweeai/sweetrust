@@ -298,6 +298,15 @@ export class Sourced<T> {
    * authority was present; that is the four-property discriminator, in code.
    */
   static fromAuthority<T>(value: T, authority: string): Sourced<T> {
+    // An object value is frozen IN PLACE, shallowly. `allowlisted` hands its
+    // caller the registry's own record (the object you checked is the object
+    // you promote — 2026-08-31), so until this line a caller could write
+    // `result.value.value.iban = "DE99-EVIL"` and rewrite the registry (the
+    // 2026-10-13 gate audit). An authority's record is immutable from the
+    // moment it is one. ArrayBuffer views are skipped: Object.freeze throws on
+    // a typed array with elements, and a key handed in as bytes is still an
+    // authority value. SECURITY.md § Honest limits states the consequence.
+    if (typeof value === "object" && value !== null && !ArrayBuffer.isView(value)) Object.freeze(value)
     return new Sourced(CONSTRUCT, value, "verified", {
       origin: `authority:${authority}`,
       ancestors: new Set([`authority:${authority}`]),
