@@ -828,7 +828,11 @@ describe("#4 — makeSink validates mode, log and requires at construction", () 
 // and flags in observe/warn, and the floor is validated at construction.
 describe("#7 — the judgment wall fails closed when it cannot score", () => {
   const good = () => Sourced.fromAuthority("ACME-8817", "payee-registry")
-  const sink = (provider: JudgmentProvider, mode: "observe" | "warn" | "enforce" = "enforce", floor: unknown = 0.8) => {
+  // `floor` is a REST slot, not a default parameter: a default (`floor = 0.8`)
+  // swallows an explicit `undefined`, and the "floor undefined" row below was
+  // then red for the fixture's reason, never for the kernel's.
+  const sink = (provider: JudgmentProvider, mode: "observe" | "warn" | "enforce" = "enforce", ...floorArg: unknown[]) => {
+    const floor = floorArg.length > 0 ? floorArg[0] : 0.8
     const log = new ReceiptLog()
     let ran = 0
     const make = () =>

@@ -940,6 +940,17 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
       throw new TypeError(`${where}: requires.${key} must be one of ${TIERS.map((t) => `"${t}"`).join(" | ")}, got ${preview(tier)}`)
     }
   }
+  if (cfg.judgment !== undefined) {
+    // `floor: undefined` made `confidence >= floor` false forever, so a
+    // mismatch at 0.99 never blocked (the 2026-10-13 gate audit).
+    const { provider, floor } = cfg.judgment
+    if (typeof provider !== "object" || provider === null || typeof provider.assess !== "function") {
+      throw new TypeError(`${where}: judgment.provider must be an object with an assess() method, got ${preview(provider)}`)
+    }
+    if (typeof floor !== "number" || !Number.isFinite(floor) || floor < 0 || floor > 1) {
+      throw new TypeError(`${where}: judgment.floor must be a finite number in [0, 1], got ${preview(floor)}`)
+    }
+  }
 
   return (args: Args): SinkResult<R> => {
     // `Object.create(null)` rather than `{}`: `rendered` is keyed by ATTACKER-
@@ -1074,7 +1085,33 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
     if (cfg.judgment && violations.length === 0) {
       const tierArgs: Record<string, { value: unknown; tier: Tier }> = {}
       for (const k of Object.keys(rendered)) tierArgs[k] = { value: args[k]!.value, tier: args[k]!.tier }
-      const v = cfg.judgment.provider.assess(cfg.name, tierArgs)
+      const judge = cfg.judgment
+      const providerName = String(judge.provider.name)
+
+      // The provider is scored inside a try (the 2026-10-13 gate audit). A
+      // provider that throws, or returns something that is not a verdict
+      // object, HAS NOT SCORED — and the wall used to let that exception
+      // escape between the tier wall and the receipt, so the log said nothing
+      // about a call the caller saw as an outage. No verdict is read as a
+      // mismatch with no confidence, which the fail-closed rule below turns
+      // into a block in enforce and a flag in observe/warn, with the failure
+      // written on the receipt.
+      let v: JudgmentVerdict
+      try {
+        const out: unknown = judge.provider.assess(cfg.name, tierArgs)
+        if (typeof out !== "object" || out === null) throw new TypeError(`provider returned ${preview(out)} instead of a verdict`)
+        v = out as JudgmentVerdict
+      } catch (err) {
+        v = { assessment: "mismatch", confidence: NaN, rationale: `provider ${providerName} gave no verdict: ${firstLine(err)}` }
+      }
+      // A confidence that is not a finite number is no confidence. The old
+      // test was `confidence >= floor`, which NaN, undefined, null and a
+      // string all compare FALSE against — so a "mismatch" the provider could
+      // not put a number on executed. A fallible wall fails closed: a
+      // mismatch without a finite confidence blocks in enforce.
+      const conf = typeof v.confidence === "number" && Number.isFinite(v.confidence) ? v.confidence : undefined
+      const confText = conf === undefined ? `conf ${preview(v.confidence)}, not a finite number` : `conf ${conf.toFixed(2)}`
+      const rationaleText = typeof v.rationale === "string" ? v.rationale : preview(v.rationale)
 
       // Rationale is FREE TEXT from a provider that just saw the raw values
       // (adversarial pass A4, 2026-07-25). `redact` governed `args` and stopped
@@ -1085,20 +1122,21 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
       // safe because the provider does not author them; the prose is not.
       const anyRedacted = Object.values(cfg.redact ?? {}).some((p) => p !== undefined && p !== "raw")
       const rationale = anyRedacted
-        ? `[rationale withheld — this sink redacts arguments; sha256:${createHash("sha256").update(v.rationale).digest("hex").slice(0, 16)}]`
-        : v.rationale
+        ? `[rationale withheld — this sink redacts arguments; sha256:${createHash("sha256").update(rationaleText).digest("hex").slice(0, 16)}]`
+        : rationaleText
 
-      const blocks = v.assessment === "mismatch" && v.confidence >= cfg.judgment.floor
+      const blocks = v.assessment === "mismatch" && (conf === undefined || conf >= judge.floor)
       if (blocks && cfg.mode === "enforce") {
-        const refusal = `⚖ ${cfg.name} judgment-blocked (${cfg.judgment.provider.name}, conf ${v.confidence.toFixed(2)}): ${rationale}`
+        const refusal = `⚖ ${cfg.name} judgment-blocked (${providerName}, ${confText}): ${rationale}`
         const receipt = cfg.log.append({ at: now(), sink: cfg.name, decision: "judgment-blocked", args: rendered, reason: refusal })
         // The caller is in-process and already holds the raw values — it gets
         // the real rationale. Only the durable receipt is redacted.
-        return { ok: false, refusal: `⚖ ${cfg.name} judgment-blocked (${cfg.judgment.provider.name}, conf ${v.confidence.toFixed(2)}): ${v.rationale}`, receipt }
+        return { ok: false, refusal: `⚖ ${cfg.name} judgment-blocked (${providerName}, ${confText}): ${rationaleText}`, receipt }
       }
       if (v.assessment !== "match") {
-        // Flagged, not blocked — the honest "unsure defers to human" band.
-        const note = `⚖ ${cfg.name} judgment-flagged (${v.assessment}, conf ${v.confidence.toFixed(2)}): ${rationale}`
+        // Flagged, not blocked — the honest "unsure defers to human" band. An
+        // assessment outside the three known words lands here too.
+        const note = `⚖ ${cfg.name} judgment-flagged (${preview(v.assessment)}, ${confText}): ${rationale}`
         let result: R
         try {
           result = cfg.execute(args)
