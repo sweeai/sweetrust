@@ -247,7 +247,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { makeJsonlSignedAuditLive } from "../../src/mandate/audit.ts"
-import { makeEd25519VerifierLive, makeInMemorySignerLive, signedPreimage } from "../../src/mandate/index.ts"
+import { makeEd25519VerifierLive, makeInMemorySignerLive, publicKeyHexFromPem, signedPreimage } from "../../src/mandate/index.ts"
 
 describe("2026-10-13 verify audit, finding 1 — a stray key on the head record is refused, and the store inherits it", () => {
   // The durable store re-verifies the whole file on every read and then signs
@@ -456,5 +456,54 @@ describe("2026-10-13 verify audit, finding 4 — a test marker can never be a re
     for (const signer of [makeInMemorySignerLive(), makeInMemorySignerLive("my-test-marker")]) {
       expect(check(buildChain(signer, EVENTS), signer)).toMatchObject({ valid: true, reason: "ok" })
     }
+  })
+})
+
+describe("2026-10-13 verify audit, finding 8 — key material is validated where it is handed over", () => {
+  // Construction accepted a private key and a public key that were not a pair
+  // (every record then failed to verify, after the actions had run), keys of
+  // the wrong algorithm, and a PRIVATE key where a public one was asked for
+  // (publicKeyHexFromPem happily derived the public half, so a verifier wired
+  // with the operator's private key kept working and nobody noticed).
+  const pemPair = (gen: () => { publicKey: import("node:crypto").KeyObject; privateKey: import("node:crypto").KeyObject }) => {
+    const { publicKey, privateKey } = gen()
+    return {
+      privateKeyPem: privateKey.export({ format: "pem", type: "pkcs8" }) as string,
+      publicKeyPem: publicKey.export({ format: "pem", type: "spki" }) as string,
+    }
+  }
+  const ed = () => pemPair(() => generateKeyPairSync("ed25519"))
+
+  test("a private key and a public key that are not a pair are refused at construction", () => {
+    const a = ed(), b = ed()
+    expect(() => makeEd25519SignerLive({ privateKeyPem: a.privateKeyPem, publicKeyPem: b.publicKeyPem })).toThrow(/pair/)
+  })
+
+  test("ed448, x25519, P-256 and RSA keys are refused by both factories", () => {
+    const foreign: ReadonlyArray<readonly [string, () => { publicKey: import("node:crypto").KeyObject; privateKey: import("node:crypto").KeyObject }]> = [
+      ["ed448", () => generateKeyPairSync("ed448")],
+      ["x25519", () => generateKeyPairSync("x25519")],
+      ["P-256", () => generateKeyPairSync("ec", { namedCurve: "P-256" })],
+      ["rsa", () => generateKeyPairSync("rsa", { modulusLength: 2048 })],
+    ]
+    for (const [label, gen] of foreign) {
+      const cfg = pemPair(gen)
+      expect(() => makeEd25519SignerLive(cfg), label).toThrow(/ed25519/)
+      expect(() => makeEd25519VerifierLive({ publicKeyPem: cfg.publicKeyPem }), label).toThrow(/ed25519/)
+    }
+  })
+
+  test("a PRIVATE key PEM where a public key is expected is refused by publicKeyHexFromPem and the verifier factory", () => {
+    const k = ed()
+    expect(() => publicKeyHexFromPem(k.privateKeyPem)).toThrow(/PRIVATE/)
+    expect(() => makeEd25519VerifierLive({ publicKeyPem: k.privateKeyPem })).toThrow(/PRIVATE/)
+  })
+
+  test("CONTROL: a matched Ed25519 pair constructs, signs, verifies, and pins through publicKeyHexFromPem", () => {
+    const k = ed()
+    const signer = makeEd25519SignerLive(k)
+    const verifier = makeEd25519VerifierLive({ publicKeyPem: k.publicKeyPem })
+    const chain = buildChain(signer, EVENTS)
+    expect(verifyAuditChain(chain, verifier, { trustedSignerPublicKeyHex: publicKeyHexFromPem(k.publicKeyPem) })).toMatchObject({ valid: true })
   })
 })

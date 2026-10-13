@@ -25,7 +25,7 @@
  *   - No whitespace
  *   - Identical input produces identical bytes (deterministic signing)
  */
-import { createHash, createPrivateKey, createPublicKey, sign as edSign, verify as edVerify } from "node:crypto"
+import { createHash, createPrivateKey, createPublicKey, sign as edSign, verify as edVerify, type KeyObject } from "node:crypto"
 import type {
   ISO8601,
   Signed,
@@ -292,7 +292,28 @@ export interface Ed25519SignerConfig {
  * fewer.
  */
 export const publicKeyHexFromPem = (publicKeyPem: string): string =>
-  createPublicKey(publicKeyPem).export({ format: "der", type: "spki" }).toString("hex")
+  createPublicKey(assertPublicPem(publicKeyPem, "publicKeyPem")).export({ format: "der", type: "spki" }).toString("hex")
+
+// Key material is checked where it is handed over (the 2026-10-13 verify
+// audit). Construction used to accept a private and a public key that were
+// not a pair (every record then failed to verify, after the actions had run),
+// ed448 / P-256 / RSA keys through the Ed25519 factories, and a PRIVATE key
+// where a public one was asked for: createPublicKey derives the public half
+// from a private PEM without complaint, so a verifier wired with the operator's
+// private key kept working and nobody noticed. The messages name the slot and
+// the algorithm, never the key.
+const assertEd25519 = (key: KeyObject, slot: string): KeyObject => {
+  if (key.asymmetricKeyType !== "ed25519") {
+    throw new Error(`MandateSigner: ${slot} is ${key.asymmetricKeyType ?? "not an asymmetric key"}, not ed25519`)
+  }
+  return key
+}
+const assertPublicPem = (pem: string, slot: string): string => {
+  if (/-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(pem)) {
+    throw new Error(`MandateSigner: ${slot} is a PRIVATE key PEM; a public (SPKI) key was expected`)
+  }
+  return pem
+}
 
 /**
  * makeEd25519SignerLive — production signer using node:crypto's Ed25519.
@@ -308,8 +329,13 @@ export const publicKeyHexFromPem = (publicKeyPem: string): string =>
 export const makeEd25519SignerLive = (
   config: Ed25519SignerConfig,
 ): MandateSignerService => {
-  const privateKey = createPrivateKey(config.privateKeyPem)
-  const publicKey = createPublicKey(config.publicKeyPem)
+  const privateKey = assertEd25519(createPrivateKey(config.privateKeyPem), "privateKeyPem")
+  const publicKey = assertEd25519(createPublicKey(assertPublicPem(config.publicKeyPem, "publicKeyPem")), "publicKeyPem")
+  // The two must be a PAIR. Signing with one key and stamping records with
+  // another produced a store that no pin could ever verify.
+  if (!createPublicKey(privateKey).export({ format: "der", type: "spki" }).equals(publicKey.export({ format: "der", type: "spki" }))) {
+    throw new Error("MandateSigner: privateKeyPem and publicKeyPem are not a pair; records signed with this private key would carry a public key that cannot verify them")
+  }
   // Hex-encode the SPKI-DER-serialized public key. Ed25519 raw keys are 32
   // bytes; the SPKI wrapper adds ~12 bytes of ASN.1 structure for a total
   // of ~44 bytes (88 hex chars). Verify (below) re-imports via the same
@@ -384,7 +410,7 @@ export interface Ed25519VerifierConfig {
 export const makeEd25519VerifierLive = (
   config: Ed25519VerifierConfig,
 ): MandateSignerService => {
-  const publicKey = createPublicKey(config.publicKeyPem)
+  const publicKey = assertEd25519(createPublicKey(assertPublicPem(config.publicKeyPem, "publicKeyPem")), "publicKeyPem")
   const publicKeyDer = publicKey.export({ format: "der", type: "spki" })
   const publicKeyHex = publicKeyDer.toString("hex")
 
