@@ -234,10 +234,24 @@ this package follows [Semantic Versioning](https://semver.org).
   `src/canon.ts`, a leaf module every subpath imports; the exported functions are the same
   objects as before. `docs/adr/0002-receipt-interior-hash-is-canonical.md` records the decision.
 
+### Removed
+
+- **`issueMandate` and `issueRootMandate` are gone.** This supersedes the Deprecated entry below,
+  from earlier in this same release: they never shipped deprecated, they ship removed. Both stamped
+  `"organization"` on every scope they minted, so an organization's child claimed to be an
+  organization, and `issueMandate` ignored the grantor's tier until a runtime check was bolted on.
+  Migrate `issueRootMandate` → `issueOrgMandate` (same arguments) and `issueMandate` →
+  `issueProjectMandate` (same arguments; the grantor must be an org scope) or `issueAgentMandate`
+  (the grantor must be a project scope). One consequence for error handling: a
+  `TierLadderViolation` with `requestedTier: "organization"` can no longer be raised, because only
+  `issueMandate` produced it. The other three ladder refusals (agent → project, project → project,
+  agent → agent, org → agent) are unchanged and now each pinned by name in the tests.
+
 ### Deprecated
 
 - `issueMandate` and `issueRootMandate`. Use `issueOrgMandate`, then `issueProjectMandate` and
-  `issueAgentMandate`. They will be removed in a future release.
+  `issueAgentMandate`. They will be removed in a future release. *(Superseded above: removed in this
+  release.)*
 
 ## [0.3.0] — first public release
 

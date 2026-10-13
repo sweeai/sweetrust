@@ -20,7 +20,6 @@ import { makeJsonlAuditLive, makeJsonlSignedAuditLive } from "../../src/mandate/
 import {
   defineCapability,
   issueOrgMandate,
-  issueRootMandate,
   makeEd25519SignerLive,
   makeInMemoryAuditLive,
   MandateFailure,
@@ -44,7 +43,7 @@ const thrown = (fn: () => unknown): any => {
 /** One refusal from each thrower the fix must cover. */
 const refusals = (): ReadonlyArray<readonly [string, any]> => {
   const malicious = thrown(() =>
-    issueRootMandate({ grantor: OPERATOR, capabilities: [Deploy] as const, rationale: INJECTED }, makeInMemoryAuditLive()),
+    issueOrgMandate({ grantor: OPERATOR, capabilities: [Deploy] as const, rationale: INJECTED }, makeInMemoryAuditLive()),
   )
 
   const unsignedPath = join(mkdtempSync(join(tmpdir(), "sweetrust-failure-")), "audit.jsonl")

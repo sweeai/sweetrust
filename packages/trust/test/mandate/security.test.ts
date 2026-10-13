@@ -2,7 +2,8 @@
  * constitutionalPreCheck — the pattern catalog, tested directly.
  *
  * Until the 2026-10-13 mandate audit this module had no test file of its own;
- * two rationale tests in mandate.test.ts reached it through issueRootMandate.
+ * two rationale tests in mandate.test.ts reached it through the root issuer
+ * (then `issueRootMandate`, since removed; now `issueOrgMandate`).
  * The audit found that a SINGLE zero-width or format character inside a MIP-1
  * keyword returned null: it broke the `\b` word match while staying under
  * MIP-5's >3-in-100 cluster threshold, so "ig<U+200B>nore all previous
