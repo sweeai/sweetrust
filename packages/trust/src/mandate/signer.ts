@@ -207,7 +207,24 @@ const assertEd25519SignatureShape = (signature: unknown): string => {
  */
 export const makeInMemorySignerLive = (
   publicKeyHex: string = "inmem-test-pubkey",
-): MandateSignerService => ({
+): MandateSignerService => {
+  // The marker must not be a real key. verifyAuditChain trusts whatever the
+  // caller's signer.verify says, so an in-memory signer whose marker was the
+  // operator's SPKI hex passed the pin gate and then accepted an "inmem-"
+  // signature anyone can compute, under the operator's real pin (the
+  // 2026-10-13 verify audit). Decoding is deliberately lenient here: anything
+  // that could be read as a public key is refused.
+  let parsesAsKey = false
+  try {
+    createPublicKey({ key: Buffer.from(publicKeyHex, "hex"), format: "der", type: "spki" })
+    parsesAsKey = true
+  } catch {
+    // not a key: the marker is fine
+  }
+  if (parsesAsKey) {
+    throw new Error("makeInMemorySignerLive: the marker parses as an SPKI public key; a test marker must never be a real key")
+  }
+  return {
   publicKeyHex,
   sign: <P>({ payload, previousHash, domain }: { payload: P; previousHash: string | null; domain: string }): Signed<P> => {
     const signedAt = nowISO()
@@ -231,7 +248,8 @@ export const makeInMemorySignerLive = (
     const expected = "inmem-" + sha256Hex(signedPreimage({ domain, payload, previousHash, signedAt }))
     return signature === expected
   },
-})
+  }
+}
 
 /**
  * Ed25519SignerConfig — operator-supplied signing key material.

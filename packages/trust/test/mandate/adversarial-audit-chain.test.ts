@@ -439,3 +439,22 @@ describe("2026-10-13 verify audit, finding 3 — each signer's verify() pins its
     expect(check([wrong], signer).reason).toBe("signature-mismatch")
   })
 })
+
+describe("2026-10-13 verify audit, finding 4 — a test marker can never be a real key", () => {
+  // verifyAuditChain trusts whatever the caller's signer.verify says. With
+  // makeInMemorySignerLive(realSpkiHex) an attacker-built "inmem-" signature
+  // verified under the operator's REAL pin: the signer's marker was the pin,
+  // so the gate passed, and the in-memory algorithm accepted a signature anyone
+  // can compute. The marker is refused at construction if it parses as an
+  // SPKI public key.
+  test("ATTACK: makeInMemorySignerLive(<real Ed25519 SPKI hex>) throws at construction", () => {
+    const real = ed25519Signer().publicKeyHex
+    expect(() => makeInMemorySignerLive(real)).toThrow(/public key/)
+  })
+
+  test("the default marker and an arbitrary non-key marker still work end to end", () => {
+    for (const signer of [makeInMemorySignerLive(), makeInMemorySignerLive("my-test-marker")]) {
+      expect(check(buildChain(signer, EVENTS), signer)).toMatchObject({ valid: true, reason: "ok" })
+    }
+  })
+})
