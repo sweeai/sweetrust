@@ -184,7 +184,11 @@ export const makeInMemorySignedAuditLive = (
  * appends are not locked across processes, so one store file needs one writer.
  * Verifying on every read costs one Ed25519 verification per record per call.
  * The previous version already re-parsed the whole file per call, so the
- * complexity class is unchanged, but the constant is much larger.
+ * complexity class is unchanged, but the constant is much larger. And one
+ * mandate operation is several calls: `useCapability` over a chain of depth d
+ * does an `isRevoked` and a `query` per ancestor plus two more reads, so it
+ * costs O(d·n) verifications per invocation, not O(n) (the 2026-10-13 mandate
+ * audit). There is no cache; measure before putting a long log on a hot path.
  */
 export const makeJsonlSignedAuditLive = (
   storePath: string,

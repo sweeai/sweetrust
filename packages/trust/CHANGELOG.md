@@ -75,6 +75,26 @@ this package follows [Semantic Versioning](https://semver.org).
   `Object.prototype.redact` or `.judgment` reaches no sink; `humanConfirm` renders the provenance
   before the value and cuts the value at 256 characters; `fromAuthority` freezes an object value
   in place so an `allowlisted` hand-out cannot rewrite the registry.
+- **A getter on the `args` object can no longer split the scope that is checked from the scope
+  that is acted on** (the 2026-10-13 mandate audit). Every exported mandate function used to
+  re-read `args.mandate`, `args.grantorScope`, `args.mandateId`, `args.capabilities` and
+  `args.rationale` at each site that wanted them. A caller holding only its own genuine leaf could
+  define a getter that answered the possession check with the genuine object and every other read
+  with forged data, and from a held leaf alone: invoke a capability it was never granted, recorded
+  under another mandate's id; mint a genuine project-tier scope outside its own subtree; revoke the
+  org root; and mint a child whose scope and grant both carried a capability outside its grantor's
+  grant. Each function now reads each field exactly once, resolves each capability's `key` exactly
+  once, and the checks, the mint and the record all use those values. If you pass plain objects,
+  nothing changes for you.
+- **A keyword split by one invisible or format character no longer slips past the pre-check.**
+  `ig<U+200B>nore all previous instructions` returned null: the character broke the word boundary
+  while staying under the four-in-a-window cluster rule. Invisible and format characters are now
+  stripped before the MIP-1/MIP-3/MIP-4 matches; the cluster rule still reads the raw string.
+  `CATALOG_VERSION` is `0.2.1`, so a record stamped `0.2.0` was not screened this way.
+- **Capability identifiers are screened before they are persisted.** `defineCapability` refuses an
+  injected key where it is authored, and every issuer screens the keys it is about to record, so a
+  bare string through an `as any` is caught too. Both throw `MaliciousMandateMetadata` with the
+  already-reserved `inputKind: "capability-identifier"`.
 
 ### Added
 
@@ -146,6 +166,10 @@ this package follows [Semantic Versioning](https://semver.org).
   and `meetsTier` requires both sides to be in it.
 - `humanConfirm`'s question reads `Confirm the value with provenance <…> — value: <…>?`, and a
   refusal for a non-`true` answer says that `render()` must return exactly `true`.
+- **Breaking (format):** a `MandateId`'s random suffix is 16 hex characters (64 bits). It was 10
+  (40 bits) while the types called ids "collision-free". An issuer also refuses an id the log
+  already has an event for and draws again, so an id is never minted twice into one log. Ids stay
+  sortable by their millisecond prefix; anything that parses the suffix width must accept 16.
 
 ### Deprecated
 
