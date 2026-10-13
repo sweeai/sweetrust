@@ -279,14 +279,16 @@ describe("DAN-1159 item 2 — no action without its receipt", () => {
     expect(out.ok).toBe(true)
     expect(executed()).toBe(1)
     expect(log.all()).toHaveLength(1)
-    expect(log.all()[0]!.args.amount!.value).toBe("1000000000n")
+    // Encoding superseded by the 2026-10-13 gate audit (#17): `"1000000000n"`
+    // was indistinguishable from the STRING "1000000000n".
+    expect(log.all()[0]!.args.amount!.value).toEqual({ $bigint: "1000000000" })
     expect(log.verifyChain()).toBe(true)
   })
 
   it("a BigInt nested inside an argument object is recorded too", () => {
     const { log, call } = paySink()
     call({ to: "0xabc", amount: 5n })
-    expect(log.all()[0]!.args.amount!.value).toEqual({ to: "0xabc", amount: "5n" })
+    expect(log.all()[0]!.args.amount!.value).toEqual({ to: "0xabc", amount: { $bigint: "5" } })
     expect(log.verifyChain()).toBe(true)
   })
 
@@ -330,7 +332,7 @@ describe("DAN-1159 item 2 — no action without its receipt", () => {
     }
     const truncated = paySink({ redact: "truncate" })
     truncated.call(42n)
-    expect(truncated.log.all()[0]!.args.amount!.value).toBe("42n")
+    expect(truncated.log.all()[0]!.args.amount!.value).toBe('{"$bigint":"42"}')
   })
 
   it("the receipt is a SNAPSHOT: editing the argument object afterwards changes neither the receipt nor its chain", () => {

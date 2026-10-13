@@ -345,6 +345,37 @@ function ascend<T>(prev: Sourced<T>, event: UpgradeEvent, mergedAncestors?: Read
   })
 }
 
+/**
+ * The JSON the gate renders for a value — on receipts, and in the strings the
+ * declassifiers build. Identical to `JSON.stringify` for everything it accepts;
+ * the two values it refuses or flattens are given a shape of their own:
+ *
+ *   5n          → {"$bigint":"5"}        (JSON.stringify throws on a BigInt)
+ *   NaN         → {"$number":"NaN"}      (JSON.stringify writes null)
+ *   ±Infinity   → {"$number":"Infinity"} / {"$number":"-Infinity"}
+ *
+ * Until the 2026-10-13 gate audit a BigInt was written as its digits plus "n",
+ * which is byte-identical to the STRING "5n", and a non-finite number became
+ * `null`, byte-identical to a literal null. A receipt is evidence of what
+ * reached the sink; two different values must not leave identical evidence.
+ * Every Sui amount in MIST is a bigint, so this is the common case, not an
+ * edge. Everything else renders exactly as before.
+ *
+ * This lives HERE, in gate, and deliberately not in mandate's `canonicalJSON`:
+ * that function defines signed bytes for the whole rail, and changing it would
+ * move every mandate signature (AGENTS.md, "One canonicalization across the
+ * rail"). By the time a receipt reaches a signer, its arguments are already
+ * plain JSON.
+ */
+const receiptJSON = (value: unknown): string | undefined =>
+  JSON.stringify(value, (_key, v: unknown) =>
+    typeof v === "bigint"
+      ? { $bigint: `${v}` }
+      : typeof v === "number" && !Number.isFinite(v)
+        ? { $number: `${v}` }
+        : v,
+  )
+
 const now = () => new Date().toISOString()
 
 // ── Declassifiers (§5 — the three doors) ────────────────────────────────────
@@ -696,20 +727,6 @@ export type SinkResult<R> =
   | { readonly ok: false; readonly refusal: string; readonly receipt: Receipt }
 
 /**
- * The JSON a receipt records for a value. Identical to `JSON.stringify` except
- * that a BigInt, which it refuses, is written as its digits plus "n", the way
- * JavaScript writes the literal. Every Sui amount in MIST is a bigint.
- *
- * This lives HERE, in gate's receipt rendering, and deliberately not in
- * mandate's `canonicalJSON`: that function defines signed bytes for the whole
- * rail, and changing it would move every mandate signature (AGENTS.md, "One
- * canonicalization across the rail"). By the time a receipt reaches a signer,
- * its arguments are already plain JSON.
- */
-const receiptJSON = (value: unknown): string | undefined =>
-  JSON.stringify(value, (_key, v: unknown) => (typeof v === "bigint" ? `${v}n` : v))
-
-/**
  * See makeSink's `redact` option — applied to receipt rendering only.
  *
  * Returns a SNAPSHOT, the JSON form of the value at the moment of the call.
@@ -728,7 +745,9 @@ function renderForReceipt(value: unknown, policy: "raw" | "hash" | "truncate"): 
     return "sha256:" + createHash("sha256").update(json ?? "undefined").digest("hex")
   }
   if (policy === "truncate") {
-    const s = typeof value === "string" ? value : typeof value === "bigint" ? `${value}n` : (json ?? "undefined")
+    // A string is cut as itself; anything else is cut as its receipt JSON, so a
+    // BigInt under `truncate` reads the same as under `raw`.
+    const s = typeof value === "string" ? value : (json ?? "undefined")
     return s.length > 64 ? s.slice(0, 64) + "…" : s
   }
   return json === undefined ? undefined : JSON.parse(json)

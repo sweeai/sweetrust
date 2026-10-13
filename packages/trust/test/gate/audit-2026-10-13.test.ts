@@ -13,6 +13,7 @@
 // carries the entry.
 // ============================================================================
 
+import { createHash } from "node:crypto"
 import { describe, expect, it } from "vitest"
 import { Sourced, corroborate, humanConfirm, makeSink, meetsTier, minTier, ReceiptLog } from "../../src/gate/trust.js"
 
@@ -320,5 +321,64 @@ describe("#12 — a committed receipt is deep-frozen", () => {
     expect(Object.isFrozen(v)).toBe(true)
     expect(Object.isFrozen(v.nested)).toBe(true)
     expect(Object.isFrozen(v.nested[1])).toBe(true)
+  })
+})
+
+// ── #17 LOW — receipt rendering was ambiguous for amounts ───────────────────
+// A BigInt was written as its digits plus "n" — the same bytes the STRING
+// "5n" produces — and JSON.stringify turns NaN and ±Infinity into `null`, the
+// same bytes a literal null produces. A receipt is evidence of what reached the
+// sink; two different values must not leave identical evidence. The encoding
+// is now `{"$bigint":"5"}` and `{"$number":"NaN"|"Infinity"|"-Infinity"}`.
+// Every other value renders byte-identically to before (the DAN-1159 CONTROL
+// in adversarial-enforcement.test.ts pins that).
+describe("#17 — a BigInt and a non-finite number render unambiguously", () => {
+  const sink = (redact?: "raw" | "hash" | "truncate") => {
+    const log = new ReceiptLog()
+    const pay = makeSink<{ amount: Sourced<unknown> }, string>({
+      name: "pay",
+      requires: { amount: "verified" },
+      mode: "enforce",
+      log,
+      ...(redact ? { redact: { amount: redact } } : {}),
+      execute: () => "ok",
+    })
+    const call = (v: unknown) => pay({ amount: Sourced.fromAuthority(v, "t") }).receipt.args.amount!.value
+    return { log, call }
+  }
+
+  it("a bigint and the string that used to collide with it are distinct on the receipt", () => {
+    const { log, call } = sink()
+    expect(call(5n)).toEqual({ $bigint: "5" })
+    expect(call("5n")).toBe("5n")
+    expect(call(-7n)).toEqual({ $bigint: "-7" })
+    expect(log.verifyChain()).toBe(true)
+  })
+
+  it("NaN, Infinity and -Infinity are no longer written as null", () => {
+    const { log, call } = sink()
+    expect(call(NaN)).toEqual({ $number: "NaN" })
+    expect(call(Infinity)).toEqual({ $number: "Infinity" })
+    expect(call(-Infinity)).toEqual({ $number: "-Infinity" })
+    expect(call(null)).toBe(null)
+    expect(call({ amount: NaN, memo: 5n })).toEqual({ amount: { $number: "NaN" }, memo: { $bigint: "5" } })
+    expect(log.verifyChain()).toBe(true)
+  })
+
+  it("the hash and truncate policies use the same encoding", () => {
+    const hashed = sink("hash")
+    expect(hashed.call(42n)).toBe("sha256:" + createHash("sha256").update('{"$bigint":"42"}').digest("hex"))
+    expect(hashed.call(NaN)).toBe("sha256:" + createHash("sha256").update('{"$number":"NaN"}').digest("hex"))
+    const truncated = sink("truncate")
+    expect(truncated.call(42n)).toBe('{"$bigint":"42"}')
+    expect(truncated.call(Infinity)).toBe('{"$number":"Infinity"}')
+    expect(truncated.call("5n")).toBe("5n")
+  })
+
+  it("CONTROL: finite numbers, -0, strings, booleans and plain objects are byte-identical to JSON.stringify", () => {
+    const { call } = sink()
+    for (const v of [12.5, -0, 0, 1e21, "x", true, false, { b: 1, a: [true, null] }]) {
+      expect(call(v)).toEqual(JSON.parse(JSON.stringify(v)))
+    }
   })
 })
