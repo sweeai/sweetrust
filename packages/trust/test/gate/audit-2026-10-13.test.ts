@@ -912,3 +912,138 @@ describe("#7 — the judgment wall fails closed when it cannot score", () => {
     expect(sink(verdict({ assessment: "mismatch", confidence: 0.95, rationale: "" })).make()({ to: good() }).receipt.decision).toBe("judgment-blocked")
   })
 })
+
+// ── #3 MEDIUM (+ #8 LOW) — execute() and the judge received the caller's args object, re-read
+// ADVERTISED: "the object you checked must be the object you promote" — the
+// 2026-08-31 rule, applied to allowlisted. The SINK broke it: the declared
+// loop read `args[key]` once to check it, then `execute(args)` and the judge's
+// `args[k].value` READ IT AGAIN from the caller's object. A getter or Proxy
+// that answers GOOD on the first read and EVIL on the second cleared enforce
+// with a verified receipt and handed EVIL to the action. Symbol-keyed,
+// non-enumerable and inherited arguments were invisible to both loops and
+// reached execute untier-checked and off the receipt. The judge's bag was a
+// plain `{}`, so a declared argument named `__proto__` vanished from its view.
+//
+// execute() and the judge now receive ONE null-prototype snapshot holding
+// ONLY the declared keys, built from the single read. This is a deliberate
+// behaviour change: an undeclared argument is still recorded and still a
+// violation, but it no longer reaches execute() in ANY mode (CHANGELOG,
+// Changed/Breaking).
+describe("#3 — execute() and the judge see the checked snapshot, never the caller's object", () => {
+  const good = () => Sourced.fromAuthority("ACME-8817", "payee-registry")
+  const evil = () => Sourced.fromChannel("attacker@evil.test", "email-inbound")
+  const mk = (mode: "observe" | "warn" | "enforce" = "enforce") => {
+    const log = new ReceiptLog()
+    let saw: Record<PropertyKey, Sourced<unknown>> | undefined
+    const pay = makeSink<Record<string, Sourced<unknown>>, string>({
+      name: "pay",
+      requires: { to: "verified" },
+      mode,
+      log,
+      execute: (a) => {
+        saw = a
+        return "sent"
+      },
+    })
+    return { log, pay, saw: () => saw }
+  }
+
+  it("(a) a getter that flips GOOD → EVIL between reads: execute gets the value that was checked", () => {
+    const { pay, saw, log } = mk()
+    const g = good()
+    const e = evil()
+    let n = 0
+    const r = pay({ get to() { return n++ === 0 ? g : e } } as never)
+    expect(r.ok).toBe(true)
+    expect(r.receipt.args.to!.tier).toBe("verified")
+    expect(saw()!.to).toBe(g)
+    expect(log.verifyChain()).toBe(true)
+  })
+
+  it("(b) a Proxy that flips between reads: same", () => {
+    const { pay, saw } = mk()
+    const g = good()
+    const e = evil()
+    let n = 0
+    const r = pay(new Proxy({ to: g }, { get: (t, p) => (p === "to" && n++ > 0 ? e : Reflect.get(t, p)) }) as never)
+    expect(r.ok).toBe(true)
+    expect(saw()!.to).toBe(g)
+  })
+
+  it("(c) a symbol-keyed argument never reaches execute", () => {
+    const { pay, saw } = mk()
+    const memo = Symbol("memo")
+    const r = pay({ to: good(), [memo]: evil() } as never)
+    expect(r.ok).toBe(true)
+    expect(Object.getOwnPropertySymbols(saw()!)).toEqual([])
+    expect(saw()![memo]).toBeUndefined()
+  })
+
+  it("(d) a non-enumerable argument never reaches execute", () => {
+    const { pay, saw } = mk()
+    const args = { to: good() }
+    Object.defineProperty(args, "memo", { value: evil(), enumerable: false })
+    expect(pay(args as never).ok).toBe(true)
+    expect(saw()!.memo).toBeUndefined()
+  })
+
+  it("(e) an inherited argument never reaches execute", () => {
+    const { pay, saw } = mk()
+    const args = Object.create({ memo: evil() })
+    args.to = good()
+    expect(pay(args).ok).toBe(true)
+    expect(saw()!.memo).toBeUndefined()
+    expect("memo" in saw()!).toBe(false)
+  })
+
+  it("(f) BREAKING: in observe and warn an undeclared argument is recorded and raised, but no longer reaches execute", () => {
+    for (const mode of ["observe", "warn"] as const) {
+      const { pay, saw } = mk(mode)
+      const r = pay({ to: good(), memo: evil() })
+      expect(r.ok).toBe(true)
+      expect(r.receipt.args.memo!.provenance).toContain("UNDECLARED")
+      expect(r.receipt.reason).toContain("memo was passed but is not declared")
+      expect(saw()!.memo).toBeUndefined()
+      expect(Object.keys(saw()!)).toEqual(["to"])
+    }
+  })
+
+  it("(g) execute's argument object has a null prototype and exactly the declared keys, holding the same Sourced objects", () => {
+    const { pay, saw } = mk()
+    const g = good()
+    pay({ to: g })
+    expect(Object.getPrototypeOf(saw()!)).toBe(null)
+    expect(Object.keys(saw()!)).toEqual(["to"])
+    expect(saw()!.to).toBe(g)
+  })
+
+  it("(h, #8) the judge sees a declared argument named __proto__, in a null-prototype bag", () => {
+    let judgeKeys: string[] = []
+    let judgeProto: unknown = "unset"
+    const spy: JudgmentProvider = {
+      name: "spy",
+      assess: (_a, args) => {
+        judgeKeys = Object.keys(args)
+        judgeProto = Object.getPrototypeOf(args)
+        return { assessment: "match", confidence: 1, rationale: "" }
+      },
+    }
+    const log = new ReceiptLog()
+    const sink = makeSink<Record<string, Sourced<unknown>>, string>({
+      name: "s",
+      requires: { ["__proto__"]: "verified", to: "verified" },
+      mode: "enforce",
+      log,
+      judgment: { provider: spy, floor: 0.5 },
+      execute: () => "ok",
+    })
+    const args: Record<string, Sourced<unknown>> = Object.create(null)
+    args["__proto__"] = Sourced.fromAuthority("JUDGE-MUST-SEE-THIS", "r")
+    args.to = Sourced.fromAuthority("y", "r")
+    const r = sink(args)
+    expect(r.ok).toBe(true)
+    expect(Object.keys(r.receipt.args)).toContain("__proto__")
+    expect(judgeKeys.sort()).toEqual(["__proto__", "to"])
+    expect(judgeProto).toBe(null)
+  })
+})
