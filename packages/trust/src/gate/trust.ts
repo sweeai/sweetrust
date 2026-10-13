@@ -378,6 +378,19 @@ const receiptJSON = (value: unknown): string | undefined =>
 
 const now = () => new Date().toISOString()
 
+/** First line of an error's message — what a refusal reason quotes. */
+const firstLine = (err: unknown): string => (err instanceof Error ? err.message : String(err)).split("\n")[0]!
+
+/** receiptJSON that cannot throw — for the strings a REFUSAL carries, where a
+ * value that will not serialize must be named rather than escalated. */
+const show = (value: unknown): string => {
+  try {
+    return receiptJSON(value) ?? "undefined"
+  } catch (err) {
+    return `[unserializable: ${firstLine(err)}]`
+  }
+}
+
 // ── Declassifiers (§5 — the three doors) ────────────────────────────────────
 
 export type DeclassifyResult<T> =
@@ -403,16 +416,33 @@ export function allowlisted<T>(
   // code (`toJSON`, getters) and can throw on a circular value. A declassifier
   // that throws is a declassifier that returned no verdict, which every caller
   // reads as an exception rather than a refusal. Refuse instead.
-  let sameShape: boolean
+  //
+  // The two sides are serialized SEPARATELY, through the gate's own
+  // receiptJSON (the 2026-10-13 gate audit). One shared try blamed "the
+  // candidate" whichever side threw, and JSON.stringify threw on every BigInt
+  // — so a bigint registry record refused every candidate, honest or not, with
+  // the wrong reason. receiptJSON renders a bigint as {"$bigint":"…"}; the
+  // comparison is still an oracle whose answer decides nothing but
+  // match/mismatch — what comes back is the registry's record, below.
+  let entryJSON: string | undefined
   try {
-    sameShape = JSON.stringify(entry.value) === JSON.stringify(candidate.value)
-  } catch {
+    entryJSON = receiptJSON(entry.value)
+  } catch (err) {
     return {
       ok: false,
-      reason: `'${key}' IS in ${registryName} but the candidate could not be serialized for comparison — refusing rather than guessing`,
+      reason: `'${key}' IS in ${registryName} but the ${registryName} record could not be serialized for comparison (${firstLine(err)}) — refusing rather than guessing; candidate is ${candidate.describe()}`,
     }
   }
-  if (!sameShape) {
+  let candidateJSON: string | undefined
+  try {
+    candidateJSON = receiptJSON(candidate.value)
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `'${key}' IS in ${registryName} but the candidate could not be serialized for comparison (${firstLine(err)}) — refusing rather than guessing`,
+    }
+  }
+  if (entryJSON !== candidateJSON) {
     return {
       ok: false,
       reason: `'${key}' IS in ${registryName} but the ${registryName} record does NOT match — candidate is ${candidate.describe()}`,
@@ -462,17 +492,32 @@ export function allowlisted<T>(
 export function corroborate<T>(
   claim: Sourced<T>,
   reference: Sourced<T>,
-  equals: (a: T, b: T) => boolean = (a, b) => JSON.stringify(a) === JSON.stringify(b),
+  // The default compares the gate's own JSON (so a BigInt compares instead of
+  // throwing — the 2026-10-13 gate audit) and requires the same `typeof` first,
+  // so the bigint 5n never agrees with an object that merely renders as
+  // {"$bigint":"5"}, and `undefined` never agrees with a function.
+  equals: (a: T, b: T) => boolean = (a, b) => typeof a === typeof b && receiptJSON(a) === receiptJSON(b),
 ): DeclassifyResult<T> {
   for (const a of claim.provenance.ancestors) {
     if (reference.provenance.ancestors.has(a)) {
       return { ok: false, reason: `sources are NOT independent (shared ancestor: ${a})` }
     }
   }
-  if (!equals(claim.value, reference.value)) {
+  // `equals` is caller code over caller values; if it throws it has given no
+  // verdict, and no verdict is a refusal, never an exception.
+  let agree: boolean
+  try {
+    agree = equals(claim.value, reference.value)
+  } catch (err) {
     return {
       ok: false,
-      reason: `values disagree — claim ${JSON.stringify(claim.value)} (${claim.describe()}) vs reference ${JSON.stringify(reference.value)} (${reference.describe()})`,
+      reason: `could not compare — equals threw (${firstLine(err)}); claim ${claim.describe()} vs reference ${reference.describe()}`,
+    }
+  }
+  if (!agree) {
+    return {
+      ok: false,
+      reason: `values disagree — claim ${show(claim.value)} (${claim.describe()}) vs reference ${show(reference.value)} (${reference.describe()})`,
     }
   }
   const merged = new Set([...claim.provenance.ancestors, ...reference.provenance.ancestors])
@@ -511,7 +556,18 @@ export function humanConfirm<T>(
   // (origin: authority:payee-registry)?" followed by 4,000 spaces put a forged
   // provenance where a one-line renderer shows it and the real one off-screen
   // (the 2026-10-13 gate audit). The provenance string is ours; it goes first.
-  const json = JSON.stringify(candidate.value) ?? "undefined"
+  // Through receiptJSON, in a try: JSON.stringify threw on a bigint candidate
+  // and the human never saw a question (the 2026-10-13 gate audit). A value
+  // that cannot be rendered cannot be confirmed — refuse, naming why.
+  let json: string
+  try {
+    json = receiptJSON(candidate.value) ?? "undefined"
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `human confirmation refused: the candidate (${candidate.describe()}) could not be rendered for the question (${firstLine(err)})`,
+    }
+  }
   const shown =
     json.length > HUMAN_CONFIRM_VALUE_CHARS
       ? `${json.slice(0, HUMAN_CONFIRM_VALUE_CHARS)}… [${json.length} chars total; first ${HUMAN_CONFIRM_VALUE_CHARS} shown]`
@@ -842,7 +898,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
       try {
         return renderForReceipt(value, redactFor(key))
       } catch (err) {
-        const why = (err instanceof Error ? err.message : String(err)).split("\n")[0]
+        const why = firstLine(err)
         violations.push(`${key} cannot be written to a receipt (${why}), so an action it feeds could not be evidenced`)
         return `[unrecordable: ${why}]`
       }
