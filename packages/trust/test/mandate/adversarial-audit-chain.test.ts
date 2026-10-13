@@ -247,7 +247,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { makeJsonlSignedAuditLive } from "../../src/mandate/audit.ts"
-import { makeInMemorySignerLive } from "../../src/mandate/index.ts"
+import { makeInMemorySignerLive, signedPreimage } from "../../src/mandate/index.ts"
 
 describe("2026-10-13 verify audit, finding 1 — a stray key on the head record is refused, and the store inherits it", () => {
   // The durable store re-verifies the whole file on every read and then signs
@@ -305,5 +305,46 @@ describe("2026-10-13 verify audit, finding 1 — a stray key on the head record 
     // And the append is refused too, so the injected line is never sealed in.
     expect(() => reopened.signedAudit.recordSigned(EVENTS[2]!)).toThrow()
     expect(readFileSync(path, "utf-8").split("\n").filter(Boolean)).toHaveLength(2)
+  })
+})
+
+describe("2026-10-13 verify audit, finding 2 — a missing pin matches a missing key, and the in-memory signer made that VALID", () => {
+  // The in-memory signer's signature is a public function of the envelope, so a
+  // forger needs no key at all: build a keyless revoke, compute its "inmem-"
+  // signature, and hand it to verifyAuditChain with no opts. The pin gate
+  // compared undefined to undefined and let it through; nothing downstream
+  // threw; the verdict was valid:true.
+  const forgedKeylessRevoke = (): Record<string, unknown> => {
+    const forged: Record<string, unknown> = {
+      payload: { type: "revoke", mandateId: "ORG-ROOT", revokedBy: "attacker", timestamp: "2026-10-13T00:00:00Z" },
+      previousHash: null,
+      domain: MANDATE_AUDIT_DOMAIN,
+      signedAt: "2026-10-13T00:00:00.000Z",
+    }
+    forged["signature"] = "inmem-" + sha256Hex(signedPreimage(forged as Parameters<typeof signedPreimage>[0]))
+    return forged
+  }
+
+  test("ATTACK: keyless forged revoke, in-memory signer, no opts → untrusted-signer, never valid", () => {
+    const signer = makeInMemorySignerLive()
+    for (const opts of [undefined, { trustedSignerPublicKeyHex: undefined }, {}]) {
+      const report = verifyAuditChain([forgedKeylessRevoke()] as unknown as SignedMandateAuditEvent[], signer, opts as unknown as { readonly trustedSignerPublicKeyHex: string })
+      expect(report, `opts ${JSON.stringify(opts)}`).toMatchObject({ valid: false, firstInvalidIndex: 0, reason: "untrusted-signer" })
+    }
+  })
+
+  test("ATTACK: the same under the Ed25519 signer is untrusted-signer at the gate, not malformed by accident downstream", () => {
+    const signer = ed25519Signer()
+    const [good] = buildChain(signer, EVENTS)
+    const keyless: Record<string, unknown> = { ...good! }
+    delete keyless["signerPublicKeyHex"]
+    const report = verifyAuditChain([keyless] as unknown as SignedMandateAuditEvent[], signer, undefined as unknown as { readonly trustedSignerPublicKeyHex: string })
+    expect(report).toMatchObject({ valid: false, firstInvalidIndex: 0, reason: "untrusted-signer" })
+  })
+
+  test("CONTROL: the forged record against the in-memory signer's real marker is untrusted-signer too, and an honest in-memory chain verifies", () => {
+    const signer = makeInMemorySignerLive()
+    expect(verifyAuditChain([forgedKeylessRevoke()] as unknown as SignedMandateAuditEvent[], signer, { trustedSignerPublicKeyHex: signer.publicKeyHex }).reason).toBe("untrusted-signer")
+    expect(check(buildChain(signer, EVENTS), signer)).toMatchObject({ valid: true, reason: "ok" })
   })
 })

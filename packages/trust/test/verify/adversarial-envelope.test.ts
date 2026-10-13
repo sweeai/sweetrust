@@ -55,8 +55,14 @@ const auditChain = (): SignedMandateAuditEvent[] => {
 /** A JSON round-trip, typed loosely so a test can add or delete keys on it. */
 const loose = (x: unknown): Array<Record<string, unknown>> => JSON.parse(JSON.stringify(x))
 
-/** Run verifySignedChain and fail the test with the thrown message instead of crashing it. */
-const verdict = (records: unknown, opts: unknown = { trustedSignerPublicKeyHex: trusted }): VerifyReport => {
+/**
+ * Run verifySignedChain and fail the test with the thrown message instead of
+ * crashing it. `opts` is a rest slot, not a default parameter: an explicit
+ * `undefined` must reach the verifier as undefined, and a default would
+ * silently swap in the honest pin.
+ */
+const verdict = (records: unknown, ...rest: [opts?: unknown]): VerifyReport => {
+  const opts = rest.length === 0 ? { trustedSignerPublicKeyHex: trusted } : rest[0]
   let report: VerifyReport | undefined
   expect(() => {
     report = verifySignedChain(records as SignedReceipt[], opts as Parameters<typeof verifySignedChain>[1])
@@ -65,7 +71,8 @@ const verdict = (records: unknown, opts: unknown = { trustedSignerPublicKeyHex: 
 }
 
 /** Same for verifyAuditChain, through the Ed25519 signer. */
-const auditVerdict = (log: unknown, opts: unknown = { trustedSignerPublicKeyHex: trusted }) => {
+const auditVerdict = (log: unknown, ...rest: [opts?: unknown]) => {
+  const opts = rest.length === 0 ? { trustedSignerPublicKeyHex: trusted } : rest[0]
   let out: ReturnType<typeof verifyAuditChain> | undefined
   expect(() => {
     out = verifyAuditChain(log as SignedMandateAuditEvent[], mandateSigner, opts as { readonly trustedSignerPublicKeyHex: string })
@@ -135,5 +142,49 @@ describe("finding 1 — the head record is not byte-pinned: keys outside the env
     const a = verdict(t)
     sameVerdict(a, auditVerdict(t))
     expect(a.reason).toBe("malformed-record")
+  })
+})
+
+describe("finding 2 — the pin gate passes when the pin and the record's key are both absent", () => {
+  // `r.signerPublicKeyHex !== pin` is false when both sides are undefined (or
+  // both null). A keyless record then walked through the gate. Under
+  // verifySignedChain, createPublicKey(undefined) happened to throw afterwards,
+  // so the verdict came back malformed-record by accident; under
+  // verifyAuditChain with the in-memory signer nothing threw and a keyless
+  // forgery was VALID. The gate must refuse on its own: a pin that is not a
+  // string pins nothing, and the verdict is untrusted-signer, not a crash
+  // somewhere downstream.
+
+  const keyless = () => {
+    const [r] = loose(session(1).records)
+    delete r!["signerPublicKeyHex"]
+    return [r!]
+  }
+
+  it("ATTACK: a keyless record with no opts, an undefined pin, or an empty opts bag is untrusted-signer at the gate", () => {
+    for (const opts of [undefined, { trustedSignerPublicKeyHex: undefined }, {}]) {
+      expect(verdict(keyless(), opts), `opts ${JSON.stringify(opts)}`).toMatchObject({
+        valid: false, firstInvalidIndex: 0, reason: "untrusted-signer",
+      })
+    }
+  })
+
+  it("ATTACK: a null key against a null pin is untrusted-signer, not a match", () => {
+    const [r] = loose(session(1).records)
+    r!["signerPublicKeyHex"] = null
+    expect(verdict([r], { trustedSignerPublicKeyHex: null })).toMatchObject({
+      valid: false, firstInvalidIndex: 0, reason: "untrusted-signer",
+    })
+  })
+
+  it("parity: verifyAuditChain gives the same verdict for a keyless record and no pin", () => {
+    const a = verdict(keyless(), undefined)
+    const b = auditVerdict(keyless(), undefined)
+    sameVerdict(a, b)
+    expect(a.reason).toBe("untrusted-signer")
+  })
+
+  it("CONTROL: a genuine record against its genuine pin still verifies", () => {
+    expect(verdict(session(1).records)).toMatchObject({ valid: true, reason: "ok" })
   })
 })
