@@ -32,8 +32,17 @@ export type Tier = (typeof TIERS)[number]
 
 const RANK: Record<Tier, number> = { untrusted: 0, asserted: 1, corroborated: 2, verified: 3 }
 
+/**
+ * Own-key membership in the lattice. `RANK[t]` alone is not a membership test:
+ * `RANK["bogus"]` is undefined and `RANK["constructor"]` is a function, and
+ * both compare as false against every number — which made minTier keep its
+ * "verified" seed for any string outside the lattice (the 2026-10-13 gate
+ * audit). Tier strings that arrive from JSON are exactly the ones that miss.
+ */
+const isTier = (t: unknown): t is Tier => typeof t === "string" && Object.hasOwn(RANK, t)
+
 export const meetsTier = (actual: Tier, required: Tier): boolean =>
-  RANK[actual] >= RANK[required]
+  isTier(actual) && isTier(required) && RANK[actual] >= RANK[required]
 
 /**
  * Rule 1 — taint is sticky: any combination takes the minimum tier.
@@ -44,9 +53,15 @@ export const meetsTier = (actual: Tier, required: Tier): boolean =>
  * where `inputs` is empty is the obvious way to write it, and it silently
  * minted Verified. Combining zero sources is the absence of evidence, so it
  * floors instead.
+ *
+ * FAIL-CLOSED ON AN UNKNOWN TIER (the 2026-10-13 gate audit). The same reduce
+ * returned the maximum for any string outside the lattice, because `RANK[t]`
+ * is then undefined (or, for `"constructor"`, a function) and never compares
+ * below the seed. A tier that is not one of TIERS is not a tier; any
+ * combination containing one is untrusted.
  */
 export const minTier = (...tiers: Tier[]): Tier =>
-  tiers.length === 0
+  tiers.length === 0 || !tiers.every(isTier)
     ? "untrusted"
     : tiers.reduce((lo, t) => (RANK[t] < RANK[lo] ? t : lo), "verified" as Tier)
 

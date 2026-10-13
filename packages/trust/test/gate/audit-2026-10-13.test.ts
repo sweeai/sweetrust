@@ -14,7 +14,7 @@
 // ============================================================================
 
 import { describe, expect, it } from "vitest"
-import { Sourced, corroborate, humanConfirm, makeSink, ReceiptLog } from "../../src/gate/trust.js"
+import { Sourced, corroborate, humanConfirm, makeSink, meetsTier, minTier, ReceiptLog } from "../../src/gate/trust.js"
 
 // ── #1 HIGH — sealAncestors' forEach leaked the raw Set ──────────────────────
 // ADVERTISED (sealAncestors): "Seal a Set so the mutators throw while reads
@@ -194,5 +194,40 @@ describe("#13 — describe() tolerates a non-number confidence", () => {
   it("humanConfirm returns a verdict for it", () => {
     expect(() => humanConfirm(nullConf(), () => false)).not.toThrow()
     expect(humanConfirm(nullConf(), () => false).ok).toBe(false)
+  })
+})
+
+// ── #10 LOW — minTier over a tier string outside the lattice returned the MAXIMUM
+// ADVERTISED (Rule 1): "any combination takes the minimum tier", and A2 made
+// the empty case floor. But `RANK["bogus"]` is undefined, `undefined < 3` is
+// false, and the reduce kept its "verified" seed: `minTier("bogus")` was
+// `verified`, and so was `minTier("bogus", "verified")`. Prototype-named
+// strings (`"constructor"`, `"__proto__"`) read a function or an object off
+// RANK's prototype and compared the same way. The deployment that hits this is
+// the one whose tier strings come from JSON.
+describe("#10 — any tier outside the lattice floors the combination to untrusted", () => {
+  it.each(["bogus", "", "VERIFIED", "Verified", "verified ", "constructor", "__proto__", "toString", "valueOf"])(
+    "minTier(%j) and every combination containing it is untrusted",
+    (bad) => {
+      expect(minTier(bad as never)).toBe("untrusted")
+      expect(minTier(bad as never, "verified")).toBe("untrusted")
+      expect(minTier("verified", bad as never)).toBe("untrusted")
+      expect(minTier("corroborated", bad as never, "verified")).toBe("untrusted")
+    },
+  )
+
+  it("meetsTier fails closed on an unknown tier on EITHER side", () => {
+    for (const bad of ["bogus", "constructor", "__proto__"]) {
+      expect(meetsTier(bad as never, "untrusted")).toBe(false)
+      expect(meetsTier("verified", bad as never)).toBe(false)
+    }
+  })
+
+  it("CONTROL: the lattice itself is unchanged", () => {
+    expect(minTier("verified", "corroborated")).toBe("corroborated")
+    expect(minTier("asserted", "verified", "corroborated")).toBe("asserted")
+    expect(minTier("verified")).toBe("verified")
+    expect(minTier()).toBe("untrusted")
+    expect(meetsTier("verified", "verified")).toBe(true)
   })
 })
