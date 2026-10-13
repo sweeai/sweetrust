@@ -14,7 +14,7 @@
 // ============================================================================
 
 import { describe, expect, it } from "vitest"
-import { Sourced, corroborate } from "../../src/gate/trust.js"
+import { Sourced, corroborate, humanConfirm } from "../../src/gate/trust.js"
 
 // ── #1 HIGH — sealAncestors' forEach leaked the raw Set ──────────────────────
 // ADVERTISED (sealAncestors): "Seal a Set so the mutators throw while reads
@@ -117,5 +117,40 @@ describe("#19 — the constructor is private at RUNTIME, not only in the types",
     const a = Sourced.fromAuthority("x", "reg")
     for (const v of [c, l, a]) expect(Sourced.is(v)).toBe(true)
     expect([c.tier, l.tier, a.tier]).toEqual(["untrusted", "untrusted", "verified"])
+  })
+})
+
+// ── #14 LOW — UpgradeEvent objects inside a frozen chain were mutable ────────
+// ADVERTISED: `provenance.chain` is "the audit surface: each tier ascent, in
+// order. Append-only." The ARRAY was frozen; the event objects in it were not,
+// so `chain[0].declassifier = "humanConfirm"` rewrote what describe() renders
+// onto every later receipt while `tier` stayed honest.
+describe("#14 — every UpgradeEvent on a chain is frozen", () => {
+  const corroborated = () => {
+    const c = corroborate(Sourced.fromChannel({ iban: "DE99" }, "email"), Sourced.fromChannel({ iban: "DE99" }, "webhook"))
+    if (!c.ok) throw new Error("fixture broke")
+    return c.value
+  }
+
+  it("the event cannot be rewritten into a different declassifier", () => {
+    const v = corroborated()
+    const ev = v.provenance.chain[0]!
+    expect(Object.isFrozen(ev)).toBe(true)
+    expect(() => {
+      ;(ev as { declassifier: string }).declassifier = "humanConfirm"
+    }).toThrow(TypeError)
+    expect(() => {
+      ;(ev as { to: string }).to = "verified"
+    }).toThrow(TypeError)
+    expect(v.describe()).toContain("corroborate→corroborated")
+    expect(v.describe()).not.toContain("humanConfirm")
+  })
+
+  it("a second ascent copies the chain without thawing the earlier event", () => {
+    const h = humanConfirm(corroborated(), () => true)
+    expect(h.ok).toBe(true)
+    if (!h.ok) return
+    expect(h.value.provenance.chain).toHaveLength(2)
+    for (const ev of h.value.provenance.chain) expect(Object.isFrozen(ev)).toBe(true)
   })
 })

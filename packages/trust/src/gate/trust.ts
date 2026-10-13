@@ -221,10 +221,15 @@ export class Sourced<T> {
     // Runtime immutability, not just compile-time `readonly` (Session-003 C6):
     // in strict mode, reassigning tier/provenance on a frozen instance throws.
     // `ancestors` is sealed rather than merely frozen — see sealAncestors.
+    // The chain array was frozen; the event OBJECTS in it were not, so
+    // `chain[0].declassifier = "humanConfirm"` rewrote what describe() renders
+    // onto every later receipt (the 2026-10-13 gate audit). Each event is
+    // copied and frozen here, which covers both birth and every ascent — a
+    // Sourced cannot exist without passing through this constructor.
     this.provenance = Object.freeze({
       ...provenance,
       ancestors: sealAncestors(provenance.ancestors),
-      chain: Object.freeze([...provenance.chain]),
+      chain: Object.freeze(provenance.chain.map((event) => Object.freeze({ ...event }))),
     })
     Object.freeze(this)
   }
