@@ -15,7 +15,7 @@
 
 import { createHash } from "node:crypto"
 import { describe, expect, it } from "vitest"
-import { Sourced, corroborate, humanConfirm, makeSink, meetsTier, minTier, ReceiptLog } from "../../src/gate/trust.js"
+import { Sourced, allowlisted, corroborate, humanConfirm, makeSink, meetsTier, minTier, ReceiptLog } from "../../src/gate/trust.js"
 
 // ── #1 HIGH — sealAncestors' forEach leaked the raw Set ──────────────────────
 // ADVERTISED (sealAncestors): "Seal a Set so the mutators throw while reads
@@ -458,5 +458,99 @@ describe("#16 — humanConfirm renders the provenance first and bounds the value
     expect(q).toContain('"ACME-8817"')
     expect(q).not.toContain("chars")
     expect(q).toContain("UNTRUSTED (origin: channel:email-inbound")
+  })
+})
+
+// ── #6 MEDIUM — the declassifiers threw on a BigInt; allowlisted blamed the wrong side
+// The sink learned to render a BigInt (DAN-1159 item 2); the declassifiers did
+// not. humanConfirm built its question with JSON.stringify and THREW on a
+// bigint candidate; corroborate's default equals threw, and so did the
+// "values disagree" reason even under a caller's own equals; allowlisted
+// refused with "the candidate could not be serialized" when the REGISTRY
+// RECORD was the bigint. A declassifier that throws has returned no verdict,
+// and every caller reads that as an outage rather than a refusal. Every Sui
+// amount in MIST is a bigint.
+describe("#6 — the declassifiers return a verdict for a BigInt and blame the right side", () => {
+  const mist = () => Sourced.fromChannel(1_000_000_000n, "webhook")
+
+  it("humanConfirm renders a bigint candidate into its question instead of throwing", () => {
+    let q = ""
+    const r = humanConfirm(mist(), (question) => {
+      q = question
+      return true
+    })
+    expect(r.ok).toBe(true)
+    expect(q).toContain('{"$bigint":"1000000000"}')
+  })
+
+  it("corroborate's default equals handles bigints, and distinguishes a bigint from its string", () => {
+    const r = corroborate(mist(), Sourced.fromChannel(1_000_000_000n, "email"))
+    expect(r.ok).toBe(true)
+    if (r.ok) expect(r.value.tier).toBe("corroborated")
+    // Cross-type pairs: `as unknown as Sourced<bigint>` because corroborate<T>
+    // types both sides alike; the RUNTIME value is the string / object.
+    expect(corroborate(mist(), Sourced.fromChannel("1000000000", "email") as unknown as Sourced<bigint>).ok).toBe(false)
+    expect(corroborate(mist(), Sourced.fromChannel({ $bigint: "1000000000" }, "email") as unknown as Sourced<bigint>).ok).toBe(false)
+  })
+
+  it("corroborate's 'values disagree' reason renders bigints under a caller's own equals", () => {
+    const r = corroborate(Sourced.fromChannel(1n, "a"), Sourced.fromChannel(2n, "b"), (x, y) => x === y)
+    expect(r.ok).toBe(false)
+    if (!r.ok) {
+      expect(r.reason).toContain("disagree")
+      expect(r.reason).toContain('{"$bigint":"1"}')
+      expect(r.reason).toContain('{"$bigint":"2"}')
+    }
+  })
+
+  it("a caller's equals that throws is a refusal, not an exception", () => {
+    const boom = () => {
+      throw new Error("comparator exploded")
+    }
+    expect(() => corroborate(Sourced.fromChannel(1, "a"), Sourced.fromChannel(1, "b"), boom)).not.toThrow()
+    const r = corroborate(Sourced.fromChannel(1, "a"), Sourced.fromChannel(1, "b"), boom)
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.reason).toContain("comparator exploded")
+  })
+
+  it("a circular value in the 'disagree' reason is named, not thrown on", () => {
+    const cyc: Record<string, unknown> = { iban: "DE99" }
+    cyc.self = cyc
+    const r = corroborate(Sourced.fromChannel(cyc, "a"), Sourced.fromChannel({ iban: "DE98" }, "b"), () => false)
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.reason).toContain("[unserializable")
+  })
+
+  it("allowlisted: a bigint candidate against a bigint record is a match, and the registry record is what comes back", () => {
+    const reg = new Map([["acme", Sourced.fromAuthority(1_000_000_000n, "payee-registry")]])
+    const r = allowlisted(mist(), reg, "acme", "payee-registry")
+    expect(r.ok).toBe(true)
+    if (r.ok) {
+      expect(r.value.value).toBe(1_000_000_000n)
+      expect(r.value.tier).toBe("verified")
+    }
+  })
+
+  it("allowlisted: a string candidate against a bigint record is a MISMATCH, not 'candidate could not be serialized'", () => {
+    const reg: ReadonlyMap<string, Sourced<unknown>> = new Map([["acme", Sourced.fromAuthority(1_000_000_000n, "payee-registry")]])
+    const r = allowlisted(Sourced.fromChannel("1000000000", "webhook") as Sourced<unknown>, reg, "acme", "payee-registry")
+    expect(r.ok).toBe(false)
+    if (!r.ok) {
+      expect(r.reason).toContain("does NOT match")
+      expect(r.reason).not.toContain("candidate could not be serialized")
+    }
+  })
+
+  it("allowlisted: when the REGISTRY RECORD is the unserializable one, the refusal says so", () => {
+    const cyc: Record<string, unknown> = { iban: "GOOD" }
+    cyc.self = cyc
+    const reg = new Map([["acme", Sourced.fromAuthority(cyc, "payee-registry")]])
+    const r = allowlisted(Sourced.fromChannel({ iban: "GOOD" }, "email"), reg, "acme", "payee-registry")
+    expect(r.ok).toBe(false)
+    if (!r.ok) {
+      expect(r.reason).toContain("record")
+      expect(r.reason).toContain("could not be serialized")
+      expect(r.reason).not.toContain("candidate could not be serialized")
+    }
   })
 })
