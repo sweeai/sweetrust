@@ -15,7 +15,7 @@
 
 import { createHash } from "node:crypto"
 import { describe, expect, it } from "vitest"
-import { Sourced, allowlisted, corroborate, humanConfirm, makeSink, meetsTier, minTier, ReceiptLog } from "../../src/gate/trust.js"
+import { Sourced, allowlisted, corroborate, humanConfirm, makeSink, meetsTier, minTier, ReceiptLog, type JudgmentProvider } from "../../src/gate/trust.js"
 
 // ── #1 HIGH — sealAncestors' forEach leaked the raw Set ──────────────────────
 // ADVERTISED (sealAncestors): "Seal a Set so the mutators throw while reads
@@ -814,5 +814,97 @@ describe("#4 — makeSink validates mode, log and requires at construction", () 
     const r = make()({ to: evil() })
     expect(r.ok).toBe(false)
     expect(ran()).toBe(0)
+  })
+})
+
+// ── #7 MEDIUM — the judgment wall's edges ───────────────────────────────────
+// Three holes in one wall. (a) A provider that THREW left no receipt: the
+// exception escaped between the tier wall and the receipt. (b) The block test
+// was `confidence >= floor`; a "mismatch" with NaN, undefined or a string
+// confidence compared false and EXECUTED (undefined then crashed `.toFixed`
+// after the fact). (c) `floor: undefined` made `>= floor` false forever, so a
+// mismatch at confidence 0.99 never blocked. A fallible wall must fail CLOSED
+// when it cannot score: a throwing or non-numeric verdict blocks in enforce
+// and flags in observe/warn, and the floor is validated at construction.
+describe("#7 — the judgment wall fails closed when it cannot score", () => {
+  const good = () => Sourced.fromAuthority("ACME-8817", "payee-registry")
+  const sink = (provider: JudgmentProvider, mode: "observe" | "warn" | "enforce" = "enforce", floor: unknown = 0.8) => {
+    const log = new ReceiptLog()
+    let ran = 0
+    const make = () =>
+      makeSink<{ to: Sourced<string> }, string>({
+        name: "pay",
+        requires: { to: "verified" },
+        mode,
+        log,
+        judgment: { provider, floor: floor as number },
+        execute: () => {
+          ran++
+          return "sent"
+        },
+      })
+    return { log, make, ran: () => ran }
+  }
+  const verdict = (v: unknown): JudgmentProvider => ({ name: "edge", assess: () => v as never })
+
+  it("(a) a throwing provider BLOCKS in enforce, with a receipt, and execute never runs", () => {
+    const { log, make, ran } = sink({ name: "boom", assess: () => { throw new Error("scorer down") } })
+    const r = make()({ to: good() })
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.refusal).toContain("scorer down")
+    expect(ran()).toBe(0)
+    expect(log.all().map((x) => x.decision)).toEqual(["judgment-blocked"])
+    expect(log.all()[0]!.reason).toContain("scorer down")
+    expect(log.verifyChain()).toBe(true)
+  })
+
+  it.each(["observe", "warn"] as const)("(a) a throwing provider FLAGS in %s — it executes, with the failure on the receipt", (mode) => {
+    const { log, make, ran } = sink({ name: "boom", assess: () => { throw new Error("scorer down") } }, mode)
+    const r = make()({ to: good() })
+    expect(r.ok).toBe(true)
+    expect(ran()).toBe(1)
+    expect(r.receipt.decision).toBe("judgment-flagged")
+    expect(r.receipt.reason).toContain("scorer down")
+    expect(log.verifyChain()).toBe(true)
+  })
+
+  it.each([NaN, undefined, null, "0.99", Infinity, -Infinity])(
+    "(b) a mismatch with confidence %j BLOCKS in enforce (non-finite confidence fails closed)",
+    (confidence) => {
+      const { log, make, ran } = sink(verdict({ assessment: "mismatch", confidence, rationale: "payee is NOT intended" }))
+      const r = make()({ to: good() })
+      expect(r.ok).toBe(false)
+      expect(ran()).toBe(0)
+      expect(log.all().map((x) => x.decision)).toEqual(["judgment-blocked"])
+    },
+  )
+
+  it("(b) a provider that returns no verdict object at all blocks in enforce, with a receipt", () => {
+    for (const v of [null, undefined, "match", 42]) {
+      const { log, make, ran } = sink(verdict(v))
+      expect(() => make()({ to: good() })).not.toThrow()
+      expect(ran()).toBe(0)
+      expect(log.all().map((x) => x.decision)).toEqual(["judgment-blocked"])
+    }
+  })
+
+  it.each([undefined, null, NaN, Infinity, 1.5, -0.1, "0.8"])("(c) floor %j is a TypeError at construction", (floor) => {
+    const { make } = sink(verdict({ assessment: "match", confidence: 1, rationale: "" }), "enforce", floor)
+    expect(make).toThrow(TypeError)
+    expect(make).toThrow(/floor/)
+  })
+
+  it("(c) a provider without an assess function is a TypeError at construction", () => {
+    const { make } = sink({ name: "no-assess" } as unknown as JudgmentProvider)
+    expect(make).toThrow(/assess/)
+  })
+
+  it("CONTROL: floor 0 and 1 construct; match executes; a mismatch below the floor and an unsure both flag", () => {
+    expect(sink(verdict({ assessment: "match", confidence: 1, rationale: "" }), "enforce", 0).make).not.toThrow()
+    expect(sink(verdict({ assessment: "match", confidence: 1, rationale: "" }), "enforce", 1).make).not.toThrow()
+    expect(sink(verdict({ assessment: "match", confidence: 0.9, rationale: "" })).make()({ to: good() }).receipt.decision).toBe("executed")
+    expect(sink(verdict({ assessment: "mismatch", confidence: 0.3, rationale: "" })).make()({ to: good() }).receipt.decision).toBe("judgment-flagged")
+    expect(sink(verdict({ assessment: "unsure", confidence: 0.99, rationale: "" })).make()({ to: good() }).receipt.decision).toBe("judgment-flagged")
+    expect(sink(verdict({ assessment: "mismatch", confidence: 0.95, rationale: "" })).make()({ to: good() }).receipt.decision).toBe("judgment-blocked")
   })
 })
