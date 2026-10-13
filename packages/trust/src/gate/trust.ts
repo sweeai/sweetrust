@@ -887,6 +887,34 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
    */
   readonly redact?: { readonly [K in keyof Args]?: "raw" | "hash" | "truncate" }
 }) {
+  // ── The spec is read ONCE, here, every field as an OWN key ───────────────
+  // ARCHITECTURE § 9 claims that nothing in the sink path reads a key off a
+  // prototype. The argument path honoured it; the spec path did not:
+  // `spec.redact` and `spec.judgment` were plain reads, so a polluted
+  // `Object.prototype.redact` hashed the receipts of a sink that declared no
+  // redaction, and a polluted `Object.prototype.judgment` judged a sink that
+  // declared no wall (the 2026-10-13 gate audit). Snapshotting also means a
+  // caller who keeps the spec object cannot change a running sink's mode or
+  // appetite from under it.
+  const own = <K extends keyof typeof spec>(k: K): (typeof spec)[K] | undefined =>
+    Object.hasOwn(spec, k) ? spec[k] : undefined
+  const copyOwn = <V>(source: object | undefined): Readonly<Record<string, V>> | undefined => {
+    if (source === undefined || source === null || typeof source !== "object") return undefined
+    const out: Record<string, V> = Object.create(null)
+    for (const k of Object.keys(source)) out[k] = (source as Record<string, V>)[k] as V
+    return Object.freeze(out)
+  }
+  const ownJudgment = own("judgment")
+  const cfg = Object.freeze({
+    name: own("name") as string,
+    requires: copyOwn<Tier>(own("requires")) ?? Object.freeze(Object.create(null) as Record<string, Tier>),
+    mode: own("mode") as EnforcementMode,
+    log: own("log") as ReceiptLog,
+    execute: own("execute") as (args: Args) => R,
+    judgment: ownJudgment === undefined ? undefined : Object.freeze({ provider: ownJudgment.provider, floor: ownJudgment.floor }),
+    redact: copyOwn<"raw" | "hash" | "truncate" | undefined>(own("redact")),
+  })
+
   return (args: Args): SinkResult<R> => {
     // `Object.create(null)` rather than `{}`: `rendered` is keyed by ATTACKER-
     // SUPPLIED argument names and then handed to the receipt. A plain object
@@ -896,15 +924,14 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
     const rendered: Receipt["args"] = Object.create(null)
     const violations: string[] = []
 
-    // Own-key redaction lookup. `spec.redact?.[key]` walks the prototype, so a
-    // key like `constructor` or `toString` returns an inherited FUNCTION where
-    // a `"raw" | "hash" | "truncate"` was expected, and that value decides what
-    // lands on a receipt that may be anchored on-chain and can never be
-    // amended. Anything not declared as an own key redacts as "raw".
+    // Own-key redaction lookup over the own-key snapshot. `spec.redact?.[key]`
+    // used to walk the prototype, so a key like `constructor` or `toString`
+    // returned an inherited FUNCTION where a `"raw" | "hash" | "truncate"` was
+    // expected, and that value decided what landed on a receipt that may be
+    // anchored on-chain and can never be amended. Anything not declared as an
+    // own key redacts as "raw".
     const redactFor = (k: string): "raw" | "hash" | "truncate" =>
-      spec.redact !== undefined && Object.hasOwn(spec.redact, k)
-        ? ((spec.redact as Record<string, "raw" | "hash" | "truncate" | undefined>)[k] ?? "raw")
-        : "raw"
+      cfg.redact !== undefined && Object.hasOwn(cfg.redact, k) ? (cfg.redact[k] ?? "raw") : "raw"
 
     // No action without its receipt (DAN-1159 item 2). Every argument is
     // rendered HERE, before any decision, so the receipt can always be
@@ -924,10 +951,10 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
         return `[unrecordable: ${why}]`
       }
     }
-    for (const key of Object.keys(spec.requires) as Array<keyof Args & string>) {
+    for (const key of Object.keys(cfg.requires) as Array<keyof Args & string>) {
       const arg = args[key]
       if (arg === undefined) {
-        violations.push(`${key} requires ${spec.requires[key]} but was not provided`)
+        violations.push(`${key} requires ${cfg.requires[key]} but was not provided`)
         continue
       }
       // ── Nominal brand check — the DECLARED path (DAN-904) ──────────────
@@ -948,7 +975,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
       // Fails closed the way the A3 undeclared-argument fix does, and for the
       // same reason: RECORD it (a silent unrecorded argument is the whole
       // guarantee leaking) but record it as `untrusted` with a provenance
-      // string WE authored, and raise a violation. `spec.mode` still governs
+      // string WE authored, and raise a violation. `cfg.mode` still governs
       // whether a violation refuses — the adoption ladder is unchanged.
       if (!Sourced.is(arg as unknown)) {
         rendered[key] = {
@@ -957,14 +984,14 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
           provenance: "FORGED — failed the Sourced brand check; not a value this rail issued",
         }
         violations.push(
-          `${key} requires ${spec.requires[key]} but is not a Sourced value — it carries the shape but not the brand, so its tier is a claim this rail never made`,
+          `${key} requires ${cfg.requires[key]} but is not a Sourced value — it carries the shape but not the brand, so its tier is a claim this rail never made`,
         )
         continue
       }
 
       rendered[key] = { value: record(key, arg.value), tier: arg.tier, provenance: arg.describe() }
-      if (!meetsTier(arg.tier, spec.requires[key])) {
-        violations.push(`${key} requires ${spec.requires[key]} but is ${arg.describe()}`)
+      if (!meetsTier(arg.tier, cfg.requires[key])) {
+        violations.push(`${key} requires ${cfg.requires[key]} but is ${arg.describe()}`)
       }
     }
 
@@ -981,13 +1008,13 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
     // mismatch, and fail-closed means refuse rather than guess an appetite.
     for (const key of Object.keys(args) as Array<keyof Args & string>) {
       // ── Own-key test, not `in` (2026-08-31) ─────────────────────────────
-      // This was `if (key in spec.requires) continue`. `in` walks the
-      // prototype chain, and `spec.requires` is a plain object literal, so
+      // This was `if (key in cfg.requires) continue`. `in` walks the
+      // prototype chain, and `cfg.requires` is a plain object literal, so
       // `"constructor" in { to: "verified" }` is TRUE. An argument named
       // `constructor`, `__proto__`, `toString`, `valueOf`, `hasOwnProperty`,
       // `isPrototypeOf` or `propertyIsEnumerable` was therefore treated as
       // DECLARED-AND-HANDLED by this loop, while the declared loop above —
-      // which iterates `Object.keys(spec.requires)` — never saw it either.
+      // which iterates `Object.keys(cfg.requires)` — never saw it either.
       // It fell through both: no tier check, no receipt entry, no violation,
       // in `enforce` mode. It reached `execute()` and left zero trace on a
       // chain that verifies clean.
@@ -995,7 +1022,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
       // This is directly reachable wherever sink arguments come from model
       // tool-calls, which is this package's stated target: the argument names
       // are chosen by whatever wrote the tool schema.
-      if (Object.hasOwn(spec.requires, key)) continue
+      if (Object.hasOwn(cfg.requires, key)) continue
       const arg = args[key]
       // Was `arg instanceof Sourced` until DAN-904. Same reasoning as the
       // declared path above: `instanceof` asserts "has our prototype", which is
@@ -1010,18 +1037,18 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
     }
 
     // Tier wall — hard structural gate (Rule 4).
-    if (violations.length > 0 && spec.mode === "enforce") {
-      const refusal = `⚠ ${spec.name} refused: ${violations.join(" · ")}`
-      const receipt = spec.log.append({ at: now(), sink: spec.name, decision: "refused", args: rendered, reason: refusal })
+    if (violations.length > 0 && cfg.mode === "enforce") {
+      const refusal = `⚠ ${cfg.name} refused: ${violations.join(" · ")}`
+      const receipt = cfg.log.append({ at: now(), sink: cfg.name, decision: "refused", args: rendered, reason: refusal })
       return { ok: false, refusal, receipt }
     }
 
     // Judgment wall — probabilistic, self-aware. Only runs once tiers are satisfied.
     // Judgment sees RAW values (redaction shapes the durable receipt, never the judge's view).
-    if (spec.judgment && violations.length === 0) {
+    if (cfg.judgment && violations.length === 0) {
       const tierArgs: Record<string, { value: unknown; tier: Tier }> = {}
       for (const k of Object.keys(rendered)) tierArgs[k] = { value: args[k]!.value, tier: args[k]!.tier }
-      const v = spec.judgment.provider.assess(spec.name, tierArgs)
+      const v = cfg.judgment.provider.assess(cfg.name, tierArgs)
 
       // Rationale is FREE TEXT from a provider that just saw the raw values
       // (adversarial pass A4, 2026-07-25). `redact` governed `args` and stopped
@@ -1030,40 +1057,40 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
       // receipt that gets signed and anchored and can never be redacted after
       // the fact. Structured fields (assessment, confidence, provider name) are
       // safe because the provider does not author them; the prose is not.
-      const anyRedacted = Object.values(spec.redact ?? {}).some((p) => p !== undefined && p !== "raw")
+      const anyRedacted = Object.values(cfg.redact ?? {}).some((p) => p !== undefined && p !== "raw")
       const rationale = anyRedacted
         ? `[rationale withheld — this sink redacts arguments; sha256:${createHash("sha256").update(v.rationale).digest("hex").slice(0, 16)}]`
         : v.rationale
 
-      const blocks = v.assessment === "mismatch" && v.confidence >= spec.judgment.floor
-      if (blocks && spec.mode === "enforce") {
-        const refusal = `⚖ ${spec.name} judgment-blocked (${spec.judgment.provider.name}, conf ${v.confidence.toFixed(2)}): ${rationale}`
-        const receipt = spec.log.append({ at: now(), sink: spec.name, decision: "judgment-blocked", args: rendered, reason: refusal })
+      const blocks = v.assessment === "mismatch" && v.confidence >= cfg.judgment.floor
+      if (blocks && cfg.mode === "enforce") {
+        const refusal = `⚖ ${cfg.name} judgment-blocked (${cfg.judgment.provider.name}, conf ${v.confidence.toFixed(2)}): ${rationale}`
+        const receipt = cfg.log.append({ at: now(), sink: cfg.name, decision: "judgment-blocked", args: rendered, reason: refusal })
         // The caller is in-process and already holds the raw values — it gets
         // the real rationale. Only the durable receipt is redacted.
-        return { ok: false, refusal: `⚖ ${spec.name} judgment-blocked (${spec.judgment.provider.name}, conf ${v.confidence.toFixed(2)}): ${v.rationale}`, receipt }
+        return { ok: false, refusal: `⚖ ${cfg.name} judgment-blocked (${cfg.judgment.provider.name}, conf ${v.confidence.toFixed(2)}): ${v.rationale}`, receipt }
       }
       if (v.assessment !== "match") {
         // Flagged, not blocked — the honest "unsure defers to human" band.
-        const note = `⚖ ${spec.name} judgment-flagged (${v.assessment}, conf ${v.confidence.toFixed(2)}): ${rationale}`
+        const note = `⚖ ${cfg.name} judgment-flagged (${v.assessment}, conf ${v.confidence.toFixed(2)}): ${rationale}`
         let result: R
         try {
-          result = spec.execute(args)
+          result = cfg.execute(args)
         } catch (err) {
           // Same hole as the main path (V5) — a flagged action that throws must
           // not vanish, and this one is MORE important: it was already doubtful.
-          spec.log.append({
-            at: now(), sink: spec.name, decision: "errored", args: rendered,
+          cfg.log.append({
+            at: now(), sink: cfg.name, decision: "errored", args: rendered,
             reason: `${note} — then threw; the action may or may not have taken effect: ${err instanceof Error ? err.message : String(err)}`,
           })
           throw err
         }
-        const receipt = spec.log.append({ at: now(), sink: spec.name, decision: "judgment-flagged", args: rendered, reason: note })
+        const receipt = cfg.log.append({ at: now(), sink: cfg.name, decision: "judgment-flagged", args: rendered, reason: note })
         return { ok: true, result, receipt }
       }
     }
 
-    const decision = violations.length > 0 ? "warned" : spec.mode === "observe" ? "observed" : "executed"
+    const decision = violations.length > 0 ? "warned" : cfg.mode === "observe" ? "observed" : "executed"
 
     // The operation runs before the receipt can describe its outcome, so a
     // throw used to leave NO record at all (adversarial pass V5, 2026-07-25):
@@ -1074,24 +1101,24 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
     // propagates; the caller still gets its exception.
     let result: R
     try {
-      result = spec.execute(args)
+      result = cfg.execute(args)
     } catch (err) {
-      spec.log.append({
+      cfg.log.append({
         at: now(),
-        sink: spec.name,
+        sink: cfg.name,
         decision: "errored",
         args: rendered,
-        reason: `${spec.name} passed the walls and then threw — the action may or may not have taken effect: ${err instanceof Error ? err.message : String(err)}`,
+        reason: `${cfg.name} passed the walls and then threw — the action may or may not have taken effect: ${err instanceof Error ? err.message : String(err)}`,
       })
       throw err
     }
 
-    const receipt = spec.log.append({
+    const receipt = cfg.log.append({
       at: now(),
-      sink: spec.name,
+      sink: cfg.name,
       decision,
       args: rendered,
-      ...(violations.length > 0 ? { reason: `mode=${spec.mode}, violations: ${violations.join(" · ")}` } : {}),
+      ...(violations.length > 0 ? { reason: `mode=${cfg.mode}, violations: ${violations.join(" · ")}` } : {}),
     })
     return { ok: true, result, receipt }
   }

@@ -669,3 +669,73 @@ describe("#9 — fromAuthority freezes an object value, so an allowlisted hand-o
     expect(Object.isFrozen(o)).toBe(false)
   })
 })
+
+// ── #15 LOW — optional spec fields were read through the prototype chain ─────
+// ARCHITECTURE § 9 claims an ABSENCE: "nothing in the sink path reads a key
+// off a prototype." The ARGUMENT path honoured it; the SPEC path did not.
+// `spec.redact` and `spec.judgment` were plain property reads, so with
+// `Object.prototype.redact` polluted a sink that declared NO redaction hashed
+// its receipt, and with `Object.prototype.judgment` polluted a sink with NO
+// judgment wall was judged by a stranger's provider. makeSink now snapshots its
+// spec once, at construction, reading every field as an OWN key.
+describe("#15 — makeSink reads its spec by own key, once, at construction", () => {
+  const good = () => Sourced.fromAuthority("ACME-8817", "payee-registry")
+  const withPolluted = <T,>(key: string, value: unknown, body: () => T): T => {
+    ;(Object.prototype as Record<string, unknown>)[key] = value
+    try {
+      return body()
+    } finally {
+      delete (Object.prototype as Record<string, unknown>)[key]
+    }
+  }
+
+  it("a polluted Object.prototype.redact does not redact a sink that declared none", () => {
+    const value = withPolluted("redact", { to: "hash" }, () => {
+      const log = new ReceiptLog()
+      const pay = makeSink<{ to: Sourced<string> }, string>({ name: "pay", requires: { to: "verified" }, mode: "enforce", log, execute: () => "sent" })
+      return pay({ to: good() }).receipt.args.to!.value
+    })
+    expect(value).toBe("ACME-8817")
+  })
+
+  it("a polluted Object.prototype.judgment does not install a judgment wall on a sink that declared none", () => {
+    const out = withPolluted(
+      "judgment",
+      { provider: { name: "polluted", assess: () => ({ assessment: "mismatch", confidence: 1, rationale: "polluted" }) }, floor: 0 },
+      () => {
+        const log = new ReceiptLog()
+        let ran = 0
+        const pay = makeSink<{ to: Sourced<string> }, string>({
+          name: "pay",
+          requires: { to: "verified" },
+          mode: "enforce",
+          log,
+          execute: () => {
+            ran++
+            return "sent"
+          },
+        })
+        const r = pay({ to: good() })
+        return { ok: r.ok, decision: r.receipt.decision, ran }
+      },
+    )
+    expect(out).toEqual({ ok: true, decision: "executed", ran: 1 })
+  })
+
+  it("the spec is snapshotted: swapping fields on the spec object after construction changes nothing", () => {
+    const log = new ReceiptLog()
+    const spec = {
+      name: "pay",
+      requires: { to: "verified" as const },
+      mode: "enforce" as const,
+      log,
+      execute: () => "sent",
+    }
+    const pay = makeSink<{ to: Sourced<string> }, string>(spec)
+    ;(spec as { mode: string }).mode = "observe"
+    ;(spec as { requires: Record<string, string> }).requires = { to: "untrusted" }
+    const r = pay({ to: Sourced.fromChannel("evil", "email") })
+    expect(r.ok).toBe(false)
+    expect(r.receipt.decision).toBe("refused")
+  })
+})
