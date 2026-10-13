@@ -58,15 +58,33 @@ export const capabilityKey = (cap: Capability): string => {
 /**
  * Generate a sortable identifier with crypto-strong randomness.
  *
- * Format: MAN_<base36-ms-timestamp>_<10-hex-chars-from-crypto.randomBytes>.
+ * Format: MAN_<base36-ms-timestamp>_<16-hex-chars-from-crypto.randomBytes>.
  * The timestamp prefix preserves ULID-like ordering for forensic readability;
- * the randomness suffix uses node:crypto so an attacker cannot predict the
- * next mandate ID and pre-compute hash-chain or audit-log forgeries.
+ * the 64-bit suffix uses node:crypto so an attacker cannot predict the next
+ * mandate ID and pre-compute hash-chain or audit-log forgeries. Until the
+ * 2026-10-13 mandate audit it kept 10 of the 16 hex characters, 40 bits, and
+ * nothing consulted the log at issue time; `freshMandateId` does now.
  */
 const generateMandateId = (): MandateId => {
   const ts = Date.now().toString(36).padStart(10, "0")
-  const rand = randomBytes(8).toString("hex").slice(0, 10)
+  const rand = randomBytes(8).toString("hex")
   return (`MAN_${ts}_${rand}`.toUpperCase()) as MandateId
+}
+
+/**
+ * An id this log has never seen (the 2026-10-13 mandate audit). The random
+ * suffix makes a collision unlikely; this makes reuse impossible within one
+ * log. An issuer never records a second grant under an id the log already
+ * knows, which would let `useCapability`'s `find(grant)` resolve the new scope
+ * against the OLD mandate's capabilities. ANY event counts, not only a grant:
+ * adopting an id that already carries a revoke would mint a mandate born
+ * revoked. One `query` per issue; the loop runs again only on a hit.
+ */
+const freshMandateId = (audit: MandateAuditService): MandateId => {
+  for (;;) {
+    const id = generateMandateId()
+    if (audit.query(id).length === 0) return id
+  }
 }
 
 const nowISO = (): ISO8601 => new Date().toISOString() as ISO8601
@@ -347,7 +365,7 @@ export const issueMandate = <
   assertIssued(grantorScope, grantorScope.id, capabilityIds[0] ?? "")
   assertGrantorTier(grantorScope, "organization", "organization")
 
-  const newId = generateMandateId()
+  const newId = freshMandateId(audit)
   const grantTimestamp = nowISO()
 
   const newScope = mint<MandateScope<RequestedCaps>>({
@@ -411,7 +429,7 @@ export const issueRootMandate = <Caps extends ReadonlyArray<Capability>>(args: {
     })
   }
 
-  const newId = generateMandateId()
+  const newId = freshMandateId(audit)
   const grantTimestamp = nowISO()
 
   const scope = mint<MandateScope<Caps>>({
@@ -516,7 +534,7 @@ export const useCapability = <
       }
       failMandate({
         _tag: "AncestorMandateRevoked",
-        mandateId: mandateId,
+        mandateId,
         revokedAncestorId: cursorId,
         revokedAt: revokeEvent?.timestamp ?? nowISO(),
       })
@@ -570,7 +588,7 @@ export const useCapability = <
     if (!grantedCapIds.has(claimed)) {
       failMandate({
         _tag: "MandateScopeForged",
-        mandateId: mandateId,
+        mandateId,
         capability: claimed,
       })
     }
@@ -749,7 +767,7 @@ export const issueOrgMandate = <Caps extends ReadonlyArray<Capability>>(args: {
     })
   }
 
-  const newId = generateMandateId()
+  const newId = freshMandateId(audit)
   const grantTimestamp = nowISO()
 
   const scope = mint<MandateScope<Caps, "organization", null>>({
@@ -842,7 +860,7 @@ export const issueProjectMandate = <
   assertIssued(grantorScope, grantorScope.id, capabilityIds[0] ?? "")
   assertGrantorTier(grantorScope, "organization", "project")
 
-  const newId = generateMandateId()
+  const newId = freshMandateId(audit)
   const grantTimestamp = nowISO()
 
   const scope = mint<MandateScope<
@@ -945,7 +963,7 @@ export const issueAgentMandate = <
   assertIssued(grantorScope, grantorScope.id, capabilityIds[0] ?? "")
   assertGrantorTier(grantorScope, "project", "agent")
 
-  const newId = generateMandateId()
+  const newId = freshMandateId(audit)
   const grantTimestamp = nowISO()
 
   const scope = mint<MandateScope<

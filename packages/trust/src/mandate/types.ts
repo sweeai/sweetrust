@@ -36,8 +36,13 @@ export interface Capability<Id extends string = string> {
 }
 
 /**
- * Branded ID types for the mandate flow. ULIDs are sortable + collision-free
- * + don't leak timing information beyond ms-precision.
+ * Branded ID types for the mandate flow. A `MandateId` is sortable (a base36
+ * millisecond prefix), carries 64 bits of `node:crypto` randomness, and is
+ * never minted twice into the same log: an issuer refuses an id the log already
+ * has an event for (the 2026-10-13 mandate audit). It leaks no timing
+ * information beyond ms-precision. It is not globally "collision-free", which
+ * is what this comment said while the suffix was 40 bits and unchecked: two
+ * independent logs can, in principle, mint the same id.
  */
 export type MandateId = string & { readonly __brand: "MandateId" }
 export type GrantorId = string & { readonly __brand: "GrantorId" }
