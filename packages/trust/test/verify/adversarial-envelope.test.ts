@@ -305,3 +305,30 @@ describe("finding 3 — the signature is decoded leniently, so byte-different si
     sameVerdict(verdict(r), auditVerdict(r))
   })
 })
+
+describe("finding 9 — an unknown opts key is ignored, so the retired anchor option verifies a truncated chain", () => {
+  // `anchoredHead` was the anchor option before the kind-carrying `anchor`
+  // object. A JS caller still passing it got no anchor check and no signal:
+  // a truncated chain came back valid. The options bag is {trustedSignerPublicKeyHex,
+  // anchor}; anything else is a caller error and the verdict says so.
+  it("ATTACK: {anchoredHead} on a truncated chain is malformed-record naming the key, not a silent pass", () => {
+    const { log, records } = session()
+    const truncated = records.slice(0, 2)
+    const report = verdict(truncated, { trustedSignerPublicKeyHex: trusted, anchoredHead: log.head() })
+    expect(report).toMatchObject({ valid: false, firstInvalidIndex: null, reason: "malformed-record", anchoredThrough: null })
+    expect(report.detail).toContain("anchoredHead")
+  })
+
+  it("any other unknown key is refused the same way, even beside a correct anchor", () => {
+    const { log, records } = session()
+    const report = verdict(records, { trustedSignerPublicKeyHex: trusted, anchor: { kind: "anchor", head: log.head() }, extra: 1 })
+    expect(report).toMatchObject({ valid: false, firstInvalidIndex: null, reason: "malformed-record" })
+    expect(report.detail).toContain("extra")
+  })
+
+  it("CONTROL: the two known keys, with anchor present or explicitly undefined, still verify", () => {
+    const { log, records } = session()
+    expect(verdict(records, { trustedSignerPublicKeyHex: trusted, anchor: { kind: "anchor", head: log.head() } })).toMatchObject({ valid: true, anchoredThrough: 2 })
+    expect(verdict(records, { trustedSignerPublicKeyHex: trusted, anchor: undefined })).toMatchObject({ valid: true, anchoredThrough: null })
+  })
+})

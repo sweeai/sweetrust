@@ -224,6 +224,8 @@ const ENVELOPE_KEYS: ReadonlyArray<string> = ["payload", "signature", "signerPub
 // Ed25519 factories in mandate/signer.ts hold the same literal; it is a fact
 // about the algorithm (64 bytes), not a convention that can drift.
 const ED25519_SIGNATURE_HEX = /^[0-9a-f]{128}$/
+// The whole of verifySignedChain's options bag. Grows only with the signature.
+const VERIFY_OPTS_KEYS: ReadonlyArray<string> = ["trustedSignerPublicKeyHex", "anchor"]
 const envelopeKeyProblem = (keys: ReadonlyArray<string>): string | null => {
   const stray = keys.filter((k) => !ENVELOPE_KEYS.includes(k))
   if (stray.length > 0) return `carries a key outside the signed envelope: ${stray.map((k) => JSON.stringify(k)).join(", ")}`
@@ -271,6 +273,22 @@ export function verifySignedChain(
     anchor?: { kind: "anchor" | "receipt"; head: string }
   },
 ): VerifyReport {
+  // The options bag is exactly {trustedSignerPublicKeyHex, anchor?}. An
+  // unknown key used to be ignored: a JS caller still passing the retired
+  // `anchoredHead` got no anchor check and no signal, so a truncated chain
+  // verified (the 2026-10-13 verify audit). A caller error is a verdict that
+  // names the key, before the chain is read at all.
+  const bag: unknown = opts
+  if (typeof bag === "object" && bag !== null) {
+    const unknownKeys = Object.keys(bag).filter((k) => !VERIFY_OPTS_KEYS.includes(k))
+    if (unknownKeys.length > 0) {
+      return {
+        valid: false, firstInvalidIndex: null, reason: "malformed-record", anchoredThrough: null,
+        detail: `unknown option ${unknownKeys.map((k) => JSON.stringify(k)).join(", ")}: verifySignedChain takes trustedSignerPublicKeyHex and anchor`,
+      }
+    }
+  }
+
   // The container is checked before anything is read from it. A plain object
   // used to VERIFY: `{}.length` is undefined, so `=== 0` missed the empty-chain
   // guard below, `i < undefined` never entered the loop, and control fell
