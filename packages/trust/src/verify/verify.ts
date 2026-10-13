@@ -212,6 +212,22 @@ export interface VerifyReport {
 const typeName = (v: unknown): string => (v === null ? "null" : typeof v)
 const preview = (v: unknown): string => (typeof v === "string" ? `${v.slice(0, 16)}…` : `<${typeName(v)}>`)
 
+// A signed record is EXACTLY these six own keys. The signature covers four of
+// them and the next record's link hash covers all six, so a seventh key sits
+// under neither: on the last record nothing ever read it, and a store that
+// re-verifies on read then signed the next link over it, making the injected
+// text permanent (the 2026-10-13 verify audit). verifyAuditChain keeps the same
+// list; the parity test in test/verify/adversarial-envelope.test.ts holds the
+// two verdicts together.
+const ENVELOPE_KEYS: ReadonlyArray<string> = ["payload", "signature", "signerPublicKeyHex", "signedAt", "previousHash", "domain"]
+const envelopeKeyProblem = (keys: ReadonlyArray<string>): string | null => {
+  const stray = keys.filter((k) => !ENVELOPE_KEYS.includes(k))
+  if (stray.length > 0) return `carries a key outside the signed envelope: ${stray.map((k) => JSON.stringify(k)).join(", ")}`
+  const missing = ENVELOPE_KEYS.filter((k) => !keys.includes(k))
+  if (missing.length > 0) return `is missing envelope key ${missing.map((k) => JSON.stringify(k)).join(", ")}`
+  return null
+}
+
 /**
  * Re-verify an exported chain holding ONLY public material.
  *
@@ -302,6 +318,15 @@ export function verifySignedChain(
         detail: `record ${i} signed by ${preview(r.signerPublicKeyHex)}, expected ${preview(pin)}`,
       }
     }
+    // Envelope shape, before any byte of it is trusted. Object.keys itself can
+    // throw (a Proxy with a hostile ownKeys trap), and that too is a verdict.
+    let shape: string | null
+    try {
+      shape = envelopeKeyProblem(Object.keys(r))
+    } catch (err) {
+      return malformed(i, `record ${i} could not be read`, err)
+    }
+    if (shape !== null) return malformed(i, `record ${i} ${shape}`)
     // This function is what an auditor points at a file from an UNTRUSTED
     // party, so every malformed input has to come back as a verdict. It used to
     // throw: `createPublicKey` on a hex string that is not an SPKI key raises

@@ -443,6 +443,22 @@ export const verifyAuditChain = (
     detail: err === undefined ? what : `${what}: ${err instanceof Error ? err.message : String(err)}`,
   })
 
+  // A signed record is EXACTLY these six own keys. The signature covers four
+  // of them and the next record's link hash covers all six, so a seventh key
+  // sits under neither: on the last record nothing ever read it, and
+  // makeJsonlSignedAuditLive, which re-verifies on every read, then signed the
+  // next link over it and made the injected text permanent (the 2026-10-13
+  // verify audit). verifySignedChain keeps the same list; a parity test holds
+  // the two verdicts together.
+  const ENVELOPE_KEYS: ReadonlyArray<string> = ["payload", "signature", "signerPublicKeyHex", "signedAt", "previousHash", "domain"]
+  const envelopeKeyProblem = (keys: ReadonlyArray<string>): string | null => {
+    const stray = keys.filter((k) => !ENVELOPE_KEYS.includes(k))
+    if (stray.length > 0) return `carries a key outside the signed envelope: ${stray.map((k) => JSON.stringify(k)).join(", ")}`
+    const missing = ENVELOPE_KEYS.filter((k) => !keys.includes(k))
+    if (missing.length > 0) return `is missing envelope key ${missing.map((k) => JSON.stringify(k)).join(", ")}`
+    return null
+  }
+
   // The link each record must carry: null for the first, then the hash of the
   // whole previous SIGNED record.
   let expectedPreviousHash: string | null = null
@@ -473,6 +489,16 @@ export const verifyAuditChain = (
         reason: "untrusted-signer" as const,
       }
     }
+
+    // Envelope shape, before any byte of it is trusted. Object.keys itself can
+    // throw (a Proxy with a hostile ownKeys trap), and that too is a verdict.
+    let shape: string | null
+    try {
+      shape = envelopeKeyProblem(Object.keys(record))
+    } catch (err) {
+      return malformed(i, `record ${i} could not be read`, err)
+    }
+    if (shape !== null) return malformed(i, `record ${i} ${shape}`)
 
     // Signature verification (covers domain + payload + previousHash +
     // signedAt via signedPreimage — DAN-641).

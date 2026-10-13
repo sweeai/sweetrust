@@ -52,7 +52,8 @@ const auditChain = (): SignedMandateAuditEvent[] => {
   return [r0, r1] as unknown as SignedMandateAuditEvent[]
 }
 
-const clone = <T,>(x: T): T => JSON.parse(JSON.stringify(x))
+/** A JSON round-trip, typed loosely so a test can add or delete keys on it. */
+const loose = (x: unknown): Array<Record<string, unknown>> => JSON.parse(JSON.stringify(x))
 
 /** Run verifySignedChain and fail the test with the thrown message instead of crashing it. */
 const verdict = (records: unknown, opts: unknown = { trustedSignerPublicKeyHex: trusted }): VerifyReport => {
@@ -84,7 +85,7 @@ describe("finding 1 — the head record is not byte-pinned: keys outside the env
   // next record's link OVER the injected text, making it permanent.
 
   it("ATTACK: an extra key on the LAST receipt record is malformed, and the detail names it", () => {
-    const t = clone(session().records) as Array<Record<string, unknown>>
+    const t = loose(session().records)
     t[2]!["auditor_note"] = "reviewed and approved 2026-10-13"
     const report = verdict(t)
     expect(report).toMatchObject({ valid: false, firstInvalidIndex: 2, reason: "malformed-record" })
@@ -95,7 +96,7 @@ describe("finding 1 — the head record is not byte-pinned: keys outside the env
     // Before the fix this surfaced one record late and under the wrong reason:
     // the stray key changed record 1's link hash, so record 2 reported
     // hash-chain-broken, and an operator went looking for a splice.
-    const t = clone(session().records) as Array<Record<string, unknown>>
+    const t = loose(session().records)
     t[1]!["auditor_note"] = "x"
     const report = verdict(t)
     expect(report).toMatchObject({ valid: false, firstInvalidIndex: 1, reason: "malformed-record" })
@@ -103,7 +104,7 @@ describe("finding 1 — the head record is not byte-pinned: keys outside the env
   })
 
   it("ATTACK: a record MISSING an envelope key is malformed, and the detail names the missing key", () => {
-    const t = clone(session(1).records) as Array<Record<string, unknown>>
+    const t = loose(session(1).records)
     delete t[0]!["domain"]
     const report = verdict(t)
     expect(report).toMatchObject({ valid: false, firstInvalidIndex: 0, reason: "malformed-record" })
@@ -115,7 +116,7 @@ describe("finding 1 — the head record is not byte-pinned: keys outside the env
   })
 
   it("ATTACK (mandate side): an extra key on the LAST audit record → malformed-record naming it", () => {
-    const t = clone(auditChain()) as Array<Record<string, unknown>>
+    const t = loose(auditChain())
     t[1]!["operator_comment"] = "revocation was a mistake, ignore"
     const report = auditVerdict(t)
     expect(report).toMatchObject({ valid: false, firstInvalidIndex: 1, reason: "malformed-record" })
@@ -123,13 +124,13 @@ describe("finding 1 — the head record is not byte-pinned: keys outside the env
   })
 
   it("ATTACK (mandate side): an extra key on the FIRST of two → malformed-record at 0, not hash-chain-broken at 1", () => {
-    const t = clone(auditChain()) as Array<Record<string, unknown>>
+    const t = loose(auditChain())
     t[0]!["operator_comment"] = "x"
     expect(auditVerdict(t)).toMatchObject({ valid: false, firstInvalidIndex: 0, reason: "malformed-record" })
   })
 
   it("parity: both verifiers give the same verdict for a record with a stray key", () => {
-    const t = clone(session(1).records) as Array<Record<string, unknown>>
+    const t = loose(session(1).records)
     t[0]!["extra"] = 1
     const a = verdict(t)
     sameVerdict(a, auditVerdict(t))
