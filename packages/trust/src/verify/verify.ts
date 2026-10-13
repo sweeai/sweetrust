@@ -147,33 +147,57 @@ export class SignedReceiptLog extends ReceiptLog {
 
   /** The auditor artifact: one signed receipt per line. */
   exportJSONL(): string {
-    return this.signedEvents.map((r) => JSON.stringify(r)).join("\n") + (this.signedEvents.length ? "\n" : "")
+    return this.signedEvents.map((r) => jsonLine(r)).join("\n") + (this.signedEvents.length ? "\n" : "")
   }
 }
 
+// JSON.stringify leaves U+2028, U+2029 and U+0085 raw, and they are legal
+// inside a JSON string. They are also line terminators to Python's
+// splitlines() and to some editors, which then split one record into two
+// lines. Escaped as \uXXXX they parse back to the identical string, so the
+// parsed values and both hashes are unchanged; only the text differs (the
+// 2026-10-13 verify audit). JSON.stringify already escapes every terminator
+// below U+0020, so these three are the whole set.
+const JSONL_LINE_TERMINATORS = /[\u2028\u2029\u0085]/g
+const jsonLine = (record: unknown): string =>
+  JSON.stringify(record).replace(JSONL_LINE_TERMINATORS, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`)
+
+/**
+ * The sanctioned reader for an exported artifact. It must be fed the file's
+ * bytes as written: the interior receipt hash is over the record's own JSON
+ * text, so a re-serialized file (sorted keys, pretty-printed) reports
+ * `hash-mismatch` even when every value is honest. SECURITY.md § Honest limits.
+ */
 export function parseJSONL(text: string): SignedReceipt[] {
-  return text
-    .split("\n")
-    .filter((line) => line.trim().length > 0)
-    .map((line, i) => {
-      // Say WHICH line. A bare SyntaxError from JSON.parse tells an auditor
-      // holding a 40,000-line artifact nothing they can act on.
-      let parsed: unknown
-      try {
-        parsed = JSON.parse(line)
-      } catch (err) {
-        throw new Error(`line ${i + 1}: not valid JSON — ${err instanceof Error ? err.message : String(err)}`)
-      }
-      const r = parsed as SignedReceipt
-      if (
-        typeof r !== "object" || r === null ||
-        typeof r.signature !== "string" || typeof r.signerPublicKeyHex !== "string" ||
-        typeof r.payload !== "object" || r.payload === null || typeof r.payload.hash !== "string"
-      ) {
-        throw new Error(`line ${i + 1}: not a SignedReceipt`)
-      }
-      return r
-    })
+  // One leading byte-order mark is tolerated: editors and some HTTP stacks
+  // add it, and JSON.parse rejects it (the 2026-10-13 verify audit).
+  const lines = (text.charCodeAt(0) === 0xfeff ? text.slice(1) : text).split("\n")
+  const out: SignedReceipt[] = []
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!
+    if (line.trim().length === 0) continue
+    // Say WHICH line, numbered as the FILE numbers it, blank lines included. A
+    // bare SyntaxError from JSON.parse tells an auditor holding a 40,000-line
+    // artifact nothing they can act on, and a number counted after the blank
+    // lines were dropped sent them to the wrong place (the 2026-10-13 verify
+    // audit).
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(line)
+    } catch (err) {
+      throw new Error(`line ${i + 1}: not valid JSON — ${err instanceof Error ? err.message : String(err)}`)
+    }
+    const r = parsed as SignedReceipt
+    if (
+      typeof r !== "object" || r === null ||
+      typeof r.signature !== "string" || typeof r.signerPublicKeyHex !== "string" ||
+      typeof r.payload !== "object" || r.payload === null || typeof r.payload.hash !== "string"
+    ) {
+      throw new Error(`line ${i + 1}: not a SignedReceipt`)
+    }
+    out.push(r)
+  }
+  return out
 }
 
 // ── Third-party verification ─────────────────────────────────────────────────

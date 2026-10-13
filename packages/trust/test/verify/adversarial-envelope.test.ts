@@ -332,3 +332,45 @@ describe("finding 9 — an unknown opts key is ignored, so the retired anchor op
     expect(verdict(records, { trustedSignerPublicKeyHex: trusted, anchor: undefined })).toMatchObject({ valid: true, anchoredThrough: null })
   })
 })
+
+describe("finding 7 — the JSONL reader and writer against real artifact handling", () => {
+  it("parseJSONL numbers lines as they are in the FILE, blank lines included", () => {
+    // The bad line is file line 8 (3 records, 4 blank lines, then it). It used
+    // to be reported as line 4 because blank lines were filtered first, so an
+    // auditor's editor went to the wrong place.
+    const text = session().log.exportJSONL() + "\n\n\n\n{bad json\n"
+    const fileLine = text.split("\n").findIndex((l) => l.startsWith("{bad")) + 1
+    expect(fileLine).toBe(8)
+    expect(() => parseJSONL(text)).toThrow(/line 8:/)
+  })
+
+  it("parseJSONL accepts one leading byte-order mark", () => {
+    const { log, records } = session()
+    const parsed = parseJSONL("﻿" + log.exportJSONL())
+    expect(parsed).toEqual(records)
+    expect(verdict(parsed)).toMatchObject({ valid: true })
+  })
+
+  it("exportJSONL escapes U+2028, U+2029 and U+0085, so a line-splitting reader cannot split a record; values and both hashes are unchanged", () => {
+    const hostile = "line1\u2028line2\u2029line3\u0085line4"
+    const log = new SignedReceiptLog(makeEd25519ReceiptSigner(keys))
+    const pay = makeSink<{ to: Sourced<string> }, string>({
+      name: "pay", requires: { to: "verified" }, mode: "enforce", log, execute: () => "paid",
+    })
+    pay({ to: Sourced.fromAuthority(hostile, "registry") })
+    const text = log.exportJSONL()
+    // Text level: none of the three code points appears raw.
+    expect(new RegExp("[\\u2028\\u2029\\u0085]").test(text)).toBe(false)
+    expect(text).toContain("\\u2028")
+    expect(text).toContain("\\u2029")
+    expect(text).toContain("\\u0085")
+    // One record per physical line, under a splitter that honours those code points.
+    expect(text.split(new RegExp("\\r\\n|\\r|\\n|\\u0085|\\u2028|\\u2029")).filter((l) => l.length > 0)).toHaveLength(1)
+    // Value level: the round trip is exact, and both hashes still stand.
+    const parsed = parseJSONL(text)
+    expect(parsed).toEqual([...log.signed()])
+    expect((parsed[0]!.payload.args as Record<string, { value: unknown }>)["to"]!.value).toBe(hostile)
+    expect(sha256Hex(receiptBody(parsed[0]!.payload))).toBe(parsed[0]!.payload.hash)
+    expect(verdict(parsed, { trustedSignerPublicKeyHex: trusted, anchor: { kind: "anchor", head: log.head() } })).toMatchObject({ valid: true, anchoredThrough: 0 })
+  })
+})
