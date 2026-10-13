@@ -78,8 +78,8 @@ export type MandateTier = "organization" | "project" | "agent"
  *     gets `MandateScope<readonly [CapA], "organization", null>`
  *     structurally.
  *   - ParentScope: the parent-tier scope this scope was derived from, or
- *     null for organization-tier (root) scopes. v0.0 issueRootMandate
- *     preserves null parentScope for backward compatibility.
+ *     null for organization-tier (root) scopes, which `issueOrgMandate`
+ *     mints with `parentScope: null`.
  *
  * The scope is IMMUTABLE post-construction (per v0.0 I2). To "add" a
  * capability, issue a new MandateScope via re-grant (per v0.0 I7).
@@ -162,10 +162,12 @@ export type MandateError =
     }
   | {
       // Raised at issue time when the grantor's tier cannot delegate the
-      // requested tier: agent → anything, org → agent (skipping project), or a
-      // non-org grantor through the legacy issueMandate, which stamps
-      // "organization" on what it mints. The compiler refuses these for typed
-      // callers; this is the runtime half for `as any` and JavaScript callers.
+      // requested tier: agent → anything, org → agent (skipping project), or
+      // a non-org grantor through `issueProjectMandate`. The compiler refuses
+      // these for typed callers; this is the runtime half for `as any` and
+      // JavaScript callers. (A `requestedTier` of "organization" was reachable
+      // only through the v0.0 `issueMandate`, removed 2026-10-13; nothing
+      // raises it now.)
       // `grantorTier` is read from an issued, frozen scope, so it is fact.
       // (DAN-1157, F3.)
       readonly _tag: "TierLadderViolation"
@@ -201,9 +203,9 @@ export type MandateError =
  * path do this directly?" must be answerable instantly. Both are legitimate;
  * both must be auditable; the distinction matters for trust analysis.
  *
- * Default for all v0.0 entry points (issueMandate, issueRootMandate,
- * useCapability, revokeMandate) is `"code"`. Linear-triggered flows in
- * linear.ts pass `"linear"` explicitly when calling the v0.0 entry points.
+ * Default for every entry point (the three issuers, useCapability,
+ * revokeMandate) is `"code"`. A Linear-triggered flow passes `"linear"`
+ * explicitly.
  */
 export type TriggerSource = "linear" | "code"
 

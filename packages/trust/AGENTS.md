@@ -37,6 +37,7 @@ The lesson worth keeping: **all five of these were true when written.** An `AGEN
 ```
 src/
   index.ts        the whole-rail barrel (curated — see below)
+  canon.ts        the one canonicalization (canonicalJSON, sha256Hex) — a leaf, node:crypto only
   mandate/        authority   → subpath "sweetrust/mandate"
   gate/           enforcement → subpath "sweetrust/gate"
   verify/         evidence    → subpath "sweetrust/verify"
@@ -47,10 +48,11 @@ test/
 
 | File | Role |
 |---|---|
+| `src/canon.ts` | `canonicalJSON` + `sha256Hex`, the bytes every signature and hash in the rail is computed over. Imports only `node:crypto`, so gate, mandate and verify can all import it without importing each other. `signer.ts` re-exports both names |
 | `src/mandate/types.ts` | exported types: `MandateScope<Caps, Tier, ParentScope>`, the `MandateAuditEvent` union, `MandateError`, `MandateTier` |
 | `src/mandate/mandate.ts` | issue / use / revoke across all three tiers |
 | `src/mandate/audit.ts` | audit-log factories, signed and unsigned |
-| `src/mandate/signer.ts` | Ed25519 signer + verifier, `verifyAuditChain`, `canonicalJSON`, `sha256Hex` |
+| `src/mandate/signer.ts` | Ed25519 signer + verifier, `verifyAuditChain`, `signedPreimage`; re-exports `canonicalJSON` and `sha256Hex` from `src/canon.ts` |
 | `src/mandate/security.ts` | `constitutionalPreCheck` + the MIP-1..MIP-6 catalog |
 | `src/gate/trust.ts` | the enforcement kernel — one file, deliberately |
 | `src/verify/verify.ts` | signed receipt chains, JSONL, third-party verification, anchor memos |
@@ -60,12 +62,13 @@ test/
 - **Zero runtime dependencies.** Node builtins only. This is a design property, not an accident: the kernel must be auditable in one sitting and embeddable across repo boundaries. Adding a dependency requires an ADR, full stop.
 - **Rule 2 is absolute.** `fromLLM` returns untrusted regardless of model quality, input tiers, or confidence. Confidence is orthogonal metadata; it never substitutes for tier.
 - **Rule 3 is structural, not conventional.** The `Sourced` constructor and `ascend` are module-private; the three declassifiers are the only doors. Any change that makes ascent reachable from outside `src/gate/trust.ts` reopens the Session-003 forgery hole. `test/gate/trust.test.ts` "forgery resistance" guards it.
-- **One canonicalization across the rail.** `verify` signs *through* mandate's signer and re-exports mandate's `canonicalJSON`/`sha256Hex`. Never grow a second implementation — two canonicalizations means signatures made on one side fail on the other. `test/index-barrel.test.ts` asserts they are the identical function object, not merely the same name.
+- **One canonicalization across the rail.** `canonicalJSON` and `sha256Hex` are defined once, in `src/canon.ts`, a leaf that imports only `node:crypto`. Mandate's signed preimage and chain link, verify's wrapper link and the gate's interior receipt hash all go through it; `signer.ts` re-exports the two names so `sweetrust/mandate`, `sweetrust/verify` and the root hand out the identical function objects. Never grow a second implementation, and never hash with a bare `JSON.stringify` — two canonicalizations means bytes produced on one side fail on the other, and `JSON.stringify` is a second canonicalization (insertion-order keys). `test/index-barrel.test.ts` and `test/canon.test.ts` assert identity, not name-equality, and `test/canon.test.ts` asserts the leaf has no import but `node:crypto`.
 - **The root barrel is curated on purpose.** `src/index.ts` star-exports mandate and gate but names verify's surface by hand. Two `export *` clauses offering the same name make it ambiguous, and ESM resolves ambiguity by **silently omitting** the name — no error, no warning. Do not "simplify" it to three stars.
 - **TCB honesty.** Never claim unforgeability for this package. In-process TypeScript is observe/warn/dev-time authority; the Move cage owns unforgeable enforcement. Keep the honest-limits comment blocks in `src/gate/trust.ts` and `src/verify/verify.ts` intact.
-- **Receipt hash discipline.** `ReceiptLog.append`, `verifyChain`, and verify's interior-hash recomputation must agree byte-for-byte on JSON body key order. Changing the body shape is a three-site change — grep before touching.
+- **Receipt hash discipline.** The interior receipt hash is `sha256Hex(receiptBody(receipt))`, and `receiptBody` is `canonicalJSON` over the receipt's seven fields (`src/gate/trust.ts`). `ReceiptLog.nextReceipt`, `verifyChain` and verify's recomputation all call that one function, so there is no key order to agree on and no second site to keep in step. Changing the body SHAPE (adding or renaming a field) still changes every hash: it is a 0.x breaking change with a CHANGELOG entry and an ADR, never a quiet edit. `docs/adr/0002-receipt-interior-hash-is-canonical.md` records the move from `JSON.stringify`.
 - **Wrap, never fork.** Integrations that need an external service live *outside* this package, as separate adapter packages. That is what keeps the zero-dependency claim true.
 - **Constitutional pre-check before persistence.** Any function that persists an authored string must run `constitutionalPreCheck` first. Inherited v0.0 I9 invariant.
+- **Intake: caller input is read once, at the boundary.** Every exported function snapshots each field of its argument exactly once — own keys only, no prototype walk — and every check, mint, write and record that follows uses the snapshot, never the argument. A getter or a Proxy can answer differently on each read, so a second read of the same field is a time-of-check/time-of-use hole: the 2026-10-13 mandate CRITICAL was exactly that, `args.mandate` re-read at every site that wanted it, so one getter satisfied the possession check with the genuine scope and fed forged data to everything after. The harness is `test/helpers/poison.ts` (a Proxy that throws `SecondRead` on the second `get` of any key; `Object.keys`, `hasOwn` and `in` do not count, so an own-key snapshot passes) and the test is `test/intake-poison.test.ts`, which runs every object-taking export under it and requires the same verdict as on a plain object. **A new export that takes an object is added to that test in the same commit that adds the export.** The rule covers nested bags the function itself reads (`requires`, `redact`, `judgment`, `anchor`) and each capability object's `key`; it does not reach into values the function stores without reading (a scope keeps the caller's capability objects by reference, and `useCapability` re-resolves their keys against the recorded grant, which is what makes that safe).
 - **No `// @ts-ignore`.** Use `// @ts-expect-error` with a comment saying why the directive is load-bearing, on the line immediately preceding the offending expression. A `@ts-expect-error` in a test is a compile-time invariant proof — if TypeScript ever reports one as unused, that is a five-alarm fire meaning the type-level invariant regressed. Never silently delete one.
 
 ## Gates

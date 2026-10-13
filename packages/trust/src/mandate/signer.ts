@@ -25,102 +25,21 @@
  *   - No whitespace
  *   - Identical input produces identical bytes (deterministic signing)
  */
-import { createHash, createPrivateKey, createPublicKey, sign as edSign, verify as edVerify, type KeyObject } from "node:crypto"
+import { createPrivateKey, createPublicKey, sign as edSign, verify as edVerify, type KeyObject } from "node:crypto"
 import type {
   ISO8601,
   Signed,
   SignedMandateAuditEvent,
 } from "./types.ts"
 
-/**
- * canonicalJSON — serialize a value to canonical JSON (sorted keys, no
- * whitespace). Deterministic across runs for any non-circular value.
- *
- * Used both for signing (producing the bytes the signature is computed
- * over) and for hash-chaining (producing the bytes the SHA-256 hash is
- * computed over). The two operations MUST agree on canonicalization or
- * verification will fail spuriously.
- *
- * It follows JSON.stringify's SerializeJSONProperty step for step, so that a
- * signature made over an in-memory value still verifies after the value has
- * been through JSON.stringify and JSON.parse (an export, a store file). The
- * steps that matter, in order: `toJSON(key)` is called ONCE on an object (a
- * function included) or a BigInt, and its result is NOT asked for toJSON
- * again; a boxed Number / String / Boolean / BigInt is unwrapped; then the
- * primitives; then arrays and plain objects, whose keys are sorted (the one
- * permitted difference). Before the 2026-10-13 verify audit the first two
- * steps were wrong: toJSON was applied recursively and without its key, and a
- * boxed String signed as {"0":"a","1":"b"} while its export read "ab", so an
- * honest record failed to verify the moment it left memory.
- */
-const unbox = (value: object): unknown => {
-  // Internal-slot tests, in JSON.stringify's order. `valueOf` is called on the
-  // PROTOTYPE so it answers for the slot alone, then the conversion is the
-  // spec's (ToNumber / ToString honour an instance override, as stringify does).
-  try { Number.prototype.valueOf.call(value); return Number(value) } catch { /* no [[NumberData]] */ }
-  try { String.prototype.valueOf.call(value); return String(value) } catch { /* no [[StringData]] */ }
-  try { return Boolean.prototype.valueOf.call(value) } catch { /* no [[BooleanData]] */ }
-  try { return BigInt.prototype.valueOf.call(value) } catch { /* no [[BigIntData]] */ }
-  return value
-}
-
-const canon = (value: unknown, key: string): string | undefined => {
-  // Step 2: toJSON, once, with the key. Objects include functions here, and
-  // BigInt is the one primitive stringify asks (so a BigInt.prototype.toJSON
-  // installed by the host is honoured). The result is used as-is below: a
-  // carrier returned by a carrier is serialized as a plain object.
-  if ((typeof value === "object" && value !== null) || typeof value === "function" || typeof value === "bigint") {
-    const toJSON = (value as { toJSON?: unknown }).toJSON
-    if (typeof toJSON === "function") value = (toJSON as (this: unknown, k: string) => unknown).call(value, key)
-  }
-  // Step 4: a boxed primitive is its primitive.
-  if (typeof value === "object" && value !== null) value = unbox(value)
-  // Steps 5 to 9: the primitives. NaN/Infinity are null; a BigInt throws, as
-  // stringify does; undefined, function and symbol are nothing (dropped as a
-  // key, null as an element, by the two callers below).
-  if (value === null) return "null"
-  if (value === true) return "true"
-  if (value === false) return "false"
-  if (typeof value === "string") return JSON.stringify(value)
-  if (typeof value === "number") return Number.isFinite(value) ? String(value) : "null"
-  if (typeof value === "bigint") throw new TypeError("Do not know how to serialize a BigInt")
-  if (typeof value !== "object") return undefined
-  if (Array.isArray(value)) {
-    // JSON.stringify renders undefined/function/symbol ELEMENTS as null —
-    // never as a hole. "[1,,2]" is not JSON; "[1,null,2]" is. Iterate by INDEX,
-    // not Array.prototype.map: .map skips elision holes, so `?? "null"` never
-    // fires for a true hole (`[1,,2]`), emitting invalid JSON. Indexing visits
-    // holes as `undefined` → canon → "null" (DAN-646). The key handed to an
-    // element's toJSON is its index as a string, as stringify hands it.
-    const parts: string[] = []
-    for (let i = 0; i < value.length; i++) parts.push(canon(value[i], String(i)) ?? "null")
-    return "[" + parts.join(",") + "]"
-  }
-  // Keys whose values serialize to nothing (undefined, function, symbol) are
-  // DROPPED, matching JSON.stringify: a signature over canonical bytes must
-  // survive a JSON round-trip, and `"k":undefined` is not JSON.
-  const record = value as Record<string, unknown>
-  const parts: string[] = []
-  for (const k of Object.keys(record).sort()) {
-    const s = canon(record[k], k)
-    if (s !== undefined) parts.push(JSON.stringify(k) + ":" + s)
-  }
-  return "{" + parts.join(",") + "}"
-}
-
-// INVARIANT (property-tested in test/mandate/canonical-property.test.ts, with
-// boxed primitives, nested toJSON carriers and key-reading toJSON among the
-// generators since the 2026-10-13 verify audit): for any JSON-representable
-// value x, canonicalJSON(x) parses as JSON and JSON.parse(canonicalJSON(x))
-// deep-equals JSON.parse(JSON.stringify(x)). Key order is the ONLY permitted
-// difference (canonical = sorted). The top-level key is "", as stringify's is.
-export const canonicalJSON = (value: unknown): string => canon(value, "") as string
-
-/**
- * sha256Hex — compute SHA-256 hash of a string, return as hex.
- */
-export const sha256Hex = (input: string): string =>
-  createHash("sha256").update(input).digest("hex")
+// canonicalJSON and sha256Hex live in src/canon.ts since the 2026-10-13 rail
+// audit, a leaf that imports only node:crypto, so the gate can hash its
+// receipts through the same function without importing mandate. They are
+// re-exported here so `sweetrust/mandate` (and, through it, `sweetrust/verify`
+// and the root) hand out the identical function objects they always did;
+// test/index-barrel.test.ts and test/canon.test.ts assert the identity.
+import { canonicalJSON, sha256Hex } from "../canon.ts"
+export { canonicalJSON, sha256Hex }
 
 /**
  * MANDATE_AUDIT_DOMAIN — domain-separation tag folded into the signed preimage
@@ -565,6 +484,14 @@ export const verifyAuditChain = (
     return null
   }
 
+  // The pin is read ONCE, here, before the loop — the same shape as
+  // verifySignedChain. It used to be read inside the loop, once per record, so
+  // a getter on `opts` could pin a different key for each record and a chain
+  // signed by two keys walked through (the 2026-10-13 rail audit,
+  // test/intake-poison.test.ts). A pin that is not a string pins nothing; the
+  // comparison below says so itself for every record.
+  const pin: unknown = opts?.trustedSignerPublicKeyHex
+
   // The link each record must carry: null for the first, then the hash of the
   // whole previous SIGNED record.
   let expectedPreviousHash: string | null = null
@@ -606,7 +533,6 @@ export const verifyAuditChain = (
     // under the in-memory signer, whose signature is a public function of the
     // envelope, a keyless forged revoke came back valid:true (the 2026-10-13
     // verify audit).
-    const pin: unknown = opts?.trustedSignerPublicKeyHex
     if (typeof pin !== "string" || record.signerPublicKeyHex !== pin) {
       return {
         valid: false,

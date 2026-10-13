@@ -47,7 +47,8 @@ already ruled that this pointer must not be a *revocation* input. Nobody had ask
   but never issued, so it carries no authority.
 - The tier ladder is enforced at runtime (`TierLadderViolation`) in all three delegating issuers,
   including the legacy `issueMandate`. That function stamps `"organization"` on what it mints, so any
-  other grantor tier was a side door.
+  other grantor tier was a side door. (`issueMandate` and `issueRootMandate` were removed later on
+  2026-10-13; see the second amendment below.)
 
 This matches a sibling in the same package. Gate's `Sourced` constructor is module-private for the
 same reason: the only way to hold one is to be handed one.
@@ -81,8 +82,19 @@ held leaf alone, under the same in-process precondition this ADR accepts.
 **Possession is now checked on a single captured reference.** Each function reads each
 caller-supplied field exactly once, at its top, resolves each capability `key` exactly once, and
 uses only those locals; the last describe block of `test/mandate/authority-binding.test.ts` pins
-the read count at one per field for all seven exports. The decision above stands. This names the
+the read count at one per field for every export. The decision above stands. This names the
 condition it depended on.
+
+## Amended 2026-10-13, later the same day
+
+The v0.0 pair `issueMandate` / `issueRootMandate` is removed (chunk 4 of the rail audit). The
+tiered issuers are the API, and the side door this ADR closed at runtime no longer exists at all:
+a `TierLadderViolation` with `requestedTier: "organization"` was reachable only through
+`issueMandate` and is now unreachable. The ladder's remaining runtime checks live in
+`issueProjectMandate` (grantor must be org) and `issueAgentMandate` (grantor must be project), and
+`test/mandate/authority-binding.test.ts` pins all four refusals by name: agent → project,
+project → project, agent → agent, org → agent. The read-count block covers the five exports that
+remain.
 
 ## Alternatives considered
 

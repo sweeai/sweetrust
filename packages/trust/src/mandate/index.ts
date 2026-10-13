@@ -36,8 +36,6 @@ export {
 } from "./audit.ts"
 
 export {
-  issueMandate,
-  issueRootMandate,
   issueOrgMandate,
   issueProjectMandate,
   issueAgentMandate,

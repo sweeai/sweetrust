@@ -32,10 +32,8 @@ import { makeInMemoryAuditLive } from "../../src/mandate/audit.ts"
 import {
   defineCapability,
   issueAgentMandate,
-  issueMandate,
   issueOrgMandate,
   issueProjectMandate,
-  issueRootMandate,
   revokeMandate,
   useCapability,
 } from "../../src/mandate/mandate.ts"
@@ -341,38 +339,48 @@ describe("DAN-1157 — a FULL-FIELD forgery (every field copied from the public 
 })
 
 describe("DAN-1157 — the tier ladder has no side door, and a holder cannot rewrite its tier", () => {
-  test("legacy issueMandate cannot launder an agent into a delegator", () => {
+  // These two ran through the v0.0 `issueMandate` until it was removed
+  // (2026-10-13 rail audit): that function stamped "organization" on whatever
+  // it minted, so an agent or a project grantor ascended the ladder in one
+  // call. The property is the same with the function gone — no grantor below
+  // org may mint through the org → project door — and F3 above holds the
+  // agent → agent and org → agent doors. Both verdicts are pinned by name here,
+  // where F3 pins only the refusal.
+  test("an agent cannot mint a project: issueProjectMandate with an agent grantor is TierLadderViolation", () => {
     const { audit, agentScope } = chain()
-    // issueMandate stamps tier "organization" on whatever it mints, so an agent
-    // grantor here would ascend two rungs in one call.
     const result = either(() =>
-      issueMandate(
+      issueProjectMandate(
         {
           grantor: AGENT_BOT,
           grantorScope: agentScope as any,
           capabilities: [Read] as any,
-          rationale: "an agent delegating through the v0 door",
+          rationale: "an agent delegating through the project door",
         },
         audit,
       ),
     )
-    expect(result._tag).toBe("Left")
+    expect(result.left?._tag).toBe("TierLadderViolation")
+    expect(result.left?.grantorMandateId).toBe(agentScope.id)
+    expect(result.left?.grantorTier).toBe("agent")
+    expect(result.left?.requestedTier).toBe("project")
   })
 
-  test("legacy issueMandate cannot turn a project's child into an organization", () => {
+  test("a project cannot mint a project: issueProjectMandate with a project grantor is TierLadderViolation", () => {
     const { audit, projectScope } = chain()
     const result = either(() =>
-      issueMandate(
+      issueProjectMandate(
         {
           grantor: PROJECT_LEAD,
           grantorScope: projectScope as any,
           capabilities: [Read] as any,
-          rationale: "a project minting an org-tier child",
+          rationale: "a project minting a peer project",
         },
         audit,
       ),
     )
-    expect(result._tag).toBe("Left")
+    expect(result.left?._tag).toBe("TierLadderViolation")
+    expect(result.left?.grantorTier).toBe("project")
+    expect(result.left?.requestedTier).toBe("project")
   })
 
   test("an issued scope and its capability list are frozen", () => {
@@ -702,17 +710,6 @@ describe("2026-10-13 audit — a getter on `args` cannot split the object checke
       once("issueOrgMandate", reads)
     }
     {
-      const audit = makeInMemoryAuditLive()
-      const { args, reads } = counted({
-        grantor: ARTHUR,
-        capabilities: [Read, Wire] as const,
-        rationale: "root",
-        triggerSource: "code" as const,
-      })
-      issueRootMandate(args, audit)
-      once("issueRootMandate", reads)
-    }
-    {
       const { audit, orgScope } = chain()
       const { args, reads } = counted({
         grantor: PROJECT_LEAD,
@@ -735,18 +732,6 @@ describe("2026-10-13 audit — a getter on `args` cannot split the object checke
       })
       issueAgentMandate(args, audit)
       once("issueAgentMandate", reads)
-    }
-    {
-      const { audit, orgScope } = chain()
-      const { args, reads } = counted({
-        grantor: PROJECT_LEAD,
-        grantorScope: orgScope,
-        capabilities: [Read] as const,
-        rationale: "legacy child",
-        triggerSource: "code" as const,
-      })
-      issueMandate(args, audit)
-      once("issueMandate", reads)
     }
     {
       const { audit, projectScope, agentScope } = chain()

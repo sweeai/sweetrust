@@ -24,13 +24,21 @@
 // ============================================================================
 
 import { createHash } from "node:crypto"
+// The rail's one canonicalization, from a leaf that imports only node:crypto.
+// This is NOT an import of mandate: the gate still stands alone (src/index.ts).
+import { canonicalJSON } from "../canon.ts"
 
 // ── Tiers (§3, the lattice) ─────────────────────────────────────────────────
+// Three rungs. The spec drew a fourth, `asserted`, between untrusted and
+// corroborated; no factory and no declassifier in this package ever produced
+// it, so SECURITY.md told readers to treat the ladder as three until the code
+// caught up. The 2026-10-13 rail audit removed the rung rather than keep a
+// tier a sink could require and nothing could ever satisfy.
 
-export const TIERS = ["untrusted", "asserted", "corroborated", "verified"] as const
+export const TIERS = ["untrusted", "corroborated", "verified"] as const
 export type Tier = (typeof TIERS)[number]
 
-const RANK: Record<Tier, number> = { untrusted: 0, asserted: 1, corroborated: 2, verified: 3 }
+const RANK: Record<Tier, number> = { untrusted: 0, corroborated: 1, verified: 2 }
 
 /**
  * Own-key membership in the lattice. `RANK[t]` alone is not a membership test:
@@ -345,7 +353,16 @@ Object.freeze(Sourced.prototype)
 // job (SpendCage, testnet 0x5c1588…fdfa), where capabilities cannot be minted
 // by convention. This is the spec's four-property discriminator, in code.
 
-function ascend<T>(prev: Sourced<T>, event: UpgradeEvent, mergedAncestors?: ReadonlySet<string>): Sourced<T> {
+//
+// `prev` is the declassifier's own SNAPSHOT of the value it checked — its
+// `value` and `provenance` read once at the top of the declassifier — never
+// the Sourced argument itself. Each declassifier used to hand its argument
+// straight in, so the value that was compared and the value that was promoted
+// were separate reads of the caller's object (the 2026-10-13 rail audit,
+// test/intake-poison.test.ts). A Sourced is frozen and cannot carry a getter,
+// so no caller could exploit that; the intake rule in AGENTS.md holds for
+// every export without an exception because of this.
+function ascend<T>(prev: { readonly value: T; readonly provenance: Provenance }, event: UpgradeEvent, mergedAncestors?: ReadonlySet<string>): Sourced<T> {
   return construct(prev.value, event.to, {
     origin: prev.provenance.origin,
     ancestors: mergedAncestors ?? prev.provenance.ancestors,
@@ -370,11 +387,11 @@ function ascend<T>(prev: Sourced<T>, event: UpgradeEvent, mergedAncestors?: Read
  * Every Sui amount in MIST is a bigint, so this is the common case, not an
  * edge. Everything else renders exactly as before.
  *
- * This lives HERE, in gate, and deliberately not in mandate's `canonicalJSON`:
- * that function defines signed bytes for the whole rail, and changing it would
- * move every mandate signature (AGENTS.md, "One canonicalization across the
- * rail"). By the time a receipt reaches a signer, its arguments are already
- * plain JSON.
+ * This lives HERE, in gate, and deliberately not in the rail's `canonicalJSON`
+ * (src/canon.ts): that function defines signed and hashed bytes for the whole
+ * rail, and changing it would move every mandate signature (AGENTS.md, "One
+ * canonicalization across the rail"). By the time a receipt reaches
+ * `receiptBody` or a signer, its arguments are already plain JSON.
  */
 const receiptJSON = (value: unknown): string | undefined =>
   JSON.stringify(value, (_key, v: unknown) =>
@@ -420,6 +437,10 @@ export function allowlisted<T>(
   if (entry === undefined) {
     return { ok: false, reason: `'${key}' not in ${registryName}; candidate is ${candidate.describe()}` }
   }
+  // Each Sourced is read once, here (AGENTS.md, "Intake"). The comparison
+  // below and the ascent at the bottom both use these locals.
+  const { value: entryValue, tier: entryTier, provenance: entryProvenance } = entry
+  const { value: candidateValue } = candidate
 
   // The comparison runs on the CANDIDATE, so it executes candidate-controlled
   // code (`toJSON`, getters) and can throw on a circular value. A declassifier
@@ -435,7 +456,7 @@ export function allowlisted<T>(
   // match/mismatch — what comes back is the registry's record, below.
   let entryJSON: string | undefined
   try {
-    entryJSON = receiptJSON(entry.value)
+    entryJSON = receiptJSON(entryValue)
   } catch (err) {
     return {
       ok: false,
@@ -444,7 +465,7 @@ export function allowlisted<T>(
   }
   let candidateJSON: string | undefined
   try {
-    candidateJSON = receiptJSON(candidate.value)
+    candidateJSON = receiptJSON(candidateValue)
   } catch (err) {
     return {
       ok: false,
@@ -482,9 +503,9 @@ export function allowlisted<T>(
   // no check at all.
   return {
     ok: true,
-    value: ascend(entry, {
+    value: ascend({ value: entryValue, provenance: entryProvenance }, {
       declassifier: "allowlisted",
-      from: entry.tier,
+      from: entryTier,
       to: "verified",
       evidence: `matched ${registryName}[${key}] — candidate presented was ${candidate.describe()}`,
       at: now(),
@@ -508,8 +529,12 @@ export function corroborate<T>(
   // {"$bigint":"5"}, and `undefined` never agrees with a function.
   equals: (a: T, b: T) => boolean = (a, b) => typeof a === typeof b && receiptJSON(a) === receiptJSON(b),
 ): DeclassifyResult<T> {
-  for (const a of claim.provenance.ancestors) {
-    if (reference.provenance.ancestors.has(a)) {
+  // Each Sourced is read once, here (AGENTS.md, "Intake"): the independence
+  // check, the comparison, the ceiling check and the ascent all use these.
+  const { value: claimValue, tier: claimTier, provenance: claimProvenance } = claim
+  const { value: referenceValue, provenance: referenceProvenance } = reference
+  for (const a of claimProvenance.ancestors) {
+    if (referenceProvenance.ancestors.has(a)) {
       return { ok: false, reason: `sources are NOT independent (shared ancestor: ${a})` }
     }
   }
@@ -517,7 +542,7 @@ export function corroborate<T>(
   // verdict, and no verdict is a refusal, never an exception.
   let agree: boolean
   try {
-    agree = equals(claim.value, reference.value)
+    agree = equals(claimValue, referenceValue)
   } catch (err) {
     return {
       ok: false,
@@ -527,7 +552,7 @@ export function corroborate<T>(
   if (!agree) {
     return {
       ok: false,
-      reason: `values disagree — claim ${show(claim.value)} (${claim.describe()}) vs reference ${show(reference.value)} (${reference.describe()})`,
+      reason: `values disagree — claim ${show(claimValue)} (${claim.describe()}) vs reference ${show(referenceValue)} (${reference.describe()})`,
     }
   }
   // Rule 3a cuts both ways: accumulation never raises a value PAST
@@ -538,19 +563,19 @@ export function corroborate<T>(
   // (the 2026-10-13 gate audit). A claim already at or above corroborated has
   // nothing to gain here and comes back as itself. The two checks above still
   // ran: `ok` means the sources agree and are independent, whatever the tier.
-  if (meetsTier(claim.tier, "corroborated")) {
+  if (meetsTier(claimTier, "corroborated")) {
     return { ok: true, value: claim }
   }
-  const merged = new Set([...claim.provenance.ancestors, ...reference.provenance.ancestors])
+  const merged = new Set([...claimProvenance.ancestors, ...referenceProvenance.ancestors])
   return {
     ok: true,
     value: ascend(
-      claim,
+      { value: claimValue, provenance: claimProvenance },
       {
         declassifier: "corroborate",
-        from: claim.tier,
+        from: claimTier,
         to: "corroborated",
-        evidence: `agrees with independent source ${reference.provenance.origin}`,
+        evidence: `agrees with independent source ${referenceProvenance.origin}`,
         at: now(),
       },
       merged,
@@ -580,9 +605,12 @@ export function humanConfirm<T>(
   // Through receiptJSON, in a try: JSON.stringify threw on a bigint candidate
   // and the human never saw a question (the 2026-10-13 gate audit). A value
   // that cannot be rendered cannot be confirmed — refuse, naming why.
+  // The candidate is read once, here (AGENTS.md, "Intake"): the question and
+  // the ascent both use these locals.
+  const { value: candidateValue, tier: candidateTier, provenance: candidateProvenance } = candidate
   let json: string
   try {
-    json = receiptJSON(candidate.value) ?? "undefined"
+    json = receiptJSON(candidateValue) ?? "undefined"
   } catch (err) {
     return {
       ok: false,
@@ -602,9 +630,9 @@ export function humanConfirm<T>(
   }
   return {
     ok: true,
-    value: ascend(candidate, {
+    value: ascend({ value: candidateValue, provenance: candidateProvenance }, {
       declassifier: "humanConfirm",
-      from: candidate.tier,
+      from: candidateTier,
       to: "verified",
       evidence: "human confirmed with provenance rendered",
       at: now(),
@@ -650,18 +678,28 @@ export interface Receipt {
 /**
  * The exact bytes ReceiptLog hashes for a receipt — the single definition of the
  * interior-hash serialization. Exported so verifiers (@sweetrust/verify) recompute
- * hashes from this function instead of hand-mirroring key order across packages.
- * Field order is fixed here regardless of caller object-literal order.
+ * hashes from this function instead of hand-mirroring it across packages.
+ *
+ * Canonical JSON (src/canon.ts): keys sorted at EVERY depth, no whitespace,
+ * the same bytes the signature and the wrapper link are computed over. Until
+ * the 2026-10-13 rail audit this was `JSON.stringify` of a hand-ordered
+ * literal, which pinned these seven keys and nothing beneath them: `args` is a
+ * tree of caller-shaped objects, so its bytes followed insertion order, and an
+ * honest exportJSONL artifact run through `jq -S` came back `hash-mismatch`.
+ * Every receipt hash changed with this; a 0.3.0 log does not verify under
+ * 0.4.0 (CHANGELOG, docs/adr/0002). A `reason` of undefined is dropped by
+ * canonicalJSON exactly as the old conditional spread dropped it, and each
+ * field is read from `e` once.
  */
 export function receiptBody(e: Omit<Receipt, "hash">): string {
-  return JSON.stringify({
+  return canonicalJSON({
     seq: e.seq,
     prevHash: e.prevHash,
     at: e.at,
     sink: e.sink,
     decision: e.decision,
     args: e.args,
-    ...(e.reason !== undefined ? { reason: e.reason } : {}),
+    reason: e.reason,
   })
 }
 
@@ -704,9 +742,16 @@ export class ReceiptLog {
     // The other order let an entry that carried `seq`, `prevHash` or `hash`
     // replace the log's own (the 2026-10-13 gate audit): `Omit<>` hides those
     // fields from TypeScript, not from JavaScript.
-    const body = receiptBody({ ...entry, seq, prevHash })
-    const hash = createHash("sha256").update(body).digest("hex")
-    return { ...entry, seq, prevHash, hash }
+    //
+    // Spread ONCE. This used to spread the entry into the hashed body and then
+    // spread it AGAIN into the committed receipt, so a getter on the entry
+    // could answer the hash with one value and the record with another, and
+    // the log then held a receipt whose own hash did not cover it (the
+    // 2026-10-13 rail audit, caught by test/intake-poison.test.ts). The
+    // snapshot that is hashed is the snapshot that is committed.
+    const snapshot = { ...entry, seq, prevHash }
+    const hash = createHash("sha256").update(receiptBody(snapshot)).digest("hex")
+    return { ...snapshot, hash }
   }
 
   /**
@@ -983,26 +1028,42 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
     // audit). The `errored` receipt below is sync-only: `execute: async () =>
     // { throw }` RETURNS a rejected promise, an ordinary value, so the receipt
     // said `executed` and the log never heard about the rejection — and every
-    // real sink is async. A thenable result gets a rejection handler that
-    // appends an `errored` receipt when it settles. The receipt that PRECEDES
-    // the outcome stays as written (it cannot wait for a network), and the
+    // real sink is async. A thenable result is wrapped so that an `errored`
+    // receipt is appended when it rejects. The receipt that PRECEDES the
+    // outcome stays as written (it cannot wait for a network), and the
     // `errored` one TRAILS it; SECURITY.md § Honest limits states the order.
-    // The host's own promise is returned unchanged and the host must still
-    // handle it — this observes, it does not catch. No fulfilment handler:
-    // success is what the preceding receipt already says.
-    const trailErrored = (result: unknown, prefix: string): void => {
+    //
+    // THE WRAPPER IS WHAT THE HOST GETS BACK, not its own promise (the flip of
+    // 2026-10-13, chunk 4). The first fix attached `.then(undefined, handler)`
+    // to the host's promise and returned that promise unchanged. Attaching ANY
+    // handler marks a promise handled, so a host that forgot its own catch
+    // silently lost Node's unhandled-rejection crash: the action failed, the
+    // receipt said so, and the process carried on with nobody told. This
+    // returns `Promise.resolve(result).then(v => v, err => { append; throw
+    // err })`: the receipt is written AND the rejection re-raised, so the
+    // promise in the host's hand still rejects with the same error — and still
+    // crashes the process if the host ignores it. `Promise.resolve` adopts a
+    // non-Promise thenable (one `then` call, as before) so the host always
+    // holds a real Promise. The cost, stated in the CHANGELOG: `result` is not
+    // the same object execute() returned. No fulfilment handler beyond the
+    // pass-through: success is what the preceding receipt already says.
+    const trailErrored = (result: R, prefix: string): R => {
       const thenable =
         result !== null && (typeof result === "object" || typeof result === "function") && typeof (result as { then?: unknown }).then === "function"
-      if (!thenable) return
-      ;(result as PromiseLike<unknown>).then(undefined, (err: unknown) => {
-        cfg.log.append({
-          at: now(),
-          sink: cfg.name,
-          decision: "errored",
-          args: rendered,
-          reason: `${prefix} — then its promise rejected; the action may or may not have taken effect: ${firstLine(err)}`,
-        })
-      })
+      if (!thenable) return result
+      return Promise.resolve<unknown>(result).then(
+        (v) => v,
+        (err: unknown) => {
+          cfg.log.append({
+            at: now(),
+            sink: cfg.name,
+            decision: "errored",
+            args: rendered,
+            reason: `${prefix} — then its promise rejected; the action may or may not have taken effect: ${firstLine(err)}`,
+          })
+          throw err
+        },
+      ) as unknown as R // a Promise<X> stands in for the R = Promise<X> the host declared
     }
 
     // Own-key redaction lookup over the own-key snapshot. `spec.redact?.[key]`
@@ -1199,7 +1260,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
           })
           throw err
         }
-        trailErrored(result, note)
+        result = trailErrored(result, note)
         const receipt = cfg.log.append({ at: now(), sink: cfg.name, decision: "judgment-flagged", args: rendered, reason: note })
         return { ok: true, result, receipt }
       }
@@ -1233,7 +1294,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
       throw err
     }
 
-    trailErrored(result, `${cfg.name} passed the walls and was recorded as ${decision}`)
+    result = trailErrored(result, `${cfg.name} passed the walls and was recorded as ${decision}`)
     const receipt = cfg.log.append({
       at: now(),
       sink: cfg.name,

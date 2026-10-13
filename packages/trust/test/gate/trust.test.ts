@@ -37,21 +37,39 @@ import {
 // ── The lattice (§3) ─────────────────────────────────────────────────────────
 
 describe("tier lattice", () => {
-  test("TIERS is the spec's four-tier ascent order", () => {
-    expect(TIERS).toEqual(["untrusted", "asserted", "corroborated", "verified"])
+  // Three tiers, not four. The spec drew `asserted` between untrusted and
+  // corroborated; nothing in this package ever produced it — no factory, no
+  // declassifier — so SECURITY.md told readers to treat the ladder as three
+  // rungs. The 2026-10-13 rail audit made the code say what the prose said.
+  test("TIERS is the three-tier ascent order", () => {
+    expect(TIERS).toEqual(["untrusted", "corroborated", "verified"])
+    expect(TIERS).toHaveLength(3)
+    expect((TIERS as ReadonlyArray<string>).includes("asserted")).toBe(false)
   })
 
   test("meetsTier is a ranking, not an equality", () => {
     expect(meetsTier("verified", "corroborated")).toBe(true)
     expect(meetsTier("corroborated", "corroborated")).toBe(true)
-    expect(meetsTier("asserted", "corroborated")).toBe(false)
+    expect(meetsTier("untrusted", "corroborated")).toBe(false)
     expect(meetsTier("untrusted", "verified")).toBe(false)
+    // The retired name is outside the lattice on either side, like any string.
+    expect(meetsTier("asserted" as never, "untrusted")).toBe(false)
+    expect(meetsTier("verified", "asserted" as never)).toBe(false)
   })
 
   test("Rule 1 — taint is sticky: combining takes the MINIMUM tier", () => {
     expect(minTier("verified", "untrusted")).toBe("untrusted")
-    expect(minTier("corroborated", "asserted", "verified")).toBe("asserted")
+    expect(minTier("verified", "corroborated", "verified")).toBe("corroborated")
+    expect(minTier("corroborated", "untrusted", "verified")).toBe("untrusted")
     expect(minTier("verified")).toBe("verified")
+    // Over the whole lattice, every pair: the meet is the lower rung.
+    for (let i = 0; i < TIERS.length; i++) {
+      for (let j = 0; j < TIERS.length; j++) {
+        expect(minTier(TIERS[i]!, TIERS[j]!)).toBe(TIERS[Math.min(i, j)])
+      }
+    }
+    // The retired name floors the combination, as any unknown tier does.
+    expect(minTier("verified", "asserted" as never)).toBe("untrusted")
   })
 
   test("Rule 1, empty case — combining NOTHING floors, it does not top", () => {

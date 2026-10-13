@@ -66,14 +66,15 @@ last line of a signed store and the file still verifies, because it is a valid s
 that line was a revoke, the mandate is live again: `isRevoked` returns `false`. Protect the store
 file the way you protect the key, or anchor its head somewhere the host cannot write.
 
-### A receipt artifact must be byte-preserved
+### A receipt artifact may be re-serialized, but not re-valued
 
-The interior receipt hash is computed over each record's own JSON text in insertion order while
-the signature is over canonical (sorted-key) JSON, so a JSONL artifact must be handed over exactly
-as `exportJSONL` wrote it and read with `parseJSONL`, the sanctioned reader: a file re-serialized
-by an intermediary (`jq -S`, a sorted-map round trip, a pretty-printer) reports `hash-mismatch`
-even when every value in it is honest. Closing that gap changes the kernel's hash body and is
-scheduled as its own chunk.
+Every hash and signature in a signed receipt is over canonical JSON (sorted keys, no whitespace,
+`src/canon.ts`), so an artifact that has been through `jq -S`, a sorted-map round trip or a compact
+re-print verifies exactly as `exportJSONL` wrote it. What must survive is the **values**: a tool
+that rounds a number, drops a key or re-encodes a string has changed the evidence, and the chain
+says so. Read the file with `parseJSONL`, one record per line. Until the 2026-10-13 rail audit the
+interior hash alone was over insertion-order JSON, and an honest re-sorted file reported
+`hash-mismatch`; that is why a 0.3.0 log does not verify under 0.4.0 (see the CHANGELOG).
 
 ### One writer per store file
 
@@ -102,8 +103,13 @@ before anything has happened. So the `executed` (or `judgment-flagged`) receipt 
 records that the action was **started**, not that it succeeded. If the promise later rejects, the
 sink appends an `errored` receipt naming the rejection — behind the first one, never in its place.
 Read the two together: an `executed` with no `errored` after it is an action whose promise did not
-reject, as far as this log can know. The sink observes your promise; it does not catch it. Handle the
-rejection yourself as you always would.
+reject, as far as this log can know.
+
+The promise in `result` is **not** the object your `execute()` returned. It is a wrapper that writes
+the `errored` receipt and then re-raises the same error, so handle it exactly as you would have
+handled your own. If you forget, Node's unhandled-rejection crash still fires. The sink does not
+attach a handler to your promise and walk away — that would mark your promise handled and swallow
+the crash, which is what the first version of this feature did for one day on 2026-10-13.
 
 ### A declassifier's refusal leaves no receipt
 
@@ -136,10 +142,11 @@ reference. So that nothing holding the result can rewrite the registry through i
 becomes an authority value. Nested objects, Maps and Sets inside it are not frozen; typed arrays are
 left alone. If you keep editing a record after wrapping it, wrap a copy.
 
-### `asserted` is not reachable
+### The ladder is three tiers
 
-Four tiers are documented; three are produced. No factory or declassifier currently emits
-`asserted`. Treat the ladder as `untrusted → corroborated → verified` until that changes.
+`untrusted → corroborated → verified`. The spec's fourth rung, `asserted`, was never produced by any
+factory or declassifier and was removed in the 2026-10-13 rail audit; a sink that requires it is a
+`TypeError` at construction.
 
 ---
 

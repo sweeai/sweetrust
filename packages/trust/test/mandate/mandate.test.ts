@@ -1,9 +1,13 @@
 /**
- * Tests for @sweetrust/mandate v0.0.
+ * Tests for @sweetrust/mandate — the root flow (issue / use / revoke).
+ *
+ * Written against the v0.0 pair `issueRootMandate` / `issueMandate`; migrated
+ * to the tiered issuers when the pair was removed (2026-10-13 rail audit). Every
+ * property below is the same property, expressed through org → project.
  *
  * Coverage:
- *   - issueRootMandate: happy path + malicious rationale rejection
- *   - issueMandate: subset derivation + capability-not-in-grantor-scope
+ *   - issueOrgMandate: happy path + malicious rationale rejection
+ *   - issueProjectMandate: subset derivation + capability-not-in-grantor-scope
  *   - useCapability: invocation + revocation handling
  *   - revokeMandate: ancestor check + idempotency
  *   - Type-level subset enforcement (via @ts-expect-error proof)
@@ -11,8 +15,8 @@
 import { describe, expect, test } from "vitest"
 import {
   defineCapability,
-  issueMandate,
-  issueRootMandate,
+  issueOrgMandate,
+  issueProjectMandate,
   makeInMemoryAuditLive,
   revokeMandate,
   useCapability,
@@ -41,10 +45,10 @@ const either = <T>(
   }
 }
 
-describe("issueRootMandate", () => {
+describe("issueOrgMandate", () => {
   test("creates a mandate with null parent", () => {
     const audit = makeInMemoryAuditLive()
-    const scope = issueRootMandate(
+    const scope = issueOrgMandate(
       {
         grantor: TEST_GRANTOR,
         capabilities: [CapA, CapB] as const,
@@ -60,7 +64,7 @@ describe("issueRootMandate", () => {
   test("rejects malicious rationale via constitutionalPreCheck", () => {
     const audit = makeInMemoryAuditLive()
     const result = either(() =>
-      issueRootMandate(
+      issueOrgMandate(
         {
           grantor: TEST_GRANTOR,
           capabilities: [CapA] as const,
@@ -79,7 +83,7 @@ describe("issueRootMandate", () => {
   test("rejects persona-rewriting rationale", () => {
     const audit = makeInMemoryAuditLive()
     const result = either(() =>
-      issueRootMandate(
+      issueOrgMandate(
         {
           grantor: TEST_GRANTOR,
           capabilities: [CapA] as const,
@@ -96,10 +100,10 @@ describe("issueRootMandate", () => {
   })
 })
 
-describe("issueMandate (subset derivation)", () => {
+describe("issueProjectMandate (subset derivation)", () => {
   test("happy path — child mandate inherits subset of grantor scope", () => {
     const audit = makeInMemoryAuditLive()
-    const root = issueRootMandate(
+    const root = issueOrgMandate(
       {
         grantor: TEST_GRANTOR,
         capabilities: [CapA, CapB, CapC] as const,
@@ -107,7 +111,7 @@ describe("issueMandate (subset derivation)", () => {
       },
       audit,
     )
-    const child = issueMandate(
+    const child = issueProjectMandate(
       {
         grantor: TEST_GRANTOR,
         grantorScope: root,
@@ -125,7 +129,7 @@ describe("issueMandate (subset derivation)", () => {
     // We bypass the type system here (type would refuse this at compile-time)
     // to test the runtime fallback for any-cast escape hatches.
     const audit = makeInMemoryAuditLive()
-    const root = issueRootMandate(
+    const root = issueOrgMandate(
       {
         grantor: TEST_GRANTOR,
         capabilities: [CapA] as const,
@@ -135,7 +139,7 @@ describe("issueMandate (subset derivation)", () => {
     )
     // any-cast simulates a dynamic capability list from external source
     const result = either(() =>
-      issueMandate(
+      issueProjectMandate(
         {
           grantor: TEST_GRANTOR,
           grantorScope: root,
@@ -155,7 +159,7 @@ describe("issueMandate (subset derivation)", () => {
 describe("useCapability", () => {
   test("invocation succeeds when capability is in scope", () => {
     const audit = makeInMemoryAuditLive()
-    const scope = issueRootMandate(
+    const scope = issueOrgMandate(
       { grantor: TEST_GRANTOR, capabilities: [CapA] as const, rationale: "test" },
       audit,
     )
@@ -166,7 +170,7 @@ describe("useCapability", () => {
 
   test("runtime guard rejects out-of-scope invocation (any-cast escape)", () => {
     const audit = makeInMemoryAuditLive()
-    const scope = issueRootMandate(
+    const scope = issueOrgMandate(
       { grantor: TEST_GRANTOR, capabilities: [CapA] as const, rationale: "test" },
       audit,
     )
@@ -180,7 +184,7 @@ describe("useCapability", () => {
   // closure is never invoked, so no runtime error fires.
   test("type-level subset enforcement (compile-time gate proof)", () => {
     const audit = makeInMemoryAuditLive()
-    const scope = issueRootMandate(
+    const scope = issueOrgMandate(
       { grantor: TEST_GRANTOR, capabilities: [CapA] as const, rationale: "type-level test" },
       audit,
     )
@@ -200,7 +204,7 @@ describe("useCapability", () => {
 describe("revokeMandate", () => {
   test("revoker in delegation chain succeeds", () => {
     const audit = makeInMemoryAuditLive()
-    const scope = issueRootMandate(
+    const scope = issueOrgMandate(
       { grantor: TEST_GRANTOR, capabilities: [CapA] as const, rationale: "test" },
       audit,
     )
@@ -210,14 +214,14 @@ describe("revokeMandate", () => {
 
   test("revoker NOT in delegation chain fails", () => {
     const audit = makeInMemoryAuditLive()
-    const scope = issueRootMandate(
+    const scope = issueOrgMandate(
       { grantor: TEST_GRANTOR, capabilities: [CapA] as const, rationale: "test" },
       audit,
     )
     // Two principals (DAN-1157): the stranger holds a GENUINE scope, just one
     // in a different tree. Possession of a real scope is not authority over a
     // mandate outside its chain.
-    const strangerScope = issueRootMandate(
+    const strangerScope = issueOrgMandate(
       { grantor: STRANGER, capabilities: [CapA] as const, rationale: "a separate tree" },
       audit,
     )
@@ -235,7 +239,7 @@ describe("revokeMandate", () => {
 
   test("post-revocation invocation returns MandateRevokedError", () => {
     const audit = makeInMemoryAuditLive()
-    const scope = issueRootMandate(
+    const scope = issueOrgMandate(
       { grantor: TEST_GRANTOR, capabilities: [CapA] as const, rationale: "test" },
       audit,
     )
@@ -249,7 +253,7 @@ describe("revokeMandate", () => {
 
   test("revocation is idempotent (double-revoke is no-op)", () => {
     const audit = makeInMemoryAuditLive()
-    const scope = issueRootMandate(
+    const scope = issueOrgMandate(
       { grantor: TEST_GRANTOR, capabilities: [CapA] as const, rationale: "test" },
       audit,
     )
@@ -264,11 +268,11 @@ describe("revokeMandate", () => {
 
   test("transitive revocation: ancestor in chain can revoke", () => {
     const audit = makeInMemoryAuditLive()
-    const root = issueRootMandate(
+    const root = issueOrgMandate(
       { grantor: TEST_GRANTOR, capabilities: [CapA, CapB] as const, rationale: "root" },
       audit,
     )
-    const child = issueMandate(
+    const child = issueProjectMandate(
       {
         grantor: CHILD_AGENT,
         grantorScope: root,
@@ -290,11 +294,11 @@ describe("revokeMandate", () => {
 describe("audit log", () => {
   test("query returns events scoped to one mandate", () => {
     const audit = makeInMemoryAuditLive()
-    const scope1 = issueRootMandate(
+    const scope1 = issueOrgMandate(
       { grantor: TEST_GRANTOR, capabilities: [CapA] as const, rationale: "scope1" },
       audit,
     )
-    const scope2 = issueRootMandate(
+    const scope2 = issueOrgMandate(
       { grantor: TEST_GRANTOR, capabilities: [CapB] as const, rationale: "scope2" },
       audit,
     )

@@ -7,8 +7,9 @@
  *
  * DAN-637 — useCapability ancestor-revocation must reconstruct the delegation
  * chain from grant events' parentMandateId, not walk scope.parentScope:
- *   - issueMandate (v0.0 path) sets parentScope: null, so the pointer walk
- *     terminated at the leaf and the org kill switch never reached children.
+ *   - the v0.0 `issueMandate` (removed in the 2026-10-13 rail audit) set
+ *     parentScope: null, so the pointer walk terminated at the leaf and the org
+ *     kill switch never reached children.
  *   - A forged {...realScope, parentScope: null} severed the walk on purpose.
  *   - Persistence (JSONL, cross-process handoff) stores parentMandateId, not
  *     the object graph, so every deserialized mandate had the same hole.
@@ -24,10 +25,8 @@ import { makeInMemoryAuditLive, makeInMemorySignedAuditLive } from "../../src/ma
 import {
   defineCapability,
   issueAgentMandate,
-  issueMandate,
   issueOrgMandate,
   issueProjectMandate,
-  issueRootMandate,
   revokeMandate,
   useCapability,
 } from "../../src/mandate/mandate.ts"
@@ -97,31 +96,6 @@ const issueTypedChain = (audit: MandateAuditService) => {
 // ---------------------------------------------------------------------------
 
 describe("DAN-637: useCapability ancestor-revocation reconstructs from the audit log", () => {
-  test("revoke root, then use a child issued via issueMandate (v0.0 path, parentScope:null) → AncestorMandateRevoked", () => {
-    const audit = makeInMemoryAuditLive()
-    const root = issueRootMandate(
-      { grantor: ARTHUR, capabilities: [CapA, CapB] as const, rationale: "root" },
-      audit,
-    )
-    const child = issueMandate(
-      {
-        grantor: PROJECT_LEAD,
-        grantorScope: root,
-        capabilities: [CapA] as const,
-        rationale: "child via v0.0 issueMandate",
-      },
-      audit,
-    )
-    revokeMandate({ mandateId: root.id, revokerScope: root, rationale: "org kill switch" }, audit)
-
-    const result = either(() => useCapability({ mandate: child, capability: CapA }, audit))
-    expect(result._tag).toBe("Left")
-    if (result._tag === "Left") {
-      expect(result.left._tag).toBe("AncestorMandateRevoked")
-      expect(result.left.revokedAncestorId).toBe(root.id)
-    }
-  })
-
   test("revoke org, then use an agent-tier mandate issued via the typed path → AncestorMandateRevoked", () => {
     const audit = makeInMemoryAuditLive()
     const { orgScope, agentScope } = issueTypedChain(audit)
@@ -420,40 +394,6 @@ describe("DAN-638: verifyAuditChain rejects chains not signed by the pinned key"
 // ---------------------------------------------------------------------------
 
 describe("DAN-639: issue-time subset check consults the grantor's recorded grant", () => {
-  test("issueMandate (v0.0): forged grantor caps cannot mint a capability the grantor never held", () => {
-    const audit = makeInMemoryAuditLive()
-    const root = issueRootMandate(
-      { grantor: ARTHUR, capabilities: [CapA] as const, rationale: "root holds only CapA" },
-      audit,
-    )
-    // Attacker holds the real root scope, forges its in-memory capability list
-    // to include CapB (as any / untrusted-deserialization rehydrate), then
-    // requests CapB for a child.
-    const forgedGrantor = { ...root, capabilities: [CapA, CapB] } as any
-    const result = either(() =>
-      issueMandate(
-        {
-          grantor: PROJECT_LEAD,
-          grantorScope: forgedGrantor,
-          capabilities: [CapB] as any,
-          rationale: "attempt to mint CapB the root never held",
-        },
-        audit,
-      ),
-    )
-    expect(result._tag).toBe("Left")
-    if (result._tag === "Left") {
-      expect(result.left._tag).toBe("MandateScopeForged")
-      expect(result.left.capability).toBe(CapB.key)
-    }
-    // Laundering is unreachable: the throw means no child scope was returned,
-    // so there is no CapB-bearing mandate to hand to useCapability. The root's
-    // own grant is untouched — still exactly one grant, granting only CapA.
-    const rootGrants = audit.query(root.id).filter((e) => e.type === "grant")
-    expect(rootGrants.length).toBe(1)
-    expect((rootGrants[0] as any).capabilities).toEqual([CapA.key])
-  })
-
   test("issueProjectMandate: forged org-scope caps cannot mint an unheld capability", () => {
     const audit = makeInMemoryAuditLive()
     const org = issueOrgMandate(
@@ -475,7 +415,14 @@ describe("DAN-639: issue-time subset check consults the grantor's recorded grant
     expect(result._tag).toBe("Left")
     if (result._tag === "Left") {
       expect(result.left._tag).toBe("MandateScopeForged")
+      expect(result.left.capability).toBe(CapB.key)
     }
+    // Laundering is unreachable: the throw means no child scope was returned,
+    // so there is no CapB-bearing mandate to hand to useCapability. The org's
+    // own grant is untouched — still exactly one grant, granting only CapA.
+    const orgGrants = audit.query(org.id).filter((e) => e.type === "grant")
+    expect(orgGrants.length).toBe(1)
+    expect((orgGrants[0] as any).capabilities).toEqual([CapA.key])
   })
 
   test("issueAgentMandate: forged project-scope caps cannot mint an unheld capability", () => {
@@ -520,7 +467,7 @@ describe("DAN-639: issue-time subset check consults the grantor's recorded grant
       parentScope: null,
     } as any
     const result = either(() =>
-      issueMandate(
+      issueProjectMandate(
         { grantor: PROJECT_LEAD, grantorScope: fakeGrantor, capabilities: [CapA] as any, rationale: "derive from a fake grantor" },
         audit,
       ),
@@ -533,11 +480,11 @@ describe("DAN-639: issue-time subset check consults the grantor's recorded grant
 
   test("positive: a legitimately-held capability still delegates and the child can use it", () => {
     const audit = makeInMemoryAuditLive()
-    const root = issueRootMandate(
+    const root = issueOrgMandate(
       { grantor: ARTHUR, capabilities: [CapA, CapB] as const, rationale: "root holds A and B" },
       audit,
     )
-    const child = issueMandate(
+    const child = issueProjectMandate(
       { grantor: PROJECT_LEAD, grantorScope: root, capabilities: [CapB] as const, rationale: "legit delegate B" },
       audit,
     )

@@ -127,6 +127,28 @@ this package follows [Semantic Versioning](https://semver.org).
   `makeEd25519VerifierLive` accept Ed25519 keys only, the signer checks its private and public
   keys are a pair, and `publicKeyHexFromPem` and both factories refuse a PRIVATE key PEM in a
   public slot. Before this a mismatched pair signed a store no pin could verify.
+- **Every object-taking export now reads each field of its argument once, and a test holds it
+  there** (the 2026-10-13 rail audit). The mandate CRITICAL above was one function family doing
+  the opposite; a harness now wraps every argument bag, nested bag, record, options bag and
+  signer config in a Proxy that throws on the second read of any key, and requires the same
+  verdict as on a plain object. It caught two more: `verifyAuditChain` read
+  `opts.trustedSignerPublicKeyHex` inside its record loop, once per record, so a getter could pin
+  a different key for each record and a chain signed by two keys verified (`verifySignedChain`
+  already read it once); and `ReceiptLog.append` spread the entry twice, once into the bytes it
+  hashed and once into the receipt it committed, so a getter on the entry could leave the log
+  holding a receipt its own hash did not cover. Both read once now. The three declassifiers also
+  read their `Sourced` arguments more than once and hand them to the ascent; a `Sourced` is frozen
+  and cannot carry a getter, so nothing a caller could build reached that, and they now snapshot
+  `value`, `tier` and `provenance` at the top so the rule holds for every export without an
+  exception. `AGENTS.md` § Non-negotiables states the rule, and a new export that takes an object
+  is added to `test/intake-poison.test.ts` in the same commit.
+- **The sink no longer swallows a host's unhandled-rejection crash.** The `errored` receipt for an
+  async action (above) was attached as a rejection handler on the host's own promise, and the host
+  got that promise back unchanged. Attaching a handler marks a promise handled, so a host that
+  forgot its own catch lost Node's crash: the action failed, the log said so, and the process
+  carried on with nobody told. The sink now returns a wrapped promise that writes the receipt and
+  re-raises the same error. A host that handles `result` sees exactly what it saw before; a host
+  that ignores it crashes, as Node intends. See *Changed* for the one visible difference.
 
 ### Added
 
@@ -219,11 +241,53 @@ this package follows [Semantic Versioning](https://semver.org).
 - Both Ed25519 factories and `publicKeyHexFromPem` throw at construction on key material they
   used to accept silently (see Security). `makeInMemorySignerLive` throws on a marker that is a
   real key.
+- **Breaking:** for an async or thenable `execute()`, `SinkResult.result` is a new `Promise` that
+  settles exactly as yours does — resolving to the same value or rejecting with the same error —
+  but it is **not the same object** your `execute()` returned, and a non-Promise thenable comes
+  back as a real `Promise`. `await`, `.then` and `.catch` behave as before; an identity comparison
+  against your own promise will not. This is what lets the sink re-raise instead of swallowing
+  (see *Security*). A synchronous `execute()` is returned untouched.
+- **Breaking: every receipt hash changes. A receipt log written by 0.3.0 does not verify under
+  0.4.0.** The interior hash (`Receipt.hash`, and so every `prevHash` after it) is now computed
+  over canonical JSON — keys sorted at every depth — through the same `canonicalJSON` the
+  signature and the wrapper link already used. It was `JSON.stringify` of a hand-ordered object,
+  which pinned the seven top-level keys and left the `args` tree underneath in insertion order, so
+  an honest exported artifact run through `jq -S`, a sorted-map round trip or a pretty-printer
+  reported `hash-mismatch` with every value intact; `SECURITY.md` carried that as an honest limit
+  and now states the opposite. No public API changes, and a chain written and verified by one
+  version is unaffected. Only a log that crosses the version line fails: `verifyChain()` and
+  `verifySignedChain` recompute each hash, and the recomputation of a 0.3.0 receipt no longer
+  matches the hash it carries. Anchor a 0.3.0 chain's head before upgrading if you need to prove
+  it later, and start a new log under 0.4.0. `canonicalJSON` and `sha256Hex` moved to
+  `src/canon.ts`, a leaf module every subpath imports; the exported functions are the same
+  objects as before. `docs/adr/0002-receipt-interior-hash-is-canonical.md` records the decision.
+
+### Removed
+
+- **`issueMandate` and `issueRootMandate` are gone.** This supersedes the Deprecated entry below,
+  from earlier in this same release: they never shipped deprecated, they ship removed. Both stamped
+  `"organization"` on every scope they minted, so an organization's child claimed to be an
+  organization, and `issueMandate` ignored the grantor's tier until a runtime check was bolted on.
+  Migrate `issueRootMandate` → `issueOrgMandate` (same arguments) and `issueMandate` →
+  `issueProjectMandate` (same arguments; the grantor must be an org scope) or `issueAgentMandate`
+  (the grantor must be a project scope). One consequence for error handling: a
+  `TierLadderViolation` with `requestedTier: "organization"` can no longer be raised, because only
+  `issueMandate` produced it. The other three ladder refusals (agent → project, project → project,
+  agent → agent, org → agent) are unchanged and now each pinned by name in the tests.
+- **The `asserted` tier is gone.** `TIERS` is `["untrusted", "corroborated", "verified"]` and the
+  `Tier` type names those three. The spec's fourth rung was documented and never produced: no
+  factory and no declassifier emitted it, so a sink declaring `requires: { x: "asserted" }` could
+  never be satisfied, and `SECURITY.md` already said to treat the ladder as three. **Breaking
+  (types):** `"asserted"` no longer type-checks as a `Tier`; at runtime `makeSink` throws
+  `TypeError` at construction for a `requires` entry of `"asserted"`, as it does for any string
+  outside the lattice, and `minTier` floors a combination containing it to `untrusted`. Receipts
+  are unaffected: no receipt ever carried the tier.
 
 ### Deprecated
 
 - `issueMandate` and `issueRootMandate`. Use `issueOrgMandate`, then `issueProjectMandate` and
-  `issueAgentMandate`. They will be removed in a future release.
+  `issueAgentMandate`. They will be removed in a future release. *(Superseded above: removed in this
+  release.)*
 
 ## [0.3.0] — first public release
 
