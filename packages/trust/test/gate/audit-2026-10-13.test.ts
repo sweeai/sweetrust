@@ -14,7 +14,7 @@
 // ============================================================================
 
 import { describe, expect, it } from "vitest"
-import { Sourced, corroborate, humanConfirm } from "../../src/gate/trust.js"
+import { Sourced, corroborate, humanConfirm, makeSink, ReceiptLog } from "../../src/gate/trust.js"
 
 // ── #1 HIGH — sealAncestors' forEach leaked the raw Set ──────────────────────
 // ADVERTISED (sealAncestors): "Seal a Set so the mutators throw while reads
@@ -152,5 +152,47 @@ describe("#14 — every UpgradeEvent on a chain is frozen", () => {
     if (!h.ok) return
     expect(h.value.provenance.chain).toHaveLength(2)
     for (const ev of h.value.provenance.chain) expect(Object.isFrozen(ev)).toBe(true)
+  })
+})
+
+// ── #13 LOW — a null confidence made describe() throw, before any receipt ────
+// `confidence` is typed `number | undefined`, but a value rehydrated from JSON
+// (or any JS caller) hands `null`. `null !== undefined` is true, so describe()
+// called `null.toFixed(2)` — and describe() runs inside the enforce sink's
+// declared loop, BEFORE the receipt is written. The sink crashed with no
+// evidence of the call; humanConfirm crashed building its question.
+describe("#13 — describe() tolerates a non-number confidence", () => {
+  const nullConf = () => Sourced.fromLLM("attacker@evil.test", "ExtractPayee", [], null as never)
+
+  it("describe() renders without the confidence instead of throwing", () => {
+    expect(() => nullConf().describe()).not.toThrow()
+    expect(nullConf().describe()).toContain("UNTRUSTED")
+    expect(nullConf().describe()).not.toContain("conf")
+  })
+
+  it("an enforce sink refuses it WITH a receipt rather than crashing before one", () => {
+    const log = new ReceiptLog()
+    let ran = 0
+    const pay = makeSink<{ to: Sourced<string> }, string>({
+      name: "pay",
+      requires: { to: "verified" },
+      mode: "enforce",
+      log,
+      execute: () => {
+        ran++
+        return "sent"
+      },
+    })
+    const r = pay({ to: nullConf() })
+    expect(r.ok).toBe(false)
+    expect(ran).toBe(0)
+    expect(log.all()).toHaveLength(1)
+    expect(log.all()[0]!.decision).toBe("refused")
+    expect(log.verifyChain()).toBe(true)
+  })
+
+  it("humanConfirm returns a verdict for it", () => {
+    expect(() => humanConfirm(nullConf(), () => false)).not.toThrow()
+    expect(humanConfirm(nullConf(), () => false).ok).toBe(false)
   })
 })

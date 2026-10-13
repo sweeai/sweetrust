@@ -293,7 +293,12 @@ export class Sourced<T> {
   /** One-line provenance rendering — what the human sees at a refusal. */
   describe(): string {
     const hops = this.provenance.chain.map((u) => `${u.declassifier}→${u.to}`).join(", ")
-    const conf = this.provenance.confidence !== undefined ? `; conf ${this.provenance.confidence.toFixed(2)}` : ""
+    // `typeof === "number"`, not `!== undefined`: a value rehydrated from JSON
+    // carries `null`, and `null.toFixed` threw here — inside the enforce sink's
+    // declared loop, before any receipt (the 2026-10-13 gate audit). Anything
+    // that is not a number renders as "not measured".
+    const confidence = this.provenance.confidence
+    const conf = typeof confidence === "number" ? `; conf ${confidence.toFixed(2)}` : ""
     return `${this.tier.toUpperCase()} (origin: ${this.provenance.origin}${hops ? `; upgrades: ${hops}` : ""}${conf})`
   }
 }
