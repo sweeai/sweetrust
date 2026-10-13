@@ -64,3 +64,58 @@ describe("#1 — forEach's third argument is the sealed view, not the raw Set", 
     for (const [k, v] of seen) expect(k).toBe(v)
   })
 })
+
+// ── #19 DOC/HARDENING — "module-private constructor" held only at compile time ─
+// ADVERTISED (AGENTS.md, README): "the Sourced constructor and ascend are
+// module-private; the three declassifiers are the only doors."
+//
+// ATTACK: `private` is erased. From JavaScript, `new Sourced(v, "verified",
+// prov)` and `class Evil extends Sourced` both minted values that carried the
+// `#brand` and cleared an enforce sink; `Sourced.is` was reassignable. The
+// constructor now demands a module-private token, and the class and its
+// prototype are frozen. The in-process honest limit (an importer can still call
+// `fromAuthority("anything")`) stands — this closes the door that bypassed even
+// that labelled front door.
+describe("#19 — the constructor is private at RUNTIME, not only in the types", () => {
+  type AnyCtor = new (...a: unknown[]) => Sourced<unknown>
+  const forgedProvenance = () => ({ origin: "channel:email-inbound", ancestors: new Set<string>(), chain: [] })
+
+  it("new Sourced(…) from JavaScript throws TypeError instead of minting", () => {
+    const Ctor = Sourced as unknown as AnyCtor
+    expect(() => new Ctor("attacker@evil.test", "verified", forgedProvenance())).toThrow(TypeError)
+    // The positional guess an attacker makes after reading the .d.mts.
+    expect(() => new Ctor(undefined, "attacker@evil.test", "verified", forgedProvenance())).toThrow(TypeError)
+    expect(() => new Ctor(Symbol("guess"), "attacker@evil.test", "verified", forgedProvenance())).toThrow(TypeError)
+  })
+
+  it("a subclass cannot reach super() either", () => {
+    const Base = Sourced as unknown as AnyCtor
+    class Evil extends Base {
+      constructor() {
+        super("x", "verified", forgedProvenance())
+      }
+    }
+    expect(() => new Evil()).toThrow(TypeError)
+  })
+
+  it("the class and its prototype are frozen: Sourced.is and describe cannot be swapped", () => {
+    expect(Object.isFrozen(Sourced)).toBe(true)
+    expect(Object.isFrozen(Sourced.prototype)).toBe(true)
+    const original = Sourced.is
+    expect(() => {
+      ;(Sourced as unknown as { is: unknown }).is = () => true
+    }).toThrow(TypeError)
+    expect(Sourced.is).toBe(original)
+    expect(() => {
+      ;(Sourced.prototype as unknown as { describe: unknown }).describe = () => "VERIFIED (forged)"
+    }).toThrow(TypeError)
+  })
+
+  it("CONTROL: the three factories still construct, and the brand still backs Sourced.is", () => {
+    const c = Sourced.fromChannel("x", "email")
+    const l = Sourced.fromLLM("x", "Fn", [c], 0.5)
+    const a = Sourced.fromAuthority("x", "reg")
+    for (const v of [c, l, a]) expect(Sourced.is(v)).toBe(true)
+    expect([c.tier, l.tier, a.tier]).toEqual(["untrusted", "untrusted", "verified"])
+  })
+})

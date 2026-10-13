@@ -85,6 +85,17 @@ export interface Provenance {
 let construct: <T>(value: T, tier: Tier, provenance: Provenance) => Sourced<T>
 
 /**
+ * The construction token. `private constructor` is a compile-time wall only:
+ * TypeScript erases it, so from JavaScript `new Sourced(v, "verified", prov)`
+ * and `class Evil extends Sourced` both minted branded values that cleared an
+ * `enforce` sink (the 2026-10-13 gate audit). The constructor now demands this
+ * symbol as its first argument and throws without it. It never leaves this
+ * module, and the shipped `.d.mts` emits `private constructor();` with no
+ * parameters, so nothing about it is visible to an importer.
+ */
+const CONSTRUCT = Symbol("sweetrust/gate: Sourced may only be constructed inside trust.ts")
+
+/**
  * Seal a Set so the mutators throw while reads stay ordinary.
  *
  * Why this exists (adversarial pass A1, 2026-07-25). The constructor used to
@@ -193,11 +204,20 @@ export class Sourced<T> {
     return typeof x === "object" && x !== null && #brand in x
   }
 
-  private constructor(
-    readonly value: T,
-    readonly tier: Tier,
-    provenance: Provenance,
-  ) {
+  readonly value: T
+  readonly tier: Tier
+
+  private constructor(token: typeof CONSTRUCT, value: T, tier: Tier, provenance: Provenance) {
+    // The runtime half of "module-private" — see CONSTRUCT. Checked before any
+    // field is assigned, so a caller without the token gets a TypeError and no
+    // object.
+    if (token !== CONSTRUCT) {
+      throw new TypeError(
+        "Sourced cannot be constructed directly — use Sourced.fromChannel, Sourced.fromLLM, Sourced.fromAuthority, or a declassifier",
+      )
+    }
+    this.value = value
+    this.tier = tier
     // Runtime immutability, not just compile-time `readonly` (Session-003 C6):
     // in strict mode, reassigning tier/provenance on a frozen instance throws.
     // `ancestors` is sealed rather than merely frozen — see sealAncestors.
@@ -210,12 +230,12 @@ export class Sourced<T> {
   }
 
   static {
-    construct = (value, tier, provenance) => new Sourced(value, tier, provenance)
+    construct = (value, tier, provenance) => new Sourced(CONSTRUCT, value, tier, provenance)
   }
 
   /** External channel input (email body, webhook, scraped page): Untrusted. */
   static fromChannel<T>(value: T, channel: string): Sourced<T> {
-    return new Sourced(value, "untrusted", {
+    return new Sourced(CONSTRUCT, value, "untrusted", {
       origin: `channel:${channel}`,
       ancestors: new Set([`channel:${channel}`]),
       chain: [],
@@ -237,7 +257,7 @@ export class Sourced<T> {
     for (const input of inputs) for (const a of input.provenance.ancestors) ancestors.add(a)
     // confidence is the extractor's self-report; it rides along but does NOT
     // affect tier (Rule 2 — the value is Untrusted no matter how sure the model).
-    return new Sourced(value, "untrusted", { origin: `llm:${fn}`, ancestors, chain: [], confidence })
+    return new Sourced(CONSTRUCT, value, "untrusted", { origin: `llm:${fn}`, ancestors, chain: [], confidence })
   }
 
   /**
@@ -258,7 +278,7 @@ export class Sourced<T> {
    * authority was present; that is the four-property discriminator, in code.
    */
   static fromAuthority<T>(value: T, authority: string): Sourced<T> {
-    return new Sourced(value, "verified", {
+    return new Sourced(CONSTRUCT, value, "verified", {
       origin: `authority:${authority}`,
       ancestors: new Set([`authority:${authority}`]),
       chain: [],
@@ -272,6 +292,12 @@ export class Sourced<T> {
     return `${this.tier.toUpperCase()} (origin: ${this.provenance.origin}${hops ? `; upgrades: ${hops}` : ""}${conf})`
   }
 }
+
+// The class object and its prototype are frozen so that `Sourced.is` and
+// `describe` cannot be swapped by anything holding the class (the 2026-10-13
+// gate audit). Private fields are not properties, so `#brand` is unaffected.
+Object.freeze(Sourced)
+Object.freeze(Sourced.prototype)
 
 // ── Tier ascent (module-private — Rule 3 made structural) ───────────────────
 // Session-003 C6 (Adversary): ascent MUST NOT be reachable from outside this

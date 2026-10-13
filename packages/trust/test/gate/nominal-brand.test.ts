@@ -94,12 +94,20 @@ describe("runtime nominality — the declared path", () => {
     // `instanceof Sourced === true`. If someone "simplifies" the guard back to
     // instanceof, this test — and only this test — catches it.
     const graft = Object.create(Sourced.prototype) as Sourced<string>
-    Object.assign(graft, {
-      value: "attacker@evil.test",
-      tier: "verified",
-      provenance: forgedProvenance,
-      describe: () => "verified via payee-registry",
-    })
+    // `defineProperties`, not `Object.assign`: since the 2026-10-13 gate audit
+    // `Sourced.prototype` is frozen, and assigning `describe` THROUGH a frozen
+    // prototype throws in strict mode. An attacker grafting onto a frozen
+    // prototype defines own properties instead, so this is the sharper graft.
+    // The assertions below are unchanged.
+    Object.defineProperties(
+      graft,
+      Object.getOwnPropertyDescriptors({
+        value: "attacker@evil.test",
+        tier: "verified",
+        provenance: forgedProvenance,
+        describe: () => "verified via payee-registry",
+      }),
+    )
     expect(graft instanceof Sourced).toBe(true) // pins WHY instanceof is insufficient
     expect(Sourced.is(graft)).toBe(false)
 
