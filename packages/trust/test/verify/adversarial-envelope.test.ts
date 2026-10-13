@@ -15,7 +15,7 @@
 // ============================================================================
 
 import { describe, expect, it } from "vitest"
-import { makeSink, Sourced } from "../../src/gate/index.ts"
+import { makeSink, Sourced, receiptBody } from "../../src/gate/index.ts"
 import {
   SignedReceiptLog,
   canonicalJSON,
@@ -186,5 +186,78 @@ describe("finding 2 — the pin gate passes when the pin and the record's key ar
 
   it("CONTROL: a genuine record against its genuine pin still verifies", () => {
     expect(verdict(session(1).records)).toMatchObject({ valid: true, reason: "ok" })
+  })
+})
+
+describe("finding 5 — each field was read several times, and a getter can answer differently each time", () => {
+  // Precondition: the attacker supplies a LIVE object, never reachable through
+  // parseJSONL. In-process callers do hand the verifier live objects, so the
+  // verifier reads every field exactly once and judges only what it read.
+  const attacker = generateSigningKeypair()
+  const attackerPin = publicKeyHexFromPem(attacker.publicKeyPem)
+  const attackerSigned = () => {
+    const log = new SignedReceiptLog(makeEd25519ReceiptSigner(attacker))
+    log.append({ at: "2026-10-13T00:00:00.000Z", sink: "pay", decision: "executed", args: {} })
+    return parseJSONL(log.exportJSONL())[0]!
+  }
+  /** `base` with `field` replaced by a getter that answers `answers[n]` on its n-th read (the last answer repeats). */
+  const withGetter = (base: object, field: string, answers: ReadonlyArray<unknown>) => {
+    let reads = 0
+    const rec: Record<string, unknown> = { ...base }
+    Object.defineProperty(rec, field, {
+      enumerable: true,
+      get() {
+        const v = answers[Math.min(reads, answers.length - 1)]
+        reads++
+        return v
+      },
+    })
+    return { rec, reads: () => reads }
+  }
+
+  it("ATTACK: a key getter that answers the pin with the operator's key and the crypto with the attacker's does not verify", () => {
+    const { rec } = withGetter(attackerSigned(), "signerPublicKeyHex", [trusted, attackerPin])
+    const report = verdict([rec])
+    expect(report.valid).toBe(false)
+    expect(report.reason).toBe("signature-mismatch")
+  })
+
+  it("ATTACK: a payload getter that swaps in a forged payload after the signature check cannot satisfy a seal over the forgery", () => {
+    const honest = session(1).records[0]!
+    const P1 = honest.payload
+    const P2 = loose([P1])[0]! as unknown as typeof P1
+    ;(P2.args as Record<string, { value: unknown }>)["to"]!.value = "acct-EVIL"
+    ;(P2 as { hash: string }).hash = sha256Hex(receiptBody(P2))
+    for (const kind of ["anchor", "receipt"] as const) {
+      // A fresh getter per kind: the record's read counter is the attack.
+      const { rec } = withGetter(honest, "payload", [P1, P2])
+      const report = verdict([rec], { trustedSignerPublicKeyHex: trusted, anchor: { kind, head: P2.hash } })
+      expect(report, kind).toMatchObject({ valid: false, reason: "anchor-not-found", anchoredThrough: null })
+    }
+  })
+
+  it("ATTACK: a getter that throws is malformed-record, not an exception out of the verifier", () => {
+    const base = attackerSigned()
+    const rec: Record<string, unknown> = { ...base }
+    Object.defineProperty(rec, "payload", { enumerable: true, get() { throw new Error("boom") } })
+    const report = verdict([rec], { trustedSignerPublicKeyHex: attackerPin })
+    expect(report).toMatchObject({ valid: false, firstInvalidIndex: 0, reason: "malformed-record" })
+    expect(report.detail).toContain("boom")
+  })
+
+  it("every envelope field is read exactly once per record, by both verifiers", () => {
+    const honest = session(1).records[0]!
+    const fields = ["payload", "signature", "signerPublicKeyHex", "signedAt", "previousHash", "domain"] as const
+    for (const field of fields) {
+      const { rec, reads } = withGetter(honest, field, [honest[field]])
+      expect(verdict([rec]).valid, `verifySignedChain, ${field}`).toBe(true)
+      expect(reads(), `verifySignedChain read ${field}`).toBe(1)
+    }
+    const audit = auditChain()[0]!
+    for (const field of fields) {
+      const { rec, reads } = withGetter(audit, field, [audit[field]])
+      expect(auditVerdict([rec]).valid, `verifyAuditChain, ${field}`).toBe(true)
+      expect(reads(), `verifyAuditChain read ${field}`).toBe(1)
+    }
   })
 })

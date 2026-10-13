@@ -205,8 +205,11 @@ export const makeInMemorySignerLive = (
     }
   },
   verify: <P>(signed: Signed<P>): boolean => {
-    const expected = "inmem-" + sha256Hex(signedPreimage(signed))
-    return signed.signature === expected
+    // Each field is read once (the 2026-10-13 verify audit): the preimage is
+    // built from these locals, never from a second read of a live object.
+    const { signature, payload, previousHash, signedAt, domain } = signed
+    const expected = "inmem-" + sha256Hex(signedPreimage({ domain, payload, previousHash, signedAt }))
+    return signature === expected
   },
 })
 
@@ -302,13 +305,16 @@ export const makeEd25519SignerLive = (
       // signer's own key. This is what enables verifier-only consumers and
       // future key rotation. (Authorship — i.e. that the record was signed by
       // the EXPECTED operator key — is the caller's pin; see DAN-642.)
+      // Each field is read once (the 2026-10-13 verify audit): a getter cannot
+      // answer the key import with one value and the preimage with another.
+      const { signature, signerPublicKeyHex, payload, previousHash, signedAt, domain } = signed
       const recordPublicKey = createPublicKey({
-        key: Buffer.from(signed.signerPublicKeyHex, "hex"),
+        key: Buffer.from(signerPublicKeyHex, "hex"),
         format: "der",
         type: "spki",
       })
-      const signatureBuffer = Buffer.from(signed.signature, "hex")
-      return edVerify(null, Buffer.from(signedPreimage(signed)), recordPublicKey, signatureBuffer)
+      const signatureBuffer = Buffer.from(signature, "hex")
+      return edVerify(null, Buffer.from(signedPreimage({ domain, payload, previousHash, signedAt })), recordPublicKey, signatureBuffer)
     },
   }
 }
@@ -358,13 +364,15 @@ export const makeEd25519VerifierLive = (
       // public key; the operator decides which keys to trust at the
       // application layer (allow-list via verifyAuditChain caller, future
       // v0.2.1 work per spec I11).
+      // Each field is read once (the 2026-10-13 verify audit).
+      const { signature, signerPublicKeyHex, payload, previousHash, signedAt, domain } = signed
       const recordPublicKey = createPublicKey({
-        key: Buffer.from(signed.signerPublicKeyHex, "hex"),
+        key: Buffer.from(signerPublicKeyHex, "hex"),
         format: "der",
         type: "spki",
       })
-      const signatureBuffer = Buffer.from(signed.signature, "hex")
-      return edVerify(null, Buffer.from(signedPreimage(signed)), recordPublicKey, signatureBuffer)
+      const signatureBuffer = Buffer.from(signature, "hex")
+      return edVerify(null, Buffer.from(signedPreimage({ domain, payload, previousHash, signedAt })), recordPublicKey, signatureBuffer)
     },
   }
 }
@@ -467,7 +475,21 @@ export const verifyAuditChain = (
     if (typeof candidate !== "object" || candidate === null) {
       return malformed(i, `record ${i} is ${candidate === null ? "null" : `a ${typeof candidate}`}, not a signed record`)
     }
-    const record = candidate as SignedMandateAuditEvent
+    // Every field is read ONCE, here, and only these locals are judged, by this
+    // function and by the signer.verify() it hands the snapshot to. A getter or
+    // Proxy used to answer the pin check with one key and the signature with
+    // another, and a getter that threw on a later read escaped as an exception
+    // (the 2026-10-13 verify audit). Object.keys runs in the same try, so a
+    // hostile ownKeys trap is a verdict too.
+    let record: SignedMandateAuditEvent
+    let keys: ReadonlyArray<string>
+    try {
+      const { payload, signature, signerPublicKeyHex, signedAt, previousHash, domain } = candidate as SignedMandateAuditEvent
+      keys = Object.keys(candidate)
+      record = { payload, signature, signerPublicKeyHex, signedAt, previousHash, domain }
+    } catch (err) {
+      return malformed(i, `record ${i} could not be read`, err)
+    }
 
     // Empty / missing signature
     if (!record.signature || record.signature.length === 0) {
@@ -495,14 +517,8 @@ export const verifyAuditChain = (
       }
     }
 
-    // Envelope shape, before any byte of it is trusted. Object.keys itself can
-    // throw (a Proxy with a hostile ownKeys trap), and that too is a verdict.
-    let shape: string | null
-    try {
-      shape = envelopeKeyProblem(Object.keys(record))
-    } catch (err) {
-      return malformed(i, `record ${i} could not be read`, err)
-    }
+    // Envelope shape, before any byte of it is trusted.
+    const shape = envelopeKeyProblem(keys)
     if (shape !== null) return malformed(i, `record ${i} ${shape}`)
 
     // Signature verification (covers domain + payload + previousHash +

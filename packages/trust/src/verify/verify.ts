@@ -306,12 +306,32 @@ export function verifySignedChain(
 
   let prevInteriorHash = "genesis"
   let prevWrapperHash: string | null = null
+  // The interior head of every VERIFIED record, taken from its snapshot. The
+  // anchor checks below read these, never the live records again: a payload
+  // getter that swapped in a forgery after the signature check used to satisfy
+  // a seal over the forgery (the 2026-10-13 verify audit).
+  const verifiedHeads: Array<{ readonly hash: string; readonly seq: number }> = []
   for (let i = 0; i < records.length; i++) {
     const candidate: unknown = records[i]
     if (typeof candidate !== "object" || candidate === null) {
       return malformed(i, `record ${i} is not a signed record (got ${typeName(candidate)})`)
     }
-    const r = candidate as SignedReceipt
+    // Every field is read ONCE, here, and only these locals are judged. A
+    // getter or Proxy used to answer the pin check with one key and the
+    // signature with another, or swap the payload after it was verified, and a
+    // getter that threw on a later read escaped as an exception (the
+    // 2026-10-13 verify audit). `r` is a plain snapshot; `keys` is the own-key
+    // set the envelope check judges. Object.keys runs in the same try, so a
+    // hostile ownKeys trap is a verdict too.
+    let r: SignedReceipt
+    let keys: ReadonlyArray<string>
+    try {
+      const { payload, signature, signerPublicKeyHex, signedAt, previousHash, domain } = candidate as SignedReceipt
+      keys = Object.keys(candidate)
+      r = { payload, signature, signerPublicKeyHex, signedAt, previousHash, domain }
+    } catch (err) {
+      return malformed(i, `record ${i} could not be read`, err)
+    }
     if (!r.signature || r.signature.length === 0) {
       return { valid: false, firstInvalidIndex: i, reason: "missing-signature", anchoredThrough: null }
     }
@@ -321,14 +341,8 @@ export function verifySignedChain(
         detail: `record ${i} signed by ${preview(r.signerPublicKeyHex)}, expected ${preview(pin)}`,
       }
     }
-    // Envelope shape, before any byte of it is trusted. Object.keys itself can
-    // throw (a Proxy with a hostile ownKeys trap), and that too is a verdict.
-    let shape: string | null
-    try {
-      shape = envelopeKeyProblem(Object.keys(r))
-    } catch (err) {
-      return malformed(i, `record ${i} could not be read`, err)
-    }
+    // Envelope shape, before any byte of it is trusted.
+    const shape = envelopeKeyProblem(keys)
     if (shape !== null) return malformed(i, `record ${i} ${shape}`)
     // This function is what an auditor points at a file from an UNTRUSTED
     // party, so every malformed input has to come back as a verdict. It used to
@@ -373,11 +387,14 @@ export function verifySignedChain(
       return { valid: false, firstInvalidIndex: i, reason: "hash-chain-broken", anchoredThrough: null }
     }
     prevInteriorHash = payload.hash
-    // The next wrapper link hashes the WHOLE record, which includes fields
-    // outside the signed preimage. A field canonicalJSON cannot encode (a
-    // BigInt, a cycle) leaves the signature valid and makes this record
-    // unlinkable, so it is malformed HERE, at the record that carries it.
-    // verifyAuditChain learned this in DAN-1159 item 3; it never came back here.
+    verifiedHeads.push({ hash: payload.hash, seq: payload.seq })
+    // The next wrapper link hashes the WHOLE record. The snapshot IS the whole
+    // record once the envelope check passed: the same six keys, the same
+    // values, and canonicalJSON sorts, so the bytes match what the writer
+    // hashed. A value canonicalJSON cannot encode (a BigInt, a cycle) leaves
+    // the signature valid and makes this record unlinkable, so it is malformed
+    // HERE, at the record that carries it. verifyAuditChain learned this in
+    // DAN-1159 item 3; it never came back here.
     try {
       prevWrapperHash = sha256Hex(canonicalJSON(r))
     } catch (err) {
@@ -406,25 +423,25 @@ export function verifySignedChain(
       // SEAL: the anchored head must BE the head of the presented chain. Head-
       // equality — not membership — is what catches tail truncation, since a
       // truncated chain ends on a different (earlier) record.
-      const last = records.at(-1)
-      if (!last || last.payload.hash !== head) {
+      const last = verifiedHeads.at(-1)
+      if (!last || last.hash !== head) {
         return {
           valid: false, firstInvalidIndex: null, reason: "anchor-not-found", anchoredThrough: null,
           detail: `sealing anchor ${preview(head)} is not the head of the presented chain — records after it were removed, or the wrong chain was presented`,
         }
       }
-      return { valid: true, firstInvalidIndex: null, reason: "ok", anchoredThrough: last.payload.seq }
+      return { valid: true, firstInvalidIndex: null, reason: "ok", anchoredThrough: last.seq }
     }
     // RECEIPT: a per-decision head. It proves the chain THROUGH its own seq only —
     // membership, never full-chain. Records after it may still be truncated.
-    const hit = records.findIndex((r) => r.payload.hash === head)
+    const hit = verifiedHeads.findIndex((h) => h.hash === head)
     if (hit === -1) {
       return {
         valid: false, firstInvalidIndex: null, reason: "anchor-not-found", anchoredThrough: null,
         detail: `receipt memo ${preview(head)} does not appear in the presented chain — the wrong chain was presented, or records up to it were removed`,
       }
     }
-    return { valid: true, firstInvalidIndex: null, reason: "ok", anchoredThrough: records[hit]!.payload.seq }
+    return { valid: true, firstInvalidIndex: null, reason: "ok", anchoredThrough: verifiedHeads[hit]!.seq }
   }
 
   return { valid: true, firstInvalidIndex: null, reason: "ok", anchoredThrough: null }

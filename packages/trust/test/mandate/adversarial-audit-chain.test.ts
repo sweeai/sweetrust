@@ -247,7 +247,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { makeJsonlSignedAuditLive } from "../../src/mandate/audit.ts"
-import { makeInMemorySignerLive, signedPreimage } from "../../src/mandate/index.ts"
+import { makeEd25519VerifierLive, makeInMemorySignerLive, signedPreimage } from "../../src/mandate/index.ts"
 
 describe("2026-10-13 verify audit, finding 1 — a stray key on the head record is refused, and the store inherits it", () => {
   // The durable store re-verifies the whole file on every read and then signs
@@ -346,5 +346,65 @@ describe("2026-10-13 verify audit, finding 2 — a missing pin matches a missing
     const signer = makeInMemorySignerLive()
     expect(verifyAuditChain([forgedKeylessRevoke()] as unknown as SignedMandateAuditEvent[], signer, { trustedSignerPublicKeyHex: signer.publicKeyHex }).reason).toBe("untrusted-signer")
     expect(check(buildChain(signer, EVENTS), signer)).toMatchObject({ valid: true, reason: "ok" })
+  })
+})
+
+describe("2026-10-13 verify audit, finding 5 — a getter record is read once, by the chain verifier and by signer.verify()", () => {
+  const withGetter = (base: object, field: string, answers: ReadonlyArray<unknown>) => {
+    let reads = 0
+    const rec: Record<string, unknown> = { ...base }
+    Object.defineProperty(rec, field, {
+      enumerable: true,
+      get() {
+        const v = answers[Math.min(reads, answers.length - 1)]
+        reads++
+        return v
+      },
+    })
+    return { rec, reads: () => reads }
+  }
+  const asLog = (r: Record<string, unknown>) => [r] as unknown as SignedMandateAuditEvent[]
+
+  test("ATTACK: an attacker-signed revoke whose key getter answers the gate with the operator's key is NOT attributed to the operator", () => {
+    const { publicKey, privateKey } = generateKeyPairSync("ed25519")
+    const operatorPem = publicKey.export({ format: "pem", type: "spki" }) as string
+    void privateKey
+    const operator = makeEd25519VerifierLive({ publicKeyPem: operatorPem })
+    const attacker = ed25519Signer()
+    const signed = attacker.sign({ payload: EVENTS[1]!, previousHash: null, domain: MANDATE_AUDIT_DOMAIN })
+    const { rec } = withGetter(signed, "signerPublicKeyHex", [operator.publicKeyHex, attacker.publicKeyHex])
+    const report = verifyAuditChain(asLog(rec), operator, { trustedSignerPublicKeyHex: operator.publicKeyHex })
+    expect(report.valid).toBe(false)
+    expect(report.reason).toBe("signature-mismatch")
+  })
+
+  test("ATTACK: a getter that throws is malformed-record from verifyAuditChain, not an exception", () => {
+    const signer = ed25519Signer()
+    const [good] = buildChain(signer, EVENTS)
+    const rec: Record<string, unknown> = { ...good! }
+    Object.defineProperty(rec, "payload", { enumerable: true, get() { throw new Error("boom") } })
+    let report: ReturnType<typeof verifyAuditChain> | undefined
+    expect(() => { report = check(asLog(rec), signer) }).not.toThrow()
+    expect(report).toMatchObject({ valid: false, firstInvalidIndex: 0, reason: "malformed-record" })
+  })
+
+  test("signer.verify() reads each envelope field exactly once: Ed25519 signer, Ed25519 verifier, in-memory", () => {
+    const ed = ed25519Signer()
+    const { publicKey, privateKey } = generateKeyPairSync("ed25519")
+    void privateKey
+    const edVerifier = makeEd25519VerifierLive({ publicKeyPem: publicKey.export({ format: "pem", type: "spki" }) as string })
+    const inmem = makeInMemorySignerLive()
+    const fields = ["payload", "signature", "signerPublicKeyHex", "signedAt", "previousHash", "domain"] as const
+    for (const [label, signer] of [["Ed25519 signer", ed], ["Ed25519 verifier", edVerifier], ["in-memory", inmem]] as const) {
+      const signed = (label === "in-memory" ? inmem : ed).sign({ payload: EVENTS[0]!, previousHash: null, domain: MANDATE_AUDIT_DOMAIN })
+      for (const field of fields) {
+        const { rec, reads } = withGetter(signed, field, [signed[field]])
+        expect(signer.verify(rec as unknown as SignedMandateAuditEvent), `${label}: ${field}`).toBe(true)
+        // The in-memory signer never needs the record's key: its signature is
+        // a function of the other five fields alone. Zero reads there is the
+        // honest count, not a regression.
+        expect(reads(), `${label} read ${field}`).toBe(label === "in-memory" && field === "signerPublicKeyHex" ? 0 : 1)
+      }
+    }
   })
 })
