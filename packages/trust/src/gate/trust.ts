@@ -487,7 +487,8 @@ export function allowlisted<T>(
  * Agreement of two INDEPENDENT sources → Corroborated — never Verified
  * (Rule 3a: accumulation is not authority). Independence = disjoint
  * ancestry (Rule 3b): a value corroborated against something derived from
- * itself has learned nothing.
+ * itself has learned nothing. A claim already at or above corroborated is
+ * returned unchanged: accumulation never lowers a tier either.
  */
 export function corroborate<T>(
   claim: Sourced<T>,
@@ -519,6 +520,17 @@ export function corroborate<T>(
       ok: false,
       reason: `values disagree — claim ${show(claim.value)} (${claim.describe()}) vs reference ${show(reference.value)} (${reference.describe()})`,
     }
+  }
+  // Rule 3a cuts both ways: accumulation never raises a value PAST
+  // corroborated, and it never LOWERS one. This used to ascend unconditionally,
+  // so a verified claim checked against an agreeing untrusted reference came
+  // back "corroborated" with a from:verified→to:corroborated event on its
+  // chain — an email demoting an authority's record, recorded as an ascent
+  // (the 2026-10-13 gate audit). A claim already at or above corroborated has
+  // nothing to gain here and comes back as itself. The two checks above still
+  // ran: `ok` means the sources agree and are independent, whatever the tier.
+  if (meetsTier(claim.tier, "corroborated")) {
+    return { ok: true, value: claim }
   }
   const merged = new Set([...claim.provenance.ancestors, ...reference.provenance.ancestors])
   return {

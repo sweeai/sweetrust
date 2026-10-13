@@ -554,3 +554,65 @@ describe("#6 — the declassifiers return a verdict for a BigInt and blame the r
     }
   })
 })
+
+// ── #18 LOW — corroborate DEMOTED a verified claim to corroborated ───────────
+// ADVERTISED (Rule 3a): "accumulation never reaches Verified (authority acts
+// only)". The ceiling was enforced; the FLOOR was not. corroborate(verified
+// claim, untrusted reference) returned a value whose tier was "corroborated",
+// with an UpgradeEvent from:"verified" to:"corroborated" on its chain — an
+// untrusted email lowering an authority's record, recorded as an ascent.
+// Accumulation never lowers a tier and never raises one past corroborated: a
+// claim already at or above corroborated comes back unchanged.
+describe("#18 — corroborate never lowers a tier", () => {
+  const authority = () => Sourced.fromAuthority({ iban: "DE99" }, "payee-registry")
+  const email = () => Sourced.fromChannel({ iban: "DE99" }, "email")
+  const corroborated = () => {
+    const c = corroborate(email(), Sourced.fromChannel({ iban: "DE99" }, "webhook"))
+    if (!c.ok) throw new Error("fixture broke")
+    return c.value
+  }
+
+  it("a verified claim against an agreeing untrusted reference comes back as ITSELF, with no upgrade event", () => {
+    const claim = authority()
+    const r = corroborate(claim, email())
+    expect(r.ok).toBe(true)
+    if (r.ok) {
+      expect(r.value).toBe(claim)
+      expect(r.value.tier).toBe("verified")
+      expect(r.value.provenance.chain).toHaveLength(0)
+    }
+  })
+
+  it("an already-corroborated claim stays at corroborated, unchanged (Rule 3a ceiling)", () => {
+    const claim = corroborated()
+    const r = corroborate(claim, Sourced.fromChannel({ iban: "DE99" }, "sms"))
+    expect(r.ok).toBe(true)
+    if (r.ok) {
+      expect(r.value).toBe(claim)
+      expect(r.value.tier).toBe("corroborated")
+      expect(r.value.provenance.chain).toHaveLength(1)
+    }
+  })
+
+  it("disagreement and shared ancestry are still refusals, whatever the claim's tier", () => {
+    // `ok` means the two sources agree and are independent. A verified claim
+    // does not get a free `ok` from a reference that contradicts it — the
+    // caller learns that, and the claim object itself is untouched.
+    const d = corroborate(authority(), Sourced.fromChannel({ iban: "DE98" }, "email"))
+    expect(d.ok).toBe(false)
+    if (!d.ok) expect(d.reason).toContain("disagree")
+    const shared = corroborate(authority(), Sourced.fromLLM({ iban: "DE99" }, "Fn", [authority()]))
+    expect(shared.ok).toBe(false)
+    if (!shared.ok) expect(shared.reason).toContain("NOT independent")
+  })
+
+  it("CONTROL: an untrusted claim still ascends to corroborated with merged ancestry", () => {
+    const r = corroborate(email(), Sourced.fromChannel({ iban: "DE99" }, "webhook"))
+    expect(r.ok).toBe(true)
+    if (r.ok) {
+      expect(r.value.tier).toBe("corroborated")
+      expect(r.value.provenance.chain).toHaveLength(1)
+      expect(r.value.provenance.ancestors.has("channel:webhook")).toBe(true)
+    }
+  })
+})
