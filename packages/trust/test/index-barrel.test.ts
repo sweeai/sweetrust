@@ -24,7 +24,10 @@ import * as verify from "../src/verify/index.ts"
 
 // Re-exported from mandate by verify BY DESIGN. Present at the root exactly
 // once, sourced from mandate. If this list grows, the growth was deliberate.
-const INTENTIONAL_DUPLICATES = ["canonicalJSON", "sha256Hex"] as const
+// `signedPreimage` joined on 2026-10-13: a bring-your-own ReceiptSigner must
+// sign the exact bytes verifySignedChain checks, and that definition is
+// mandate's, so verify re-exports it rather than restating it.
+const INTENTIONAL_DUPLICATES = ["canonicalJSON", "sha256Hex", "signedPreimage"] as const
 
 const runtimeNames = (m: object) => Object.keys(m).sort()
 
@@ -57,6 +60,16 @@ describe("root barrel", () => {
         mandate[name as keyof typeof mandate],
       )
     }
+  })
+
+  it("exposes what a bring-your-own ReceiptSigner needs: the receipt domain tag and the preimage (2026-10-13 verify audit)", () => {
+    // ReceiptSigner is public, so a consumer can supply one, but until this
+    // test it could not import the domain tag its sign() must emit nor the
+    // preimage definition its signature must cover, from the subpath or the root.
+    expect(typeof verify.RECEIPT_DOMAIN).toBe("string")
+    expect(root.RECEIPT_DOMAIN).toBe(verify.RECEIPT_DOMAIN)
+    expect(verify.signedPreimage).toBe(mandate.signedPreimage)
+    expect(root.signedPreimage).toBe(mandate.signedPreimage)
   })
 
   it("has no undefined export — the signature of a silent star collision", () => {

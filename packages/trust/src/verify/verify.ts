@@ -41,8 +41,10 @@ import {
 } from "../mandate/index.ts"
 import { type Receipt, ReceiptLog, receiptBody } from "../gate/index.ts"
 
-// Re-exported so consumers of the receipt rail share ONE canonicalization.
-export { canonicalJSON, sha256Hex }
+// Re-exported so consumers of the receipt rail share ONE canonicalization, and
+// (since the 2026-10-13 verify audit) ONE preimage: a bring-your-own
+// ReceiptSigner must sign exactly the bytes verifySignedChain checks.
+export { canonicalJSON, sha256Hex, signedPreimage }
 
 /**
  * RECEIPT_DOMAIN — domain-separation tag folded into the signed preimage of
