@@ -739,3 +739,80 @@ describe("#15 — makeSink reads its spec by own key, once, at construction", ()
     expect(r.receipt.decision).toBe("refused")
   })
 })
+
+// ── #4 MEDIUM — a mode outside the ladder behaved as warn ───────────────────
+// ADVERTISED (Rule 5): the ladder is observe → warn → enforce, and `enforce`
+// refuses. The code tested `mode === "enforce"` and `mode === "observe"` and
+// let everything else fall through to the warn path. So "ENFORCE", "Enforce",
+// "enforced", "strict", "production", undefined and null all EXECUTED an
+// under-tier argument with a receipt that said "warned". The deployment that
+// hits this reads its mode from an environment variable. makeSink now throws
+// TypeError at construction for a mode outside the ladder, a log without
+// append(), or a `requires` tier outside the lattice — the sink never exists.
+describe("#4 — makeSink validates mode, log and requires at construction", () => {
+  const evil = () => Sourced.fromChannel("attacker@evil.test", "email-inbound")
+  const build = (over: Record<string, unknown>) => {
+    const log = new ReceiptLog()
+    let ran = 0
+    const spec = {
+      name: "pay",
+      requires: { to: "verified" },
+      mode: "enforce",
+      log,
+      execute: () => {
+        ran++
+        return "sent"
+      },
+      ...over,
+    }
+    return { make: () => makeSink<{ to: Sourced<string> }, string>(spec as never), log, ran: () => ran }
+  }
+
+  it.each(["ENFORCE", "Enforce", "enforced", "strict", "production", "", undefined, null, 1, {}])(
+    "mode %j is a TypeError at construction, so nothing can run under it",
+    (mode) => {
+      const { make, ran, log } = build({ mode })
+      expect(make).toThrow(TypeError)
+      expect(make).toThrow(/mode/)
+      expect(ran()).toBe(0)
+      expect(log.all()).toHaveLength(0)
+    },
+  )
+
+  it("a log without append() is a TypeError at construction", () => {
+    expect(build({ log: {} }).make).toThrow(/log/)
+    expect(build({ log: { append: "not a function" } }).make).toThrow(/log/)
+    expect(build({ log: undefined }).make).toThrow(/log/)
+  })
+
+  it.each(["god", "VERIFIED", "verified ", "constructor", "__proto__", "toString", "", 3, undefined])(
+    "a requires tier of %j is a TypeError at construction",
+    (tier) => {
+      expect(build({ requires: { to: tier } }).make).toThrow(TypeError)
+      expect(build({ requires: { to: tier } }).make).toThrow(/requires\.to/)
+    },
+  )
+
+  it("a missing mode is not rescued by a polluted Object.prototype.mode", () => {
+    ;(Object.prototype as Record<string, unknown>).mode = "observe"
+    try {
+      const { make } = build({})
+      delete (make as unknown as Record<string, unknown>).mode
+      const spec = { name: "pay", requires: { to: "verified" }, log: new ReceiptLog(), execute: () => "sent" }
+      expect(() => makeSink<{ to: Sourced<string> }, string>(spec as never)).toThrow(/mode/)
+    } finally {
+      delete (Object.prototype as Record<string, unknown>).mode
+    }
+  })
+
+  it("CONTROL: the three modes construct, and enforce still refuses the under-tier argument", () => {
+    for (const mode of ["observe", "warn", "enforce"] as const) {
+      const { make } = build({ mode })
+      expect(make).not.toThrow()
+    }
+    const { make, ran } = build({ mode: "enforce" })
+    const r = make()({ to: evil() })
+    expect(r.ok).toBe(false)
+    expect(ran()).toBe(0)
+  })
+})
