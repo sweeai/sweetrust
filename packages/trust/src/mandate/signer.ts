@@ -480,9 +480,14 @@ export const verifyAuditChain = (
 
     // Pinned-key check BEFORE signature verification (DAN-638/642). A record
     // signed by any key other than the pinned one is rejected regardless of
-    // whether its self-referential signature validates. A missing `opts` pins
-    // nothing, so nothing verifies: fail-closed, as a verdict (DAN-1159 item 5).
-    if (record.signerPublicKeyHex !== opts?.trustedSignerPublicKeyHex) {
+    // whether its self-referential signature validates. A pin that is not a
+    // string pins NOTHING, and the gate says so itself: the bare comparison let
+    // a record with no key match a missing pin (undefined === undefined), and
+    // under the in-memory signer, whose signature is a public function of the
+    // envelope, a keyless forged revoke came back valid:true (the 2026-10-13
+    // verify audit).
+    const pin: unknown = opts?.trustedSignerPublicKeyHex
+    if (typeof pin !== "string" || record.signerPublicKeyHex !== pin) {
       return {
         valid: false,
         firstInvalidIndex: i,

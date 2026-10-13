@@ -292,9 +292,12 @@ export function verifySignedChain(
     }
   }
 
-  // The pin is only ever COMPARED, never assumed to be a string. A missing or
-  // non-string pin matches no genuine record, so nothing verifies against it:
-  // fail-closed, and a verdict rather than a crash in the detail message.
+  // The pin is only ever COMPARED, never assumed to be a string, and a pin that
+  // is not a string pins NOTHING. The comparison alone was not enough: a record
+  // with no key matched a missing pin (undefined === undefined), and only
+  // createPublicKey(undefined) throwing downstream kept that forgery out, as
+  // malformed-record by accident (the 2026-10-13 verify audit). The gate below
+  // refuses a non-string pin on its own, as untrusted-signer.
   const pin: unknown = opts?.trustedSignerPublicKeyHex
   const malformed = (i: number, what: string, err?: unknown): VerifyReport => ({
     valid: false, firstInvalidIndex: i, reason: "malformed-record", anchoredThrough: null,
@@ -312,7 +315,7 @@ export function verifySignedChain(
     if (!r.signature || r.signature.length === 0) {
       return { valid: false, firstInvalidIndex: i, reason: "missing-signature", anchoredThrough: null }
     }
-    if (r.signerPublicKeyHex !== pin) {
+    if (typeof pin !== "string" || r.signerPublicKeyHex !== pin) {
       return {
         valid: false, firstInvalidIndex: i, reason: "untrusted-signer", anchoredThrough: null,
         detail: `record ${i} signed by ${preview(r.signerPublicKeyHex)}, expected ${preview(pin)}`,
