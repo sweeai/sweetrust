@@ -1047,3 +1047,106 @@ describe("#3 — execute() and the judge see the checked snapshot, never the cal
     expect(judgeProto).toBe(null)
   })
 })
+
+// ── #5 MEDIUM — an async execute that rejected was recorded as `executed` ────
+// ADVERTISED (makeSink): "Every decision, either way, lands in the receipt
+// log", and V5 (2026-07-25) added `errored` for an action that passed the walls
+// and then threw. That catch was SYNC-ONLY. `execute: async () => { throw }`
+// returns a rejected promise, which is a normal return value: the receipt said
+// `executed`, the promise rejected afterwards, and the log never heard. Every
+// real sink — an RPC, a transfer, a send — is async. The sink now notices a
+// thenable result and attaches a rejection handler that appends an `errored`
+// receipt; the `executed` receipt still PRECEDES the outcome (it cannot wait
+// for it), and the `errored` receipt TRAILS it. SECURITY.md § Honest limits
+// states that ordering. The host's own promise is returned unchanged, and the
+// host must still handle its rejection — the gate observes, it does not catch.
+describe("#5 — an async action that rejects leaves an `errored` receipt behind its `executed` one", () => {
+  const good = () => Sourced.fromAuthority("ACME", "reg")
+  const settle = async () => {
+    await new Promise((r) => setTimeout(r, 0))
+  }
+  const mk = (execute: () => unknown, judgment?: { provider: JudgmentProvider; floor: number }) => {
+    const log = new ReceiptLog()
+    const pay = makeSink<{ to: Sourced<string> }, unknown>({
+      name: "pay",
+      requires: { to: "verified" },
+      mode: "enforce",
+      log,
+      ...(judgment ? { judgment } : {}),
+      execute,
+    })
+    return { log, pay }
+  }
+
+  it("ATTACK: `async () => { throw }` — executed first, then errored, naming the rejection", async () => {
+    let returned: Promise<string> | undefined
+    const { log, pay } = mk(() => {
+      returned = (async () => {
+        throw new Error("network down after debit")
+      })()
+      return returned
+    })
+    const r = pay({ to: good() })
+    expect(r.ok).toBe(true)
+    expect(r.receipt.decision).toBe("executed")
+    expect(r.ok && r.result).toBe(returned) // the host gets ITS promise, not a wrapper
+    let rejected = false
+    await returned!.catch(() => {
+      rejected = true
+    })
+    await settle()
+    expect(rejected).toBe(true)
+    expect(log.all().map((x) => x.decision)).toEqual(["executed", "errored"])
+    const errored = log.all()[1]!
+    expect(errored.reason).toContain("rejected")
+    expect(errored.reason).toContain("network down after debit")
+    expect(errored.reason).toContain("may or may not have taken effect")
+    expect(errored.args.to!.value).toBe("ACME")
+    expect(log.verifyChain()).toBe(true)
+  })
+
+  it("a fulfilled promise leaves only `executed`", async () => {
+    const { log, pay } = mk(async () => "paid")
+    const r = pay({ to: good() })
+    await (r.ok ? r.result : undefined)
+    await settle()
+    expect(log.all().map((x) => x.decision)).toEqual(["executed"])
+  })
+
+  it("a flagged async action that rejects: judgment-flagged first, then errored", async () => {
+    const unsure: JudgmentProvider = { name: "u", assess: () => ({ assessment: "unsure", confidence: 0.4, rationale: "near the cap" }) }
+    const { log, pay } = mk(async () => {
+      throw new Error("rpc timeout")
+    }, { provider: unsure, floor: 0.8 })
+    const r = pay({ to: good() })
+    expect(r.receipt.decision).toBe("judgment-flagged")
+    await (r.ok ? (r.result as Promise<unknown>).catch(() => undefined) : undefined)
+    await settle()
+    expect(log.all().map((x) => x.decision)).toEqual(["judgment-flagged", "errored"])
+    expect(log.all()[1]!.reason).toContain("rpc timeout")
+    expect(log.verifyChain()).toBe(true)
+  })
+
+  it("a non-promise thenable is observed the same way", async () => {
+    const { log, pay } = mk(() => ({
+      then(_onFulfilled: unknown, onRejected?: (e: unknown) => void) {
+        queueMicrotask(() => onRejected?.(new Error("thenable failed")))
+      },
+    }))
+    pay({ to: good() })
+    await settle()
+    expect(log.all().map((x) => x.decision)).toEqual(["executed", "errored"])
+    expect(log.all()[1]!.reason).toContain("thenable failed")
+  })
+
+  it("CONTROL: a synchronous result and a synchronous throw behave as before", () => {
+    const sync = mk(() => "paid")
+    expect(sync.pay({ to: good() }).receipt.decision).toBe("executed")
+    expect(sync.log.all()).toHaveLength(1)
+    const thrower = mk(() => {
+      throw new Error("boom")
+    })
+    expect(() => thrower.pay({ to: good() })).toThrow("boom")
+    expect(thrower.log.all().map((x) => x.decision)).toEqual(["errored"])
+  })
+})
