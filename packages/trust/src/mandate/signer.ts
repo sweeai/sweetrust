@@ -349,13 +349,16 @@ const assertPublicPem = (pem: string, slot: string): string => {
 /**
  * makeEd25519SignerLive — production signer using node:crypto's Ed25519.
  *
- * Sign operation: canonical JSON → Buffer → ed25519 sign with private key
- * → hex-encoded signature.
+ * Sign operation: signedPreimage (canonical JSON of the ENVELOPE: domain,
+ * payload, previousHash, signedAt) → Buffer → ed25519 sign with the private
+ * key → 128 lowercase hex characters.
  *
- * Verify operation: canonical JSON of payload → Buffer → ed25519 verify
- * against the public key declared on the record (NOT the factory's
- * publicKeyHex; that's the signer's own key, which may differ during
- * key rotation — v0.2.1 work).
+ * Verify operation: the same preimage, rebuilt from one read of the record →
+ * Buffer → ed25519 verify against the public key declared on the record (NOT
+ * the factory's publicKeyHex; that's the signer's own key, which may differ
+ * during key rotation — v0.2.1 work). It used to say "canonical JSON of the
+ * payload" here; the payload alone has not been the signed bytes since the
+ * envelope moved into the preimage (corrected in the 2026-10-13 verify audit).
  */
 export const makeEd25519SignerLive = (
   config: Ed25519SignerConfig,

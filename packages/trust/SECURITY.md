@@ -66,6 +66,15 @@ last line of a signed store and the file still verifies, because it is a valid s
 that line was a revoke, the mandate is live again: `isRevoked` returns `false`. Protect the store
 file the way you protect the key, or anchor its head somewhere the host cannot write.
 
+### A receipt artifact must be byte-preserved
+
+The interior receipt hash is computed over each record's own JSON text in insertion order while
+the signature is over canonical (sorted-key) JSON, so a JSONL artifact must be handed over exactly
+as `exportJSONL` wrote it and read with `parseJSONL`, the sanctioned reader: a file re-serialized
+by an intermediary (`jq -S`, a sorted-map round trip, a pretty-printer) reports `hash-mismatch`
+even when every value in it is honest. Closing that gap changes the kernel's hash body and is
+scheduled as its own chunk.
+
 ### One writer per store file
 
 The JSONL stores do not lock across processes. Two processes appending to one file can both link
