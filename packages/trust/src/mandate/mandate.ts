@@ -4,7 +4,8 @@
  * Per the mandate capability-declaration specification v0.0.
  *
  * Inheritance: per spec I9, this module imports the constitutional pre-check
- * primitive from ./security.ts (formerly a standalone package, folded back into mandate 2026-07-19). Mandate metadata (rationale strings) is exactly the attack
+ * primitive from ./security.ts (formerly a standalone package, folded back into mandate 2026-07-19). Mandate metadata (rationale strings and, since the
+ * 2026-10-13 mandate audit, capability identifiers) is exactly the attack
  * surface the pre-check exists to defend.
  */
 import { randomBytes } from "node:crypto"
@@ -40,7 +41,14 @@ const failMandate = (error: MandateError): never => {
  * Replaces the former `Context.Tag(...)` capability declaration (which
  * required Effect). A capability is just an identity with a name.
  */
-export const defineCapability = <const Id extends string>(key: Id): Capability<Id> => ({ key })
+export const defineCapability = <const Id extends string>(key: Id): Capability<Id> => {
+  // Fail where the string was authored (the 2026-10-13 mandate audit). The
+  // issuers screen again at the persistence site, because a capability can
+  // reach them without passing through here: `capabilityKey` tolerates a bare
+  // string or any object with a `key`.
+  assertCapabilityIdentifierClean(key)
+  return { key }
+}
 
 /**
  * Extract the canonical string key for a `Capability`.
@@ -53,6 +61,27 @@ export const defineCapability = <const Id extends string>(key: Id): Capability<I
 export const capabilityKey = (cap: Capability): string => {
   const branded = cap as unknown as { key?: string }
   return branded.key ?? String(cap)
+}
+
+/**
+ * Screen a capability identifier before it is persisted. AGENTS.md: any
+ * function that persists an authored string runs `constitutionalPreCheck`
+ * first. Identifiers reach grant events through each issuer's resolved
+ * `capabilityIds`, and until the 2026-10-13 mandate audit they did so
+ * unscreened; `MandateError` had reserved `inputKind: "capability-identifier"`
+ * for exactly this. `useCapability` needs no screen of its own: the capability
+ * it records must be in the mandate's recorded grant, which was screened here.
+ */
+const assertCapabilityIdentifierClean = (key: string): void => {
+  const match = constitutionalPreCheck(key)
+  if (match) {
+    failMandate({
+      _tag: "MaliciousMandateMetadata",
+      inputKind: "capability-identifier",
+      matchedPatternId: match.patternId,
+      evidence: match.evidence,
+    })
+  }
 }
 
 /**
@@ -319,6 +348,7 @@ export const issueMandate = <
   const { grantor, grantorScope, rationale } = args
   const capabilities = captureCapabilities(args.capabilities)
   const capabilityIds = resolveCapabilityIds(capabilities)
+  capabilityIds.forEach(assertCapabilityIdentifierClean)
   const triggerSource: TriggerSource = args.triggerSource ?? "code"
 
   // I9: pre-check rationale before persistence
@@ -417,6 +447,7 @@ export const issueRootMandate = <Caps extends ReadonlyArray<Capability>>(args: {
   const { grantor, rationale } = args
   const capabilities = captureCapabilities(args.capabilities)
   const capabilityIds = resolveCapabilityIds(capabilities)
+  capabilityIds.forEach(assertCapabilityIdentifierClean)
   const triggerSource: TriggerSource = args.triggerSource ?? "code"
 
   const rationaleCheck = constitutionalPreCheck(rationale)
@@ -755,6 +786,7 @@ export const issueOrgMandate = <Caps extends ReadonlyArray<Capability>>(args: {
   const { grantor, rationale } = args
   const capabilities = captureCapabilities(args.capabilities)
   const capabilityIds = resolveCapabilityIds(capabilities)
+  capabilityIds.forEach(assertCapabilityIdentifierClean)
   const triggerSource: TriggerSource = args.triggerSource ?? "code"
 
   const rationaleCheck = constitutionalPreCheck(rationale)
@@ -822,6 +854,7 @@ export const issueProjectMandate = <
   const { grantor, grantorScope, rationale } = args
   const capabilities = captureCapabilities(args.capabilities)
   const capabilityIds = resolveCapabilityIds(capabilities)
+  capabilityIds.forEach(assertCapabilityIdentifierClean)
   const triggerSource: TriggerSource = args.triggerSource ?? "code"
 
   const rationaleCheck = constitutionalPreCheck(rationale)
@@ -923,6 +956,7 @@ export const issueAgentMandate = <
   const { grantor, grantorScope, rationale } = args
   const capabilities = captureCapabilities(args.capabilities)
   const capabilityIds = resolveCapabilityIds(capabilities)
+  capabilityIds.forEach(assertCapabilityIdentifierClean)
   const triggerSource: TriggerSource = args.triggerSource ?? "code"
 
   const rationaleCheck = constitutionalPreCheck(rationale)
