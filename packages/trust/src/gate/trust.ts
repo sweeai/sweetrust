@@ -626,7 +626,9 @@ export interface Receipt {
    * `errored` (added 2026-07-25) records an operation that PASSED the walls and
    * then threw. Without it the log has a hole shaped like "everything that went
    * wrong" — see makeSink. The action may or may not have taken effect; that
-   * uncertainty is the point of recording it.
+   * uncertainty is the point of recording it. For an ASYNC action it follows
+   * the `executed` (or `judgment-flagged`) receipt rather than replacing it:
+   * the first receipt precedes the outcome, the `errored` one trails it.
    *
    * `declassify-refused` is RESERVED, not yet produced (DAN-1159 item 4b). It
    * is the evidence a declassifier's refusal should leave. Today the
@@ -977,6 +979,32 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
     // violation; it no longer reaches execute() in ANY mode.
     const checked: Record<string, Sourced<unknown>> = Object.create(null)
 
+    // An async action's outcome arrives after its receipt (the 2026-10-13 gate
+    // audit). The `errored` receipt below is sync-only: `execute: async () =>
+    // { throw }` RETURNS a rejected promise, an ordinary value, so the receipt
+    // said `executed` and the log never heard about the rejection — and every
+    // real sink is async. A thenable result gets a rejection handler that
+    // appends an `errored` receipt when it settles. The receipt that PRECEDES
+    // the outcome stays as written (it cannot wait for a network), and the
+    // `errored` one TRAILS it; SECURITY.md § Honest limits states the order.
+    // The host's own promise is returned unchanged and the host must still
+    // handle it — this observes, it does not catch. No fulfilment handler:
+    // success is what the preceding receipt already says.
+    const trailErrored = (result: unknown, prefix: string): void => {
+      const thenable =
+        result !== null && (typeof result === "object" || typeof result === "function") && typeof (result as { then?: unknown }).then === "function"
+      if (!thenable) return
+      ;(result as PromiseLike<unknown>).then(undefined, (err: unknown) => {
+        cfg.log.append({
+          at: now(),
+          sink: cfg.name,
+          decision: "errored",
+          args: rendered,
+          reason: `${prefix} — then its promise rejected; the action may or may not have taken effect: ${firstLine(err)}`,
+        })
+      })
+    }
+
     // Own-key redaction lookup over the own-key snapshot. `spec.redact?.[key]`
     // used to walk the prototype, so a key like `constructor` or `toString`
     // returned an inherited FUNCTION where a `"raw" | "hash" | "truncate"` was
@@ -1171,6 +1199,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
           })
           throw err
         }
+        trailErrored(result, note)
         const receipt = cfg.log.append({ at: now(), sink: cfg.name, decision: "judgment-flagged", args: rendered, reason: note })
         return { ok: true, result, receipt }
       }
@@ -1199,6 +1228,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
       throw err
     }
 
+    trailErrored(result, `${cfg.name} passed the walls and was recorded as ${decision}`)
     const receipt = cfg.log.append({
       at: now(),
       sink: cfg.name,

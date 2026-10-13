@@ -81,6 +81,16 @@ nothing. This is a known gap, not a design choice. The planned fix writes an int
 the action and the outcome after it. Until then, treat a signer error as "an action may have run
 unrecorded", not as a refusal.
 
+### For an async action, the receipt precedes the outcome and an `errored` receipt trails it
+
+A sink's receipt is written when `execute()` returns, and an async `execute()` returns a promise
+before anything has happened. So the `executed` (or `judgment-flagged`) receipt for an async action
+records that the action was **started**, not that it succeeded. If the promise later rejects, the
+sink appends an `errored` receipt naming the rejection — behind the first one, never in its place.
+Read the two together: an `executed` with no `errored` after it is an action whose promise did not
+reject, as far as this log can know. The sink observes your promise; it does not catch it. Handle the
+rejection yourself as you always would.
+
 ### A declassifier's refusal leaves no receipt
 
 `allowlisted`, `corroborate` and `humanConfirm` return `{ ok: false, reason }` when they refuse an
