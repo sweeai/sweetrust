@@ -502,8 +502,11 @@ export function humanConfirm<T>(
   render: (question: string) => boolean,
 ): DeclassifyResult<T> {
   const question = `Confirm ${JSON.stringify(candidate.value)} — provenance: ${candidate.describe()}?`
-  if (!render(question)) {
-    return { ok: false, reason: `human declined: ${question}` }
+  // `!== true`, not `!`: only the literal true is a confirmation. A Promise (an
+  // `async` renderer) and the string "no" are both truthy, and either used to
+  // mint verified before the human had answered (the 2026-10-13 gate audit).
+  if (render(question) !== true) {
+    return { ok: false, reason: `human declined (render() must return exactly true): ${question}` }
   }
   return {
     ok: true,
