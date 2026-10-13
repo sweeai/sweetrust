@@ -239,3 +239,71 @@ describe("verifyAuditChain — the CONTAINER gets a verdict too (DAN-1159 item 5
     })
   })
 })
+
+// ============================================================================
+// The 2026-10-13 verify audit, mandate side.
+// ============================================================================
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { makeJsonlSignedAuditLive } from "../../src/mandate/audit.ts"
+import { makeInMemorySignerLive } from "../../src/mandate/index.ts"
+
+describe("2026-10-13 verify audit, finding 1 — a stray key on the head record is refused, and the store inherits it", () => {
+  // The durable store re-verifies the whole file on every read and then signs
+  // the next record's previousHash over the LAST line as it stands. An attacker
+  // with file-write access who adds an unsigned key to that line used to get it
+  // accepted on the next read and then sealed in by the operator's own
+  // signature, so it could never be removed without breaking the chain.
+  const freshPath = () => join(mkdtempSync(join(tmpdir(), "sweetrust-audit-")), "audit.jsonl")
+
+  test("verifyAuditChain: a stray key on the LAST record is malformed-record, with its name in the detail", () => {
+    const signer = ed25519Signer()
+    const chain = buildChain(signer, EVENTS)
+    const injected = [chain[0]!, chain[1]!, { ...chain[2]!, operator_comment: "revocation issued in error, disregard" }]
+    const report = check(injected as SignedMandateAuditEvent[], signer)
+    expect(report).toMatchObject({ valid: false, firstInvalidIndex: 2, reason: "malformed-record" })
+    expect(report.detail).toContain("operator_comment")
+  })
+
+  test("verifyAuditChain: a stray key in the MIDDLE is malformed AT that record, not hash-chain-broken at the next", () => {
+    const signer = ed25519Signer()
+    const chain = buildChain(signer, EVENTS)
+    const injected = [chain[0]!, { ...chain[1]!, operator_comment: "x" }, chain[2]!]
+    expect(check(injected as SignedMandateAuditEvent[], signer)).toMatchObject({ valid: false, firstInvalidIndex: 1, reason: "malformed-record" })
+  })
+
+  test("verifyAuditChain: the in-memory signer's verdict is the same", () => {
+    const signer = makeInMemorySignerLive()
+    const chain = buildChain(signer, EVENTS)
+    const injected = [chain[0]!, chain[1]!, { ...chain[2]!, operator_comment: "x" }]
+    expect(check(injected as SignedMandateAuditEvent[], signer)).toMatchObject({ valid: false, firstInvalidIndex: 2, reason: "malformed-record" })
+  })
+
+  test("the durable store refuses to read past an injected key on its last line, so it never signs over it", () => {
+    const signer = ed25519Signer()
+    const path = freshPath()
+    const { signedAudit } = makeJsonlSignedAuditLive(path, signer)
+    signedAudit.recordSigned(EVENTS[0]!)
+    signedAudit.recordSigned(EVENTS[1]!)
+
+    // The attacker edits the LAST line only: one unsigned key.
+    const lines = readFileSync(path, "utf-8").split("\n").filter(Boolean)
+    const last = JSON.parse(lines[1]!)
+    last.operator_comment = "revocation issued in error, mandate M1 remains active"
+    lines[1] = JSON.stringify(last)
+    writeFileSync(path, lines.join("\n") + "\n")
+
+    const reopened = makeJsonlSignedAuditLive(path, signer)
+    let thrown: unknown
+    try {
+      reopened.signedAudit.listAllSigned()
+    } catch (e) {
+      thrown = e
+    }
+    expect(thrown).toMatchObject({ _tag: "AuditLogCorrupt", line: 2, reason: "malformed-record" })
+    // And the append is refused too, so the injected line is never sealed in.
+    expect(() => reopened.signedAudit.recordSigned(EVENTS[2]!)).toThrow()
+    expect(readFileSync(path, "utf-8").split("\n").filter(Boolean)).toHaveLength(2)
+  })
+})
