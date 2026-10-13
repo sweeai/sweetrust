@@ -72,6 +72,11 @@ The JSONL stores do not lock across processes. Two processes appending to one fi
 to the same predecessor. That forks the chain, and every later read then fails closed as corrupt.
 Give each store file exactly one writing process.
 
+The signed store also re-verifies the whole file on every read, and one mandate operation is
+several reads: `useCapability` over a delegation chain of depth d does an `isRevoked` and a `query`
+per ancestor, so it costs O(d·n) signature verifications per invocation, not O(n). There is no
+cache. Measure before putting this store on a hot path with a long log.
+
 ### A signer that throws after `execute()` leaves no receipt
 
 Receipt arguments are rendered before the action runs, so nothing the caller passes can stop the
@@ -95,9 +100,11 @@ yourself if you need the evidence.
 
 ### The prompt-injection pre-check is a pattern catalog, not a defense
 
-`constitutionalPreCheck` catches known instruction-override patterns in English and hidden
-Unicode tricks, before an authored string is persisted. It does not catch paraphrase ("never mind
-what was said") or other languages, by design. Those need defenses in your own harness, such as
+`constitutionalPreCheck` catches known instruction-override patterns in English, the listed
+Latin-lookalike confusables, a cluster of invisible characters, and (since the 2026-10-13 mandate
+audit) a keyword split by a single invisible or format character, which used to pass. It runs on
+rationales and on capability identifiers before either is persisted. It does not catch paraphrase
+("never mind what was said") or other languages, by design. Those need defenses in your own harness, such as
 framing untrusted text clearly and constraining what the model may output. Do not rely on forcing
 a tool call for that: some current models reject forced `tool_choice`.
 

@@ -2,9 +2,9 @@
 title:       "ADR 0001: authority is possession of an issued scope, in-process"
 kind:        adr
 status:      accepted
-updated:     2026-09-23
+updated:     2026-10-13
 owner:       sweetrust g4
-verified_by: "pnpm -C packages/trust test (authority-binding.test.ts) + the six mutation witnesses in the DAN-1157 commit message"
+verified_by: "pnpm -C packages/trust test (authority-binding.test.ts) + the six mutation witnesses in the DAN-1157 commit message + the 2026-10-13 getter-split block (8 tests, 7 watched RED)"
 ---
 
 # ADR 0001: authority is possession of an issued scope, in-process
@@ -68,6 +68,21 @@ same reason: the only way to hold one is to be handed one.
   and a new `MandateError` variant. Consumers outside this repo that must migrate:
   `sweeai/integrations/linear` (revoke with the scope from its existing `creatorScopeLookup`) and
   the SweeAI daemon (present the org scope it already holds).
+
+## Amended 2026-10-13
+
+The 2026-10-13 mandate audit showed that this ADR's promise, "cannot act inside an existing tree
+it was not handed", rested on an unstated condition: that the object `assertIssued` checks is the
+object the function then acts on. Every exported function re-read its caller-supplied `args`
+fields at each site, so a getter on `args` could present the genuine scope to the possession check
+and forged data to the subset checks, the mint and the record. Four escalations followed from a
+held leaf alone, under the same in-process precondition this ADR accepts.
+
+**Possession is now checked on a single captured reference.** Each function reads each
+caller-supplied field exactly once, at its top, resolves each capability `key` exactly once, and
+uses only those locals; the last describe block of `test/mandate/authority-binding.test.ts` pins
+the read count at one per field for all seven exports. The decision above stands. This names the
+condition it depended on.
 
 ## Alternatives considered
 
