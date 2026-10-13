@@ -66,14 +66,15 @@ last line of a signed store and the file still verifies, because it is a valid s
 that line was a revoke, the mandate is live again: `isRevoked` returns `false`. Protect the store
 file the way you protect the key, or anchor its head somewhere the host cannot write.
 
-### A receipt artifact must be byte-preserved
+### A receipt artifact may be re-serialized, but not re-valued
 
-The interior receipt hash is computed over each record's own JSON text in insertion order while
-the signature is over canonical (sorted-key) JSON, so a JSONL artifact must be handed over exactly
-as `exportJSONL` wrote it and read with `parseJSONL`, the sanctioned reader: a file re-serialized
-by an intermediary (`jq -S`, a sorted-map round trip, a pretty-printer) reports `hash-mismatch`
-even when every value in it is honest. Closing that gap changes the kernel's hash body and is
-scheduled as its own chunk.
+Every hash and signature in a signed receipt is over canonical JSON (sorted keys, no whitespace,
+`src/canon.ts`), so an artifact that has been through `jq -S`, a sorted-map round trip or a compact
+re-print verifies exactly as `exportJSONL` wrote it. What must survive is the **values**: a tool
+that rounds a number, drops a key or re-encodes a string has changed the evidence, and the chain
+says so. Read the file with `parseJSONL`, one record per line. Until the 2026-10-13 rail audit the
+interior hash alone was over insertion-order JSON, and an honest re-sorted file reported
+`hash-mismatch`; that is why a 0.3.0 log does not verify under 0.4.0 (see the CHANGELOG).
 
 ### One writer per store file
 

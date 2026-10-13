@@ -14,8 +14,13 @@
  * Every test in the "re-serialized" block below was watched RED before
  * `receiptBody` went through the shared canonicalization.
  */
+import { readFileSync } from "node:fs"
 import { describe, expect, test } from "vitest"
+import * as canon from "../src/canon.ts"
+import * as root from "../src/index.ts"
 import { makeSink, ReceiptLog, receiptBody, Sourced, type Receipt } from "../src/gate/index.ts"
+import * as mandate from "../src/mandate/index.ts"
+import * as verify from "../src/verify/index.ts"
 import {
   generateSigningKeypair,
   makeEd25519ReceiptSigner,
@@ -102,5 +107,41 @@ describe("the interior receipt hash survives a key-order re-serialization", () =
     const report = verifySignedChain(records, { trustedSignerPublicKeyHex: publicKeyHexFromPem(keys.publicKeyPem) })
     expect(report.valid).toBe(false)
     expect(report.firstInvalidIndex).toBe(0)
+  })
+})
+
+describe("src/canon.ts is the one canonicalization, and a leaf", () => {
+  test("mandate, verify and the root all export the identical function objects from canon", () => {
+    // Identity, not name-equality: a second implementation under the same name
+    // is exactly the drift AGENTS.md forbids (test/index-barrel.test.ts holds
+    // the subpaths to each other; this holds all three to the source).
+    expect(mandate.canonicalJSON).toBe(canon.canonicalJSON)
+    expect(mandate.sha256Hex).toBe(canon.sha256Hex)
+    expect(verify.canonicalJSON).toBe(canon.canonicalJSON)
+    expect(verify.sha256Hex).toBe(canon.sha256Hex)
+    expect(root.canonicalJSON).toBe(canon.canonicalJSON)
+    expect(root.sha256Hex).toBe(canon.sha256Hex)
+  })
+
+  test("receiptBody IS canonicalJSON over the receipt's seven fields — no second shape to keep in step", () => {
+    const log = new ReceiptLog()
+    sessionWith(log)
+    for (const r of log.all()) {
+      const { hash: _hash, ...body } = r
+      expect(receiptBody(r)).toBe(canon.canonicalJSON(body))
+    }
+    // A receipt without a reason: the field is absent from the bytes, not
+    // written as null — the same as the old conditional spread.
+    const executed = log.all().find((r) => r.reason === undefined)!
+    expect(receiptBody(executed)).not.toContain('"reason"')
+  })
+
+  test("canon.ts imports nothing but node:crypto — the gate can depend on it without depending on mandate", () => {
+    const source = readFileSync(new URL("../src/canon.ts", import.meta.url), "utf8")
+    // Module edges only: an `import … from "x"` or `export … from "x"` line.
+    // The bare `export { … }` of the two names has no `from` and is not an edge.
+    const specifiers = [...source.matchAll(/^(?:import|export)\s[^\n]*?\sfrom\s+["']([^"']+)["']/gm)].map((m) => m[1])
+    expect(specifiers.length).toBeGreaterThan(0)
+    expect(new Set(specifiers)).toEqual(new Set(["node:crypto"]))
   })
 })

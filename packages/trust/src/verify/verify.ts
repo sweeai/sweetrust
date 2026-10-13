@@ -165,10 +165,14 @@ const jsonLine = (record: unknown): string =>
   JSON.stringify(record).replace(JSONL_LINE_TERMINATORS, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`)
 
 /**
- * The sanctioned reader for an exported artifact. It must be fed the file's
- * bytes as written: the interior receipt hash is over the record's own JSON
- * text, so a re-serialized file (sorted keys, pretty-printed) reports
- * `hash-mismatch` even when every value is honest. SECURITY.md § Honest limits.
+ * The sanctioned reader for an exported artifact: one record per line, each
+ * checked for the SignedReceipt shape before it is handed on. The bytes need
+ * not be the ones exportJSONL wrote. Since the 2026-10-13 rail audit every
+ * hash and signature in a record is over canonical JSON (src/canon.ts), so a
+ * file re-serialized by an intermediary that preserves values — `jq -S`, a
+ * sorted-map round trip, a compact re-print — verifies exactly as the original
+ * does. It used to say here that such a file reports `hash-mismatch`; that was
+ * true of the interior hash alone, and is no longer true of anything.
  */
 export function parseJSONL(text: string): SignedReceipt[] {
   // One leading byte-order mark is tolerated: editors and some HTTP stacks

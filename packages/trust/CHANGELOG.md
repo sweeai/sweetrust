@@ -219,6 +219,20 @@ this package follows [Semantic Versioning](https://semver.org).
 - Both Ed25519 factories and `publicKeyHexFromPem` throw at construction on key material they
   used to accept silently (see Security). `makeInMemorySignerLive` throws on a marker that is a
   real key.
+- **Breaking: every receipt hash changes. A receipt log written by 0.3.0 does not verify under
+  0.4.0.** The interior hash (`Receipt.hash`, and so every `prevHash` after it) is now computed
+  over canonical JSON — keys sorted at every depth — through the same `canonicalJSON` the
+  signature and the wrapper link already used. It was `JSON.stringify` of a hand-ordered object,
+  which pinned the seven top-level keys and left the `args` tree underneath in insertion order, so
+  an honest exported artifact run through `jq -S`, a sorted-map round trip or a pretty-printer
+  reported `hash-mismatch` with every value intact; `SECURITY.md` carried that as an honest limit
+  and now states the opposite. No public API changes, and a chain written and verified by one
+  version is unaffected. Only a log that crosses the version line fails: `verifyChain()` and
+  `verifySignedChain` recompute each hash, and the recomputation of a 0.3.0 receipt no longer
+  matches the hash it carries. Anchor a 0.3.0 chain's head before upgrading if you need to prove
+  it later, and start a new log under 0.4.0. `canonicalJSON` and `sha256Hex` moved to
+  `src/canon.ts`, a leaf module every subpath imports; the exported functions are the same
+  objects as before. `docs/adr/0002-receipt-interior-hash-is-canonical.md` records the decision.
 
 ### Deprecated
 

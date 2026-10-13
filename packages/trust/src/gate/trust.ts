@@ -24,6 +24,9 @@
 // ============================================================================
 
 import { createHash } from "node:crypto"
+// The rail's one canonicalization, from a leaf that imports only node:crypto.
+// This is NOT an import of mandate: the gate still stands alone (src/index.ts).
+import { canonicalJSON } from "../canon.ts"
 
 // ── Tiers (§3, the lattice) ─────────────────────────────────────────────────
 
@@ -370,11 +373,11 @@ function ascend<T>(prev: Sourced<T>, event: UpgradeEvent, mergedAncestors?: Read
  * Every Sui amount in MIST is a bigint, so this is the common case, not an
  * edge. Everything else renders exactly as before.
  *
- * This lives HERE, in gate, and deliberately not in mandate's `canonicalJSON`:
- * that function defines signed bytes for the whole rail, and changing it would
- * move every mandate signature (AGENTS.md, "One canonicalization across the
- * rail"). By the time a receipt reaches a signer, its arguments are already
- * plain JSON.
+ * This lives HERE, in gate, and deliberately not in the rail's `canonicalJSON`
+ * (src/canon.ts): that function defines signed and hashed bytes for the whole
+ * rail, and changing it would move every mandate signature (AGENTS.md, "One
+ * canonicalization across the rail"). By the time a receipt reaches
+ * `receiptBody` or a signer, its arguments are already plain JSON.
  */
 const receiptJSON = (value: unknown): string | undefined =>
   JSON.stringify(value, (_key, v: unknown) =>
@@ -650,18 +653,28 @@ export interface Receipt {
 /**
  * The exact bytes ReceiptLog hashes for a receipt — the single definition of the
  * interior-hash serialization. Exported so verifiers (@sweetrust/verify) recompute
- * hashes from this function instead of hand-mirroring key order across packages.
- * Field order is fixed here regardless of caller object-literal order.
+ * hashes from this function instead of hand-mirroring it across packages.
+ *
+ * Canonical JSON (src/canon.ts): keys sorted at EVERY depth, no whitespace,
+ * the same bytes the signature and the wrapper link are computed over. Until
+ * the 2026-10-13 rail audit this was `JSON.stringify` of a hand-ordered
+ * literal, which pinned these seven keys and nothing beneath them: `args` is a
+ * tree of caller-shaped objects, so its bytes followed insertion order, and an
+ * honest exportJSONL artifact run through `jq -S` came back `hash-mismatch`.
+ * Every receipt hash changed with this; a 0.3.0 log does not verify under
+ * 0.4.0 (CHANGELOG, docs/adr/0002). A `reason` of undefined is dropped by
+ * canonicalJSON exactly as the old conditional spread dropped it, and each
+ * field is read from `e` once.
  */
 export function receiptBody(e: Omit<Receipt, "hash">): string {
-  return JSON.stringify({
+  return canonicalJSON({
     seq: e.seq,
     prevHash: e.prevHash,
     at: e.at,
     sink: e.sink,
     decision: e.decision,
     args: e.args,
-    ...(e.reason !== undefined ? { reason: e.reason } : {}),
+    reason: e.reason,
   })
 }
 
