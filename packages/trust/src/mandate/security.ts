@@ -27,9 +27,18 @@
  *   - toMaliciousInputError() factory ships the typed-error wrap
  *   - CATALOG_VERSION exported for forensic correlation per parent spec I9
  *
- * The catalog covers ASCII-English instruction-override patterns +
- * NFKC-normalized Unicode confusables. Multilingual paraphrase (CJK, RTL
- * scripts) and natural-language paraphrase ("never mind what was said") are
+ * 0.2.1 delta (the 2026-10-13 mandate audit):
+ *   - Invisible/format characters are STRIPPED in the normalization stage,
+ *     before the MIP-1 / MIP-3 / MIP-4 matches. One zero-width space inside
+ *     "ignore" broke the `\b` word match while staying under MIP-5's cluster
+ *     threshold, so "ig<U+200B>nore all previous instructions" returned null
+ *     while the paragraph below claimed hidden Unicode tricks were caught.
+ *     MIP-5 now reads the RAW input, so a cluster is still reported as one.
+ *
+ * The catalog covers ASCII-English instruction-override patterns, NFKC-
+ * normalized Unicode confusables, and (since 0.2.1) keywords split by
+ * invisible or format characters. Multilingual paraphrase (CJK, RTL scripts)
+ * and natural-language paraphrase ("never mind what was said") are
  * deliberately out of scope. They are left to the HOST's defense in depth,
  * none of which this package provides: sentinel framing (parent spec I1),
  * constraining the model's output shape (I2) and conservative-fail (I7).
@@ -38,7 +47,7 @@
  * not count on it being available.
  */
 
-export const CATALOG_VERSION = "0.2.0"
+export const CATALOG_VERSION = "0.2.1"
 
 export type MaliciousInputPatternId = "MIP-1" | "MIP-2" | "MIP-3" | "MIP-4" | "MIP-5" | "MIP-6"
 
@@ -102,11 +111,18 @@ const foldConfusables = (s: string): string =>
   s.replace(CONFUSABLE_RE, (ch) => CONFUSABLE_TO_LATIN[ch] ?? ch)
 
 export const constitutionalPreCheck = (rawInput: string): MaliciousInputMatch | null => {
-  // Two-stage normalization:
+  // Three-stage normalization for the pattern matches:
   //   1. NFKC — compatibility decomposition (full-width, ligatures, circled forms)
   //   2. Latin-confusable folding — cross-script visual lookalikes (Cyrillic/Greek)
-  // Both stages run unconditionally. Pure; idempotent; microsecond cost.
-  const input = foldConfusables(rawInput.normalize("NFKC"))
+  //   3. Invisible/format-character removal (the 2026-10-13 mandate audit). A
+  //      single zero-width or format character inside a keyword broke the `\b`
+  //      match for MIP-1/MIP-3 while staying under MIP-5's cluster threshold,
+  //      so "ig<U+200B>nore all previous instructions" returned null.
+  // All three run unconditionally. Pure; idempotent; microsecond cost. A
+  // MIP-1/3/4 match's offsets index into this normalized string, as they
+  // always have. MIP-5 reads the RAW input, below, so the characters stage 3
+  // removes are still counted as a cluster.
+  const input = foldConfusables(rawInput.normalize("NFKC")).replace(INVISIBLE_OR_FORMAT_CHARS, "")
 
   const mip1 =
     /\b(ignore|disregard|forget|skip|bypass|nullify|negate|omit|override)\s+(all\s+)?(the\s+|my\s+|your\s+|these\s+|those\s+)?(previous|prior|above|earlier|preceding)\s+(instructions?|prompts?|directives?|rules?|guidance|context)\b/i
@@ -115,7 +131,7 @@ export const constitutionalPreCheck = (rawInput: string): MaliciousInputMatch | 
     const start = mip1Match.index!
     return {
       patternId: "MIP-1",
-      description: "Explicit instruction-override injection (NFKC-normalized; ASCII-English coverage)",
+      description: "Explicit instruction-override injection (NFKC-normalized, confusables folded, invisible characters stripped; ASCII-English coverage)",
       evidence: mip1Match[0]!,
       catalogVersion: CATALOG_VERSION,
       startOffset: start,
@@ -154,10 +170,13 @@ export const constitutionalPreCheck = (rawInput: string): MaliciousInputMatch | 
     }
   }
 
+  // MIP-5 reads the RAW input: stage 3 above removed exactly the characters
+  // this pass counts, and a cluster must still be reported as a cluster.
+  // These offsets index into `rawInput`.
   const positions: number[] = []
   let m: RegExpExecArray | null
   const re = new RegExp(INVISIBLE_OR_FORMAT_CHARS.source, "gu")
-  while ((m = re.exec(input)) !== null) {
+  while ((m = re.exec(rawInput)) !== null) {
     positions.push(m.index)
     if (positions.length >= 4) {
       const window = positions[positions.length - 1]! - positions[positions.length - 4]!
