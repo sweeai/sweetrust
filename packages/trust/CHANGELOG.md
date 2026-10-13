@@ -127,6 +127,21 @@ this package follows [Semantic Versioning](https://semver.org).
   `makeEd25519VerifierLive` accept Ed25519 keys only, the signer checks its private and public
   keys are a pair, and `publicKeyHexFromPem` and both factories refuse a PRIVATE key PEM in a
   public slot. Before this a mismatched pair signed a store no pin could verify.
+- **Every object-taking export now reads each field of its argument once, and a test holds it
+  there** (the 2026-10-13 rail audit). The mandate CRITICAL above was one function family doing
+  the opposite; a harness now wraps every argument bag, nested bag, record, options bag and
+  signer config in a Proxy that throws on the second read of any key, and requires the same
+  verdict as on a plain object. It caught two more: `verifyAuditChain` read
+  `opts.trustedSignerPublicKeyHex` inside its record loop, once per record, so a getter could pin
+  a different key for each record and a chain signed by two keys verified (`verifySignedChain`
+  already read it once); and `ReceiptLog.append` spread the entry twice, once into the bytes it
+  hashed and once into the receipt it committed, so a getter on the entry could leave the log
+  holding a receipt its own hash did not cover. Both read once now. The three declassifiers also
+  read their `Sourced` arguments more than once and hand them to the ascent; a `Sourced` is frozen
+  and cannot carry a getter, so nothing a caller could build reached that, and they now snapshot
+  `value`, `tier` and `provenance` at the top so the rule holds for every export without an
+  exception. `AGENTS.md` § Non-negotiables states the rule, and a new export that takes an object
+  is added to `test/intake-poison.test.ts` in the same commit.
 
 ### Added
 

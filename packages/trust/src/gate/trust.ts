@@ -353,7 +353,16 @@ Object.freeze(Sourced.prototype)
 // job (SpendCage, testnet 0x5c1588…fdfa), where capabilities cannot be minted
 // by convention. This is the spec's four-property discriminator, in code.
 
-function ascend<T>(prev: Sourced<T>, event: UpgradeEvent, mergedAncestors?: ReadonlySet<string>): Sourced<T> {
+//
+// `prev` is the declassifier's own SNAPSHOT of the value it checked — its
+// `value` and `provenance` read once at the top of the declassifier — never
+// the Sourced argument itself. Each declassifier used to hand its argument
+// straight in, so the value that was compared and the value that was promoted
+// were separate reads of the caller's object (the 2026-10-13 rail audit,
+// test/intake-poison.test.ts). A Sourced is frozen and cannot carry a getter,
+// so no caller could exploit that; the intake rule in AGENTS.md holds for
+// every export without an exception because of this.
+function ascend<T>(prev: { readonly value: T; readonly provenance: Provenance }, event: UpgradeEvent, mergedAncestors?: ReadonlySet<string>): Sourced<T> {
   return construct(prev.value, event.to, {
     origin: prev.provenance.origin,
     ancestors: mergedAncestors ?? prev.provenance.ancestors,
@@ -428,6 +437,10 @@ export function allowlisted<T>(
   if (entry === undefined) {
     return { ok: false, reason: `'${key}' not in ${registryName}; candidate is ${candidate.describe()}` }
   }
+  // Each Sourced is read once, here (AGENTS.md, "Intake"). The comparison
+  // below and the ascent at the bottom both use these locals.
+  const { value: entryValue, tier: entryTier, provenance: entryProvenance } = entry
+  const { value: candidateValue } = candidate
 
   // The comparison runs on the CANDIDATE, so it executes candidate-controlled
   // code (`toJSON`, getters) and can throw on a circular value. A declassifier
@@ -443,7 +456,7 @@ export function allowlisted<T>(
   // match/mismatch — what comes back is the registry's record, below.
   let entryJSON: string | undefined
   try {
-    entryJSON = receiptJSON(entry.value)
+    entryJSON = receiptJSON(entryValue)
   } catch (err) {
     return {
       ok: false,
@@ -452,7 +465,7 @@ export function allowlisted<T>(
   }
   let candidateJSON: string | undefined
   try {
-    candidateJSON = receiptJSON(candidate.value)
+    candidateJSON = receiptJSON(candidateValue)
   } catch (err) {
     return {
       ok: false,
@@ -490,9 +503,9 @@ export function allowlisted<T>(
   // no check at all.
   return {
     ok: true,
-    value: ascend(entry, {
+    value: ascend({ value: entryValue, provenance: entryProvenance }, {
       declassifier: "allowlisted",
-      from: entry.tier,
+      from: entryTier,
       to: "verified",
       evidence: `matched ${registryName}[${key}] — candidate presented was ${candidate.describe()}`,
       at: now(),
@@ -516,8 +529,12 @@ export function corroborate<T>(
   // {"$bigint":"5"}, and `undefined` never agrees with a function.
   equals: (a: T, b: T) => boolean = (a, b) => typeof a === typeof b && receiptJSON(a) === receiptJSON(b),
 ): DeclassifyResult<T> {
-  for (const a of claim.provenance.ancestors) {
-    if (reference.provenance.ancestors.has(a)) {
+  // Each Sourced is read once, here (AGENTS.md, "Intake"): the independence
+  // check, the comparison, the ceiling check and the ascent all use these.
+  const { value: claimValue, tier: claimTier, provenance: claimProvenance } = claim
+  const { value: referenceValue, provenance: referenceProvenance } = reference
+  for (const a of claimProvenance.ancestors) {
+    if (referenceProvenance.ancestors.has(a)) {
       return { ok: false, reason: `sources are NOT independent (shared ancestor: ${a})` }
     }
   }
@@ -525,7 +542,7 @@ export function corroborate<T>(
   // verdict, and no verdict is a refusal, never an exception.
   let agree: boolean
   try {
-    agree = equals(claim.value, reference.value)
+    agree = equals(claimValue, referenceValue)
   } catch (err) {
     return {
       ok: false,
@@ -535,7 +552,7 @@ export function corroborate<T>(
   if (!agree) {
     return {
       ok: false,
-      reason: `values disagree — claim ${show(claim.value)} (${claim.describe()}) vs reference ${show(reference.value)} (${reference.describe()})`,
+      reason: `values disagree — claim ${show(claimValue)} (${claim.describe()}) vs reference ${show(referenceValue)} (${reference.describe()})`,
     }
   }
   // Rule 3a cuts both ways: accumulation never raises a value PAST
@@ -546,19 +563,19 @@ export function corroborate<T>(
   // (the 2026-10-13 gate audit). A claim already at or above corroborated has
   // nothing to gain here and comes back as itself. The two checks above still
   // ran: `ok` means the sources agree and are independent, whatever the tier.
-  if (meetsTier(claim.tier, "corroborated")) {
+  if (meetsTier(claimTier, "corroborated")) {
     return { ok: true, value: claim }
   }
-  const merged = new Set([...claim.provenance.ancestors, ...reference.provenance.ancestors])
+  const merged = new Set([...claimProvenance.ancestors, ...referenceProvenance.ancestors])
   return {
     ok: true,
     value: ascend(
-      claim,
+      { value: claimValue, provenance: claimProvenance },
       {
         declassifier: "corroborate",
-        from: claim.tier,
+        from: claimTier,
         to: "corroborated",
-        evidence: `agrees with independent source ${reference.provenance.origin}`,
+        evidence: `agrees with independent source ${referenceProvenance.origin}`,
         at: now(),
       },
       merged,
@@ -588,9 +605,12 @@ export function humanConfirm<T>(
   // Through receiptJSON, in a try: JSON.stringify threw on a bigint candidate
   // and the human never saw a question (the 2026-10-13 gate audit). A value
   // that cannot be rendered cannot be confirmed — refuse, naming why.
+  // The candidate is read once, here (AGENTS.md, "Intake"): the question and
+  // the ascent both use these locals.
+  const { value: candidateValue, tier: candidateTier, provenance: candidateProvenance } = candidate
   let json: string
   try {
-    json = receiptJSON(candidate.value) ?? "undefined"
+    json = receiptJSON(candidateValue) ?? "undefined"
   } catch (err) {
     return {
       ok: false,
@@ -610,9 +630,9 @@ export function humanConfirm<T>(
   }
   return {
     ok: true,
-    value: ascend(candidate, {
+    value: ascend({ value: candidateValue, provenance: candidateProvenance }, {
       declassifier: "humanConfirm",
-      from: candidate.tier,
+      from: candidateTier,
       to: "verified",
       evidence: "human confirmed with provenance rendered",
       at: now(),
@@ -722,9 +742,16 @@ export class ReceiptLog {
     // The other order let an entry that carried `seq`, `prevHash` or `hash`
     // replace the log's own (the 2026-10-13 gate audit): `Omit<>` hides those
     // fields from TypeScript, not from JavaScript.
-    const body = receiptBody({ ...entry, seq, prevHash })
-    const hash = createHash("sha256").update(body).digest("hex")
-    return { ...entry, seq, prevHash, hash }
+    //
+    // Spread ONCE. This used to spread the entry into the hashed body and then
+    // spread it AGAIN into the committed receipt, so a getter on the entry
+    // could answer the hash with one value and the record with another, and
+    // the log then held a receipt whose own hash did not cover it (the
+    // 2026-10-13 rail audit, caught by test/intake-poison.test.ts). The
+    // snapshot that is hashed is the snapshot that is committed.
+    const snapshot = { ...entry, seq, prevHash }
+    const hash = createHash("sha256").update(receiptBody(snapshot)).digest("hex")
+    return { ...snapshot, hash }
   }
 
   /**

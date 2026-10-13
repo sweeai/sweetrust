@@ -484,6 +484,14 @@ export const verifyAuditChain = (
     return null
   }
 
+  // The pin is read ONCE, here, before the loop — the same shape as
+  // verifySignedChain. It used to be read inside the loop, once per record, so
+  // a getter on `opts` could pin a different key for each record and a chain
+  // signed by two keys walked through (the 2026-10-13 rail audit,
+  // test/intake-poison.test.ts). A pin that is not a string pins nothing; the
+  // comparison below says so itself for every record.
+  const pin: unknown = opts?.trustedSignerPublicKeyHex
+
   // The link each record must carry: null for the first, then the hash of the
   // whole previous SIGNED record.
   let expectedPreviousHash: string | null = null
@@ -525,7 +533,6 @@ export const verifyAuditChain = (
     // under the in-memory signer, whose signature is a public function of the
     // envelope, a keyless forged revoke came back valid:true (the 2026-10-13
     // verify audit).
-    const pin: unknown = opts?.trustedSignerPublicKeyHex
     if (typeof pin !== "string" || record.signerPublicKeyHex !== pin) {
       return {
         valid: false,
