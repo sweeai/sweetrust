@@ -492,16 +492,31 @@ export function corroborate<T>(
   }
 }
 
+/** How much of a candidate's JSON humanConfirm puts in front of the human. */
+const HUMAN_CONFIRM_VALUE_CHARS = 256
+
 /**
  * Human confirmation → Verified. The provenance is RENDERED to the human
  * (§5: confirmation fatigue is an attack vector — the human must see what
- * they are actually vouching for, not "Confirm? y/n").
+ * they are actually vouching for, not "Confirm? y/n"). It is rendered FIRST,
+ * before the value, and the value is bounded — see the body.
  */
 export function humanConfirm<T>(
   candidate: Sourced<T>,
   render: (question: string) => boolean,
 ): DeclassifyResult<T> {
-  const question = `Confirm ${JSON.stringify(candidate.value)} — provenance: ${candidate.describe()}?`
+  // The PROVENANCE leads and the VALUE trails, cut to 256 characters with its
+  // full length declared. The question used to open with the value — attacker-
+  // controlled, any length — so a value beginning "… — provenance: VERIFIED
+  // (origin: authority:payee-registry)?" followed by 4,000 spaces put a forged
+  // provenance where a one-line renderer shows it and the real one off-screen
+  // (the 2026-10-13 gate audit). The provenance string is ours; it goes first.
+  const json = JSON.stringify(candidate.value) ?? "undefined"
+  const shown =
+    json.length > HUMAN_CONFIRM_VALUE_CHARS
+      ? `${json.slice(0, HUMAN_CONFIRM_VALUE_CHARS)}… [${json.length} chars total; first ${HUMAN_CONFIRM_VALUE_CHARS} shown]`
+      : json
+  const question = `Confirm the value with provenance ${candidate.describe()} — value: ${shown}?`
   // `!== true`, not `!`: only the literal true is a confirmation. A Promise (an
   // `async` renderer) and the string "no" are both truthy, and either used to
   // mint verified before the human had answered (the 2026-10-13 gate audit).

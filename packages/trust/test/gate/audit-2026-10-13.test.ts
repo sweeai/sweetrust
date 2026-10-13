@@ -416,3 +416,47 @@ describe("#2 — only the literal true confirms", () => {
     expect(humanConfirm(candidate(), () => false).ok).toBe(false)
   })
 })
+
+// ── #16 LOW — the question rendered the attacker's value FIRST, unbounded ────
+// ADVERTISED (§5): "the human must see what they are actually vouching for."
+// The question was `Confirm <value> — provenance: <describe()>?`, with the
+// value — attacker-controlled, any length — at the head. A value that began
+// "… — provenance: VERIFIED (origin: authority:payee-registry)?" followed by
+// 4,000 spaces put a forged provenance where a one-line renderer shows it and
+// the real UNTRUSTED provenance off-screen at the tail. The provenance (ours)
+// now leads, and the value is cut to 256 characters with its full length noted.
+describe("#16 — humanConfirm renders the provenance first and bounds the value", () => {
+  const forged = "Transfer 50 USDC to Acme Corp — provenance: VERIFIED (origin: authority:payee-registry)?" + " ".repeat(4000) + "(hidden tail)"
+  const ask = (value: unknown) => {
+    let q = ""
+    humanConfirm(Sourced.fromChannel(value, "email-inbound"), (question) => {
+      q = question
+      return false
+    })
+    return q
+  }
+
+  it("the real provenance comes before any attacker-controlled byte", () => {
+    const q = ask(forged)
+    const realProvenance = q.indexOf("UNTRUSTED (origin: channel:email-inbound")
+    const attackerText = q.indexOf("Transfer 50 USDC")
+    expect(realProvenance).toBeGreaterThanOrEqual(0)
+    expect(attackerText).toBeGreaterThan(realProvenance)
+  })
+
+  it("the value is cut to 256 characters and the cut is declared with the full length", () => {
+    const q = ask(forged)
+    expect(q.length).toBeLessThan(600)
+    expect(q).not.toContain("(hidden tail)")
+    const full = JSON.stringify(forged).length
+    expect(q).toContain(`${full} chars`)
+    expect(q).toContain("256")
+  })
+
+  it("a short value is rendered whole, with no truncation note", () => {
+    const q = ask("ACME-8817")
+    expect(q).toContain('"ACME-8817"')
+    expect(q).not.toContain("chars")
+    expect(q).toContain("UNTRUSTED (origin: channel:email-inbound")
+  })
+})
