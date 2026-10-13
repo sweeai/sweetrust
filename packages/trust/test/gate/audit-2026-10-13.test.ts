@@ -226,7 +226,7 @@ describe("#10 — any tier outside the lattice floors the combination to untrust
 
   it("CONTROL: the lattice itself is unchanged", () => {
     expect(minTier("verified", "corroborated")).toBe("corroborated")
-    expect(minTier("asserted", "verified", "corroborated")).toBe("asserted")
+    expect(minTier("corroborated", "verified", "corroborated")).toBe("corroborated")
     expect(minTier("verified")).toBe("verified")
     expect(minTier()).toBe("untrusted")
     expect(meetsTier("verified", "verified")).toBe(true)

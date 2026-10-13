@@ -29,11 +29,16 @@ import { createHash } from "node:crypto"
 import { canonicalJSON } from "../canon.ts"
 
 // ── Tiers (§3, the lattice) ─────────────────────────────────────────────────
+// Three rungs. The spec drew a fourth, `asserted`, between untrusted and
+// corroborated; no factory and no declassifier in this package ever produced
+// it, so SECURITY.md told readers to treat the ladder as three until the code
+// caught up. The 2026-10-13 rail audit removed the rung rather than keep a
+// tier a sink could require and nothing could ever satisfy.
 
-export const TIERS = ["untrusted", "asserted", "corroborated", "verified"] as const
+export const TIERS = ["untrusted", "corroborated", "verified"] as const
 export type Tier = (typeof TIERS)[number]
 
-const RANK: Record<Tier, number> = { untrusted: 0, asserted: 1, corroborated: 2, verified: 3 }
+const RANK: Record<Tier, number> = { untrusted: 0, corroborated: 1, verified: 2 }
 
 /**
  * Own-key membership in the lattice. `RANK[t]` alone is not a membership test:

@@ -17,7 +17,7 @@ One package, three primitives, one direction of flow:
 Each is independently importable — the arrows are how they *compose*, not what they *require*. `gate` has no knowledge of `mandate`. `verify` is the only one that reaches across, and it reaches for exactly one thing: mandate's signer, so the rail has one canonicalization rather than two that drift.
 
 1. **Authority** (`src/mandate/`) — issue, use, revoke, across organization → project → agent tiers. Subset gates enforced by the compiler and re-checked at runtime. Every act on an Ed25519-signed hash chain.
-2. **Enforcement** (`src/gate/`) — `Sourced<T>` provenance tags, the four-tier lattice, three declassifiers as the only ascent paths, fail-closed sinks, the judgment seam, and the receipt log.
+2. **Enforcement** (`src/gate/`) — `Sourced<T>` provenance tags, the three-tier lattice (`untrusted → corroborated → verified`; the spec's `asserted` rung was never produced and was removed 2026-10-13), three declassifiers as the only ascent paths, fail-closed sinks, the judgment seam, and the receipt log.
 3. **Evidence** (`src/verify/`) — signs gate's receipts *through* mandate's signer, exports JSONL, and re-verifies from public material alone plus an optional on-chain anchor.
 4. **Adapters** — anything needing a network lives outside the package. Keeping adapters out is what makes the zero-dependency claim true.
 

@@ -137,10 +137,11 @@ reference. So that nothing holding the result can rewrite the registry through i
 becomes an authority value. Nested objects, Maps and Sets inside it are not frozen; typed arrays are
 left alone. If you keep editing a record after wrapping it, wrap a copy.
 
-### `asserted` is not reachable
+### The ladder is three tiers
 
-Four tiers are documented; three are produced. No factory or declassifier currently emits
-`asserted`. Treat the ladder as `untrusted → corroborated → verified` until that changes.
+`untrusted → corroborated → verified`. The spec's fourth rung, `asserted`, was never produced by any
+factory or declassifier and was removed in the 2026-10-13 rail audit; a sink that requires it is a
+`TypeError` at construction.
 
 ---
 

@@ -246,6 +246,14 @@ this package follows [Semantic Versioning](https://semver.org).
   `TierLadderViolation` with `requestedTier: "organization"` can no longer be raised, because only
   `issueMandate` produced it. The other three ladder refusals (agent → project, project → project,
   agent → agent, org → agent) are unchanged and now each pinned by name in the tests.
+- **The `asserted` tier is gone.** `TIERS` is `["untrusted", "corroborated", "verified"]` and the
+  `Tier` type names those three. The spec's fourth rung was documented and never produced: no
+  factory and no declassifier emitted it, so a sink declaring `requires: { x: "asserted" }` could
+  never be satisfied, and `SECURITY.md` already said to treat the ladder as three. **Breaking
+  (types):** `"asserted"` no longer type-checks as a `Tier`; at runtime `makeSink` throws
+  `TypeError` at construction for a `requires` entry of `"asserted"`, as it does for any string
+  outside the lattice, and `minTier` floors a combination containing it to `untrusted`. Receipts
+  are unaffected: no receipt ever carried the tier.
 
 ### Deprecated
 
