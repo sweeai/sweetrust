@@ -13,7 +13,9 @@
 // carries the entry.
 // ============================================================================
 
+import { spawnSync } from "node:child_process"
 import { createHash } from "node:crypto"
+import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
 import { Sourced, allowlisted, corroborate, humanConfirm, makeSink, meetsTier, minTier, ReceiptLog, type JudgmentProvider } from "../../src/gate/trust.js"
 
@@ -1089,11 +1091,17 @@ describe("#5 — an async action that rejects leaves an `errored` receipt behind
     const r = pay({ to: good() })
     expect(r.ok).toBe(true)
     expect(r.receipt.decision).toBe("executed")
-    expect(r.ok && r.result).toBe(returned) // the host gets ITS promise, not a wrapper
+    // The flip (chunk 4 #5): the host gets a WRAPPED promise that writes the
+    // receipt and re-raises — not its own object, which the gate's handler
+    // would otherwise have marked handled. The "#5 flip" block below holds
+    // the rest of the contract; this line is the one the old test asserted
+    // the other way.
+    expect(r.ok && r.result).not.toBe(returned)
     let rejected = false
     await returned!.catch(() => {
       rejected = true
     })
+    await (r.ok ? (r.result as Promise<unknown>).catch(() => undefined) : undefined)
     await settle()
     expect(rejected).toBe(true)
     expect(log.all().map((x) => x.decision)).toEqual(["executed", "errored"])
@@ -1133,7 +1141,8 @@ describe("#5 — an async action that rejects leaves an `errored` receipt behind
         queueMicrotask(() => onRejected?.(new Error("thenable failed")))
       },
     }))
-    pay({ to: good() })
+    const r = pay({ to: good() })
+    await (r.ok ? Promise.resolve(r.result).catch(() => undefined) : undefined)
     await settle()
     expect(log.all().map((x) => x.decision)).toEqual(["executed", "errored"])
     expect(log.all()[1]!.reason).toContain("thenable failed")
@@ -1143,6 +1152,144 @@ describe("#5 — an async action that rejects leaves an `errored` receipt behind
     const sync = mk(() => "paid")
     expect(sync.pay({ to: good() }).receipt.decision).toBe("executed")
     expect(sync.log.all()).toHaveLength(1)
+    const thrower = mk(() => {
+      throw new Error("boom")
+    })
+    expect(() => thrower.pay({ to: good() })).toThrow("boom")
+    expect(thrower.log.all().map((x) => x.decision)).toEqual(["errored"])
+  })
+})
+
+// ── #5 FLIP (chunk 4) — the gate's rejection handler was eating the host's crash ─
+// The #5 fix above attached `.then(undefined, h)` to the host's promise and
+// returned that promise unchanged. Attaching ANY handler marks a promise
+// handled, so a host that forgot its own catch silently lost Node's
+// unhandled-rejection crash: the action failed, the receipt said so, and the
+// process sailed on with nobody told. The sink now returns
+// `Promise.resolve(result).then(v => v, err => { append errored; throw err })`:
+// the receipt is written AND the rejection re-raised, so the promise the host
+// holds still rejects — and still crashes the process if the host ignores it.
+// The cost, stated: `result` is no longer the same object execute() returned.
+describe("#5 flip — the sink's promise writes the errored receipt AND re-raises; the host keeps its crash", () => {
+  const good = () => Sourced.fromAuthority("ACME", "reg")
+  const settle = async () => {
+    await new Promise((r) => setTimeout(r, 0))
+  }
+  const mk = (execute: () => unknown, judgment?: { provider: JudgmentProvider; floor: number }) => {
+    const log = new ReceiptLog()
+    const pay = makeSink<{ to: Sourced<string> }, unknown>({
+      name: "pay",
+      requires: { to: "verified" },
+      mode: "enforce",
+      log,
+      ...(judgment ? { judgment } : {}),
+      execute,
+    })
+    return { log, pay }
+  }
+
+  it("(a)+(b) an async execute that rejects: `errored` trails `executed`, and the sink's promise rejects with the SAME error", async () => {
+    const boom = new Error("network down after debit")
+    let host: Promise<never> | undefined
+    const { log, pay } = mk(() => {
+      host = (async () => {
+        throw boom
+      })()
+      return host
+    })
+    const r = pay({ to: good() })
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    expect(r.result).not.toBe(host) // a wrapper, not the host's object
+    await expect(r.result as Promise<unknown>).rejects.toBe(boom) // the identical error, re-raised
+    await settle()
+    expect(log.all().map((x) => x.decision)).toEqual(["executed", "errored"])
+    expect(log.all()[1]!.reason).toContain("network down after debit")
+    expect(log.verifyChain()).toBe(true)
+  })
+
+  it("the same through the judgment-flagged path", async () => {
+    const unsure: JudgmentProvider = { name: "u", assess: () => ({ assessment: "unsure", confidence: 0.4, rationale: "near the cap" }) }
+    const boom = new Error("rpc timeout")
+    const { log, pay } = mk(async () => {
+      throw boom
+    }, { provider: unsure, floor: 0.8 })
+    const r = pay({ to: good() })
+    expect(r.receipt.decision).toBe("judgment-flagged")
+    await expect(r.ok ? (r.result as Promise<unknown>) : Promise.resolve()).rejects.toBe(boom)
+    await settle()
+    expect(log.all().map((x) => x.decision)).toEqual(["judgment-flagged", "errored"])
+  })
+
+  it("a non-promise thenable comes back as a real Promise that rejects with its reason", async () => {
+    const reason = new Error("thenable failed")
+    const { log, pay } = mk(() => ({
+      then(_onFulfilled: unknown, onRejected?: (e: unknown) => void) {
+        queueMicrotask(() => onRejected?.(reason))
+      },
+    }))
+    const r = pay({ to: good() })
+    expect(r.ok && r.result).toBeInstanceOf(Promise)
+    await expect(r.ok ? (r.result as Promise<unknown>) : Promise.resolve()).rejects.toBe(reason)
+    await settle()
+    expect(log.all().map((x) => x.decision)).toEqual(["executed", "errored"])
+  })
+
+  // The property itself, measured where it lives: in a fresh Node process. A
+  // host that forgets its catch must still crash (exit 1, the error on
+  // stderr), and the `errored` receipt must already be on the log when it
+  // does. Under the pre-flip gate this exits 0 with an empty stderr: the
+  // receipt was written and the crash was swallowed. Needs Node's type
+  // stripping to import the TypeScript source directly.
+  const [major = 0, minor = 0] = process.versions.node.split(".").map(Number)
+  const canStripTypes = major >= 23 || (major === 22 && minor >= 6)
+  const gateUrl = new URL("../../src/gate/index.ts", import.meta.url).href
+  const probe = (hostCatches: boolean) => {
+    const script = `
+      import { makeSink, ReceiptLog, Sourced } from ${JSON.stringify(gateUrl)}
+      const log = new ReceiptLog()
+      const pay = makeSink({
+        name: "pay", requires: { to: "verified" }, mode: "enforce", log,
+        execute: async () => { throw new Error("rejected after debit") },
+      })
+      process.on("exit", (code) => {
+        process.stdout.write(JSON.stringify({ code, decisions: log.all().map((r) => r.decision) }))
+      })
+      const r = pay({ to: Sourced.fromAuthority("ACME", "reg") })
+      ${hostCatches ? "r.result.catch(() => {})" : "/* the host forgets its catch */"}
+    `
+    const run = spawnSync(process.execPath, ["--experimental-strip-types", "--no-warnings", "--input-type=module", "-e", script], {
+      encoding: "utf8",
+      cwd: fileURLToPath(new URL("../../", import.meta.url)),
+      timeout: 20_000,
+    })
+    return { status: run.status, stdout: JSON.parse(run.stdout) as { code: number; decisions: string[] }, stderr: run.stderr }
+  }
+
+  it.skipIf(!canStripTypes)("in a real process: a host that forgets its catch still crashes, with the errored receipt already written", () => {
+    const { status, stdout, stderr } = probe(false)
+    expect(stdout.decisions).toEqual(["executed", "errored"])
+    expect(status).toBe(1)
+    expect(stdout.code).toBe(1)
+    expect(stderr).toContain("rejected after debit")
+  })
+
+  it.skipIf(!canStripTypes)("CONTROL: a host that handles the sink's promise exits 0, with the same two receipts", () => {
+    const { status, stdout, stderr } = probe(true)
+    expect(stdout.decisions).toEqual(["executed", "errored"])
+    expect(status).toBe(0)
+    expect(stderr).not.toContain("rejected after debit")
+  })
+
+  it("CONTROL: a fulfilled promise resolves to its value through the wrapper, and the sync paths are untouched", async () => {
+    const { log, pay } = mk(async () => "paid")
+    const r = pay({ to: good() })
+    await expect(r.ok ? (r.result as Promise<unknown>) : Promise.resolve()).resolves.toBe("paid")
+    await settle()
+    expect(log.all().map((x) => x.decision)).toEqual(["executed"])
+    const sync = mk(() => "paid")
+    const s = sync.pay({ to: good() })
+    expect(s.ok && s.result).toBe("paid")
     const thrower = mk(() => {
       throw new Error("boom")
     })

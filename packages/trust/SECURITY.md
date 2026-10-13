@@ -103,8 +103,13 @@ before anything has happened. So the `executed` (or `judgment-flagged`) receipt 
 records that the action was **started**, not that it succeeded. If the promise later rejects, the
 sink appends an `errored` receipt naming the rejection — behind the first one, never in its place.
 Read the two together: an `executed` with no `errored` after it is an action whose promise did not
-reject, as far as this log can know. The sink observes your promise; it does not catch it. Handle the
-rejection yourself as you always would.
+reject, as far as this log can know.
+
+The promise in `result` is **not** the object your `execute()` returned. It is a wrapper that writes
+the `errored` receipt and then re-raises the same error, so handle it exactly as you would have
+handled your own. If you forget, Node's unhandled-rejection crash still fires. The sink does not
+attach a handler to your promise and walk away — that would mark your promise handled and swallow
+the crash, which is what the first version of this feature did for one day on 2026-10-13.
 
 ### A declassifier's refusal leaves no receipt
 

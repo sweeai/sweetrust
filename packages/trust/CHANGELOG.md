@@ -142,6 +142,13 @@ this package follows [Semantic Versioning](https://semver.org).
   `value`, `tier` and `provenance` at the top so the rule holds for every export without an
   exception. `AGENTS.md` § Non-negotiables states the rule, and a new export that takes an object
   is added to `test/intake-poison.test.ts` in the same commit.
+- **The sink no longer swallows a host's unhandled-rejection crash.** The `errored` receipt for an
+  async action (above) was attached as a rejection handler on the host's own promise, and the host
+  got that promise back unchanged. Attaching a handler marks a promise handled, so a host that
+  forgot its own catch lost Node's crash: the action failed, the log said so, and the process
+  carried on with nobody told. The sink now returns a wrapped promise that writes the receipt and
+  re-raises the same error. A host that handles `result` sees exactly what it saw before; a host
+  that ignores it crashes, as Node intends. See *Changed* for the one visible difference.
 
 ### Added
 
@@ -234,6 +241,12 @@ this package follows [Semantic Versioning](https://semver.org).
 - Both Ed25519 factories and `publicKeyHexFromPem` throw at construction on key material they
   used to accept silently (see Security). `makeInMemorySignerLive` throws on a marker that is a
   real key.
+- **Breaking:** for an async or thenable `execute()`, `SinkResult.result` is a new `Promise` that
+  settles exactly as yours does — resolving to the same value or rejecting with the same error —
+  but it is **not the same object** your `execute()` returned, and a non-Promise thenable comes
+  back as a real `Promise`. `await`, `.then` and `.catch` behave as before; an identity comparison
+  against your own promise will not. This is what lets the sink re-raise instead of swallowing
+  (see *Security*). A synchronous `execute()` is returned untouched.
 - **Breaking: every receipt hash changes. A receipt log written by 0.3.0 does not verify under
   0.4.0.** The interior hash (`Receipt.hash`, and so every `prevHash` after it) is now computed
   over canonical JSON — keys sorted at every depth — through the same `canonicalJSON` the

@@ -1028,26 +1028,42 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
     // audit). The `errored` receipt below is sync-only: `execute: async () =>
     // { throw }` RETURNS a rejected promise, an ordinary value, so the receipt
     // said `executed` and the log never heard about the rejection — and every
-    // real sink is async. A thenable result gets a rejection handler that
-    // appends an `errored` receipt when it settles. The receipt that PRECEDES
-    // the outcome stays as written (it cannot wait for a network), and the
+    // real sink is async. A thenable result is wrapped so that an `errored`
+    // receipt is appended when it rejects. The receipt that PRECEDES the
+    // outcome stays as written (it cannot wait for a network), and the
     // `errored` one TRAILS it; SECURITY.md § Honest limits states the order.
-    // The host's own promise is returned unchanged and the host must still
-    // handle it — this observes, it does not catch. No fulfilment handler:
-    // success is what the preceding receipt already says.
-    const trailErrored = (result: unknown, prefix: string): void => {
+    //
+    // THE WRAPPER IS WHAT THE HOST GETS BACK, not its own promise (the flip of
+    // 2026-10-13, chunk 4). The first fix attached `.then(undefined, handler)`
+    // to the host's promise and returned that promise unchanged. Attaching ANY
+    // handler marks a promise handled, so a host that forgot its own catch
+    // silently lost Node's unhandled-rejection crash: the action failed, the
+    // receipt said so, and the process carried on with nobody told. This
+    // returns `Promise.resolve(result).then(v => v, err => { append; throw
+    // err })`: the receipt is written AND the rejection re-raised, so the
+    // promise in the host's hand still rejects with the same error — and still
+    // crashes the process if the host ignores it. `Promise.resolve` adopts a
+    // non-Promise thenable (one `then` call, as before) so the host always
+    // holds a real Promise. The cost, stated in the CHANGELOG: `result` is not
+    // the same object execute() returned. No fulfilment handler beyond the
+    // pass-through: success is what the preceding receipt already says.
+    const trailErrored = (result: R, prefix: string): R => {
       const thenable =
         result !== null && (typeof result === "object" || typeof result === "function") && typeof (result as { then?: unknown }).then === "function"
-      if (!thenable) return
-      ;(result as PromiseLike<unknown>).then(undefined, (err: unknown) => {
-        cfg.log.append({
-          at: now(),
-          sink: cfg.name,
-          decision: "errored",
-          args: rendered,
-          reason: `${prefix} — then its promise rejected; the action may or may not have taken effect: ${firstLine(err)}`,
-        })
-      })
+      if (!thenable) return result
+      return Promise.resolve<unknown>(result).then(
+        (v) => v,
+        (err: unknown) => {
+          cfg.log.append({
+            at: now(),
+            sink: cfg.name,
+            decision: "errored",
+            args: rendered,
+            reason: `${prefix} — then its promise rejected; the action may or may not have taken effect: ${firstLine(err)}`,
+          })
+          throw err
+        },
+      ) as unknown as R // a Promise<X> stands in for the R = Promise<X> the host declared
     }
 
     // Own-key redaction lookup over the own-key snapshot. `spec.redact?.[key]`
@@ -1244,7 +1260,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
           })
           throw err
         }
-        trailErrored(result, note)
+        result = trailErrored(result, note)
         const receipt = cfg.log.append({ at: now(), sink: cfg.name, decision: "judgment-flagged", args: rendered, reason: note })
         return { ok: true, result, receipt }
       }
@@ -1278,7 +1294,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
       throw err
     }
 
-    trailErrored(result, `${cfg.name} passed the walls and was recorded as ${decision}`)
+    result = trailErrored(result, `${cfg.name} passed the walls and was recorded as ${decision}`)
     const receipt = cfg.log.append({
       at: now(),
       sink: cfg.name,
