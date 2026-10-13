@@ -864,6 +864,11 @@ function renderForReceipt(value: unknown, policy: "raw" | "hash" | "truncate"): 
  * without one of those each argument's `value` is `unknown` until narrowed. It
  * used to be `any`, which let a sink compile against a shape nobody declared
  * (DAN-1159 item 4a).
+ *
+ * `execute` receives a SNAPSHOT: a null-prototype object holding only the keys
+ * `requires` declares, each read once from the caller's object at check time.
+ * An argument the spec never declared is recorded on the receipt and raised as
+ * a violation, and does not reach `execute` in any mode.
  */
 export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec: {
   readonly name: string
@@ -960,6 +965,17 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
     // receipt silently loses the record of an argument that reached the sink.
     const rendered: Receipt["args"] = Object.create(null)
     const violations: string[] = []
+    // THE snapshot execute() and the judge receive — null-prototype, holding
+    // ONLY declared keys, each from the single read in the loop below. Until
+    // the 2026-10-13 gate audit execute() got the caller's own `args` object
+    // and the judge re-read `args[k].value` from it, so a getter or Proxy that
+    // answered GOOD on the check and EVIL on the action cleared enforce with a
+    // verified receipt (the 2026-08-31 rule, "the object you checked must be
+    // the object you act on", applied here at last), and a symbol-keyed,
+    // non-enumerable or inherited argument reached execute untier-checked and
+    // off the receipt. An undeclared argument is still recorded and still a
+    // violation; it no longer reaches execute() in ANY mode.
+    const checked: Record<string, Sourced<unknown>> = Object.create(null)
 
     // Own-key redaction lookup over the own-key snapshot. `spec.redact?.[key]`
     // used to walk the prototype, so a key like `constructor` or `toString`
@@ -989,11 +1005,12 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
       }
     }
     for (const key of Object.keys(cfg.requires) as Array<keyof Args & string>) {
-      const arg = args[key]
+      const arg = args[key] // the ONE read; everything below, and execute(), sees this binding
       if (arg === undefined) {
         violations.push(`${key} requires ${cfg.requires[key]} but was not provided`)
         continue
       }
+      checked[key] = arg
       // ── Nominal brand check — the DECLARED path (DAN-904) ──────────────
       // Everything below this point reads `arg.tier` and calls `arg.describe()`
       // and then writes both onto a signed, hash-chained, possibly on-chain
@@ -1083,8 +1100,13 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
     // Judgment wall — probabilistic, self-aware. Only runs once tiers are satisfied.
     // Judgment sees RAW values (redaction shapes the durable receipt, never the judge's view).
     if (cfg.judgment && violations.length === 0) {
-      const tierArgs: Record<string, { value: unknown; tier: Tier }> = {}
-      for (const k of Object.keys(rendered)) tierArgs[k] = { value: args[k]!.value, tier: args[k]!.tier }
+      // Built from `checked`, with a null prototype (#8 of the 2026-10-13 gate
+      // audit): a plain `{}` made a declared argument named `__proto__` vanish
+      // from the provider's view while it sat on the receipt. Judgment runs
+      // only when there are no violations, so every entry here is a branded
+      // Sourced that passed its tier.
+      const tierArgs: Record<string, { value: unknown; tier: Tier }> = Object.create(null)
+      for (const k of Object.keys(checked)) tierArgs[k] = { value: checked[k]!.value, tier: checked[k]!.tier }
       const judge = cfg.judgment
       const providerName = String(judge.provider.name)
 
@@ -1139,7 +1161,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
         const note = `⚖ ${cfg.name} judgment-flagged (${preview(v.assessment)}, ${confText}): ${rationale}`
         let result: R
         try {
-          result = cfg.execute(args)
+          result = cfg.execute(checked as Args)
         } catch (err) {
           // Same hole as the main path (V5) — a flagged action that throws must
           // not vanish, and this one is MORE important: it was already doubtful.
@@ -1165,7 +1187,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
     // propagates; the caller still gets its exception.
     let result: R
     try {
-      result = cfg.execute(args)
+      result = cfg.execute(checked as Args)
     } catch (err) {
       cfg.log.append({
         at: now(),

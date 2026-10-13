@@ -71,6 +71,12 @@ this package follows [Semantic Versioning](https://semver.org).
 - `verifySignedChain` reports a non-object record such as `[42]` as `malformed-record`. It used to
   report `missing-signature`.
 - The npm package no longer ships sourcemaps.
+- **Breaking:** `execute()` receives a snapshot of the declared arguments, not the object you
+  passed. It has a null prototype and holds only the keys in `requires`, each read once when it
+  was checked. An argument you did not declare is still written on the receipt and still a
+  violation, but it no longer reaches `execute()` in any mode, `observe` and `warn` included. The
+  judgment provider sees the same snapshot. Before this, a getter that answered one value when
+  checked and another when used cleared `enforce` with a receipt for the first value.
 
 ### Deprecated
 
