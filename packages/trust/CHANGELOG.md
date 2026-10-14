@@ -179,6 +179,12 @@ this package follows [Semantic Versioning](https://semver.org).
   another user. The 0.3.0 entry below still uses the old name.
 - **Breaking:** `revokeMandate` takes `revokerScope` (the scope you hold) in place of `revoker`
   (a name). It succeeds when that scope is the target or one of its ancestors.
+- **Breaking:** the host-produced `human-context` audit event names no vendor.
+  `MandateHumanContextEvent` carries `externalRef: { system, id, url? }` (the new `ExternalRef`
+  type) in place of `linearCommentUrl` and `linearIssueId`, and `TriggerSource` is
+  `"external" | "code"` in place of `"linear" | "code"`. Nothing in this package produces the event
+  or reads those fields; the shape is what a host records about a comment made in its own tool.
+  No published consumer existed.
 - **Breaking:** issued scopes and their capability lists are frozen.
 - **Breaking:** `makeJsonlSignedAuditLive` returns `{ mandateAudit, signedAudit }`, not the
   signed surface alone. Pass `mandateAudit` wherever an audit log is taken.

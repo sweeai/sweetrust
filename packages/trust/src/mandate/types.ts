@@ -195,19 +195,20 @@ export type MandateError =
     }
 
 /**
- * TriggerSource — forensic primitive distinguishing audit records that
- * originated from a direct code call (`"code"`) versus a Linear-issue-driven
- * flow (`"linear"`). Per mandate-v0-1-linear-integration.allium I11.
+ * TriggerSource — which kind of caller produced an audit record: a direct code
+ * path (`"code"`), or a host-side flow driven from outside this process — a
+ * human acting through an issue tracker, a chat command, a ticket
+ * (`"external"`).
  *
- * When something goes wrong, "did a human do this via Linear, or did a code
- * path do this directly?" must be answerable instantly. Both are legitimate;
- * both must be auditable; the distinction matters for trust analysis.
+ * When something goes wrong, "did a person do this through a tool, or did a
+ * code path do this directly?" must be answerable from the log alone. Both are
+ * legitimate; both are audited; the distinction is for forensics.
  *
- * Default for every entry point (the three issuers, useCapability,
- * revokeMandate) is `"code"`. A Linear-triggered flow passes `"linear"`
- * explicitly.
+ * Every entry point (the three issuers, `useCapability`, `revokeMandate`)
+ * defaults to `"code"`. A host that drives them from an external system passes
+ * `"external"` explicitly.
  */
-export type TriggerSource = "linear" | "code"
+export type TriggerSource = "external" | "code"
 
 /**
  * MandateGrantEvent — append-only audit record for an issuance.
@@ -248,25 +249,35 @@ export interface MandateRevokeEvent {
 }
 
 /**
- * MandateHumanContextEvent — documentation-only audit record streamed from
- * Linear comments on a mandate-linked issue. Per
- * mandate-v0-1-linear-integration.allium I8: comments on a mandate-linked
- * issue do NOT trigger state changes; they are documentation queryable
- * alongside the typed grant/invoke/revoke events for forensic analysis.
+ * ExternalRef — where, outside this process, a record came from: the system's
+ * name as the host names it (an issue tracker, a chat tool, a mail system), the
+ * record's id inside that system, and a URL when the system has one. This
+ * package never produces or follows one; it records what the host hands it.
+ */
+export interface ExternalRef {
+  readonly system: string
+  readonly id: string
+  readonly url?: string
+}
+
+/**
+ * MandateHumanContextEvent — a documentation-only audit record a HOST appends
+ * when a human says something about a mandate in an external system (a comment
+ * on a ticket, a message in a channel). It changes no state. It is queryable
+ * alongside the typed grant / invoke / revoke events so a forensic reader sees
+ * what people said next to what the code did.
  *
- * Only ever has `triggerSource: "linear"` — code paths cannot manufacture
- * "human context" out of nowhere; this event class only exists because a
- * human wrote a comment on a Linear issue.
+ * Nothing in this package produces one. Its `triggerSource` is always
+ * `"external"`: a code path cannot manufacture human context.
  */
 export interface MandateHumanContextEvent {
   readonly type: "human-context"
   readonly mandateId: MandateId
-  readonly linearCommentUrl: string
-  readonly linearIssueId: string
+  readonly externalRef: ExternalRef
   readonly author: string
   readonly body: string
   readonly timestamp: ISO8601
-  readonly triggerSource: "linear"
+  readonly triggerSource: "external"
 }
 
 export type MandateAuditEvent =

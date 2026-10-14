@@ -9,6 +9,7 @@
 
 export type {
   Capability,
+  ExternalRef,
   GrantorId,
   ISO8601,
   MandateAuditEvent,

@@ -54,9 +54,8 @@ export const defineCapability = <const Id extends string>(key: Id): Capability<I
  * Extract the canonical string key for a `Capability`.
  *
  * A capability carries a stable `key`. This helper centralizes the lookup
- * (and tolerates any-cast escape hatches where a bare string sneaks in),
- * mirroring the branded-object-or-string fallback that previously appeared
- * across mandate.ts and the linear.ts adapter.
+ * (and tolerates any-cast escape hatches where a bare string sneaks in): the
+ * one branded-object-or-string fallback, where several copies used to live.
  */
 export const capabilityKey = (cap: Capability): string => {
   const branded = cap as unknown as { key?: string }
