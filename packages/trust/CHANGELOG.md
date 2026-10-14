@@ -14,7 +14,7 @@ verified by one version is unaffected by an upgrade; a chain that crosses a vers
 re-verified by the newer code, which may refuse it — each such change is a *Breaking* bullet in the
 release that makes it. A patch version changes none of these.
 
-## [Unreleased]
+## [0.4.0] — 2026-10-14
 
 **0.4.0 is the first npm release of this package.** 0.3.0 and everything before it were never
 published, so every *Breaking* bullet below is breaking relative to an unpublished tree: no
