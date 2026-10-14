@@ -66,9 +66,8 @@ same reason: the only way to hold one is to be handed one.
   new root. It cannot act inside an existing tree it was not handed. An agent that receives only a
   scope and a sink (the daemon's shape) cannot mint roots.
 - **Breaking against the unpublished 0.3.0:** `revokeMandate`'s signature, frozen return values,
-  and a new `MandateError` variant. Consumers outside this repo that must migrate:
-  `sweeai/integrations/linear` (revoke with the scope from its existing `creatorScopeLookup`) and
-  the SweeAI daemon (present the org scope it already holds).
+  and a new `MandateError` variant. The two private consumers were migrated with this change; no
+  public consumer existed.
 
 ## Amended 2026-10-13
 
