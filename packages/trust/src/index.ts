@@ -4,7 +4,9 @@
  *   SweeMandate signs  ->  SweeGate enforces  ->  SweeVerify proves
  *
  * This is the convenience entry. Each primitive is also reachable on its own
- * subpath, and importing one does NOT pull the others into your bundle:
+ * subpath. Importing `sweetrust/gate` or `sweetrust/mandate` pulls in neither
+ * of the other two (only the shared `canon` leaf); `sweetrust/verify` pulls
+ * both, by design — it signs through mandate's signer and wraps gate's log:
  *
  *   import { issueOrgMandate } from "sweetrust/mandate"
  *   import { Sourced, makeSink } from "sweetrust/gate"

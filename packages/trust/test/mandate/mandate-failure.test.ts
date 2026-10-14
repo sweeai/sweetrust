@@ -25,7 +25,7 @@ import {
   MandateFailure,
 } from "../../src/mandate/index.ts"
 import { generateKeyPairSync } from "node:crypto"
-import type { GrantorId } from "../../src/mandate/types.ts"
+import type { GrantorId, MandateError } from "../../src/mandate/types.ts"
 
 const Deploy = defineCapability("deploy")
 const OPERATOR = "operator" as GrantorId
@@ -106,5 +106,24 @@ describe("a mandate refusal is an Error (DAN-1159 item 4c)", () => {
     expect(json).not.toHaveProperty("stack")
     expect(json._tag).toBe(e._tag)
     expect(Object.keys(json)).toEqual(Object.keys(e))
+  })
+})
+
+describe("MandateError carries no variant that nothing throws", () => {
+  test("`DirectConstructionRejected` is not a `_tag` (removed 2026-10-13: never thrown, never tested)", () => {
+    // Nothing in src/ ever threw it — `git grep DirectConstructionRejected src`
+    // found only its own declaration — so a consumer who wrote a case for it
+    // was handling a refusal that could not happen. Shrinking the union before
+    // the first publish is free; afterwards it is a breaking change. If this
+    // directive is ever reported unused, the dead variant is back.
+    // @ts-expect-error — not a member of the union
+    const dead: MandateError["_tag"] = "DirectConstructionRejected"
+    expect(dead).toBe("DirectConstructionRejected")
+    const live: ReadonlyArray<MandateError["_tag"]> = [
+      "CapabilityNotInGrantorScope", "MaliciousMandateMetadata", "RevokerNotInDelegationChain",
+      "MandateRevoked", "AncestorMandateRevoked", "MandateNotIssued", "MandateScopeForged",
+      "DelegationChainBroken", "TierLadderViolation", "AuditLogCorrupt",
+    ]
+    expect(new Set(live).size).toBe(10)
   })
 })

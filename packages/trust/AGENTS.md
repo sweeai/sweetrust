@@ -7,7 +7,7 @@
 
 **The trust rail: `sweetrust/mandate` issues authority · `sweetrust/gate` enforces it · `sweetrust/verify` proves it happened.** One npm package, three subpath exports, zero runtime dependencies.
 
-Until 2026-07-30 these were three packages (`@sweetrust/mandate`, `@sweetrust/gate`, `@sweetrust/verify`). All three were unpublished, so the merge was free. The reasoning: `npm i sweetrust` is a product; three scoped installs is a build system the user has to assemble. Import-level decoupling was preserved — each subpath is its own bundle entry, and importing one does not pull the others.
+Until 2026-07-30 these were three packages (`@sweetrust/mandate`, `@sweetrust/gate`, `@sweetrust/verify`). All three were unpublished, so the merge was free. The reasoning: `npm i sweetrust` is a product; three scoped installs is a build system the user has to assemble. Import-level decoupling was preserved — each subpath is its own bundle entry; importing `gate` or `mandate` pulls in neither of the other two (only the shared `canon` leaf), and `verify` pulls both, by design.
 
 ## Corrections applied at the merge — do not reintroduce these
 

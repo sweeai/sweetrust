@@ -38,8 +38,8 @@ const failMandate = (error: MandateError): never => {
  * returned value carries only the `key` at runtime; the LITERAL key type is
  * preserved so the compile-time subset gate can distinguish capabilities.
  *
- * Replaces the former `Context.Tag(...)` capability declaration (which
- * required Effect). A capability is just an identity with a name.
+ * A capability is just an identity with a name; no dependency-injection
+ * framework is involved, and the runtime object carries nothing but `key`.
  */
 export const defineCapability = <const Id extends string>(key: Id): Capability<Id> => {
   // Fail where the string was authored (the 2026-10-13 mandate audit). The

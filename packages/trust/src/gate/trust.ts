@@ -9,8 +9,8 @@
 // ENFORCES (this module, in-process) · SweeVerify proves (sweetrust/verify,
 // evidence). Money limits are the chain's own job, never this module's.
 //
-// Dependency-free by design (node builtins only) — this package IS the kernel
-// of the standalone lib; Effect/BAML/cage integrations wrap it, never fork it.
+// Dependency-free by design (node builtins only) — this module IS the kernel;
+// integrations wrap it, never fork it.
 // Adding a dependency here is an architecture decision requiring an ADR.
 //
 // Spec rules implemented:

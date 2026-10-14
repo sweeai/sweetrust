@@ -123,9 +123,9 @@ export interface SignedMandateAuditService {
  * `makeInMemoryAuditLive`.
  *
  * Because execution is synchronous, the read-sign-append sequence is
- * inherently serialized — no semaphore needed (the original Effect version
- * used one only to guard against concurrent fibers observing the same chain
- * head).
+ * inherently serialized: within one process no other caller can run between
+ * the read of the chain head and the append, so no lock is needed. Across
+ * processes it is NOT serialized — one writer per store file (SECURITY.md).
  */
 export const makeInMemorySignedAuditLive = (
   signer: MandateSignerService,

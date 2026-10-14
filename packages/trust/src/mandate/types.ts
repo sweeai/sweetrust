@@ -1,25 +1,15 @@
 /**
- * @sweetrust/mandate — core types
+ * sweetrust/mandate — core types
  *
- * Implements the mandate capability-declaration specification v0.0.
- *
- * The wedge primitive: type-enforced agent capability declaration. A
- * MandateScope structurally constrains what capabilities an agent can
- * invoke. The TypeScript compiler refuses to satisfy a function whose
- * Effect.R-channel requires a capability not declared in the agent's scope.
- *
- * v0.0 ships:
- *   - Capability tagging (via Effect.Context.Tag)
- *   - MandateScope with provenance (delegation DAG)
- *   - Typed errors (MandateError union)
- *   - MandateAudit Layer interface (implementation in audit.ts)
- *
- * v0.1+ deferred:
- *   - Runtime mandate-check on every capability invocation
- *   - Linear-as-state-machine integration (per Tim/Lalph pattern)
- *   - On-chain settlement integration (per s402)
- *   - Multi-tier mandate hierarchy
- *   - Cryptographic signing of audit records
+ * Type-enforced agent capability declaration. A `MandateScope` is a typed
+ * bundle of capabilities at a tier. The compiler refuses a `useCapability`
+ * call whose capability is not in the scope's tuple (`Cap extends
+ * Caps[number]`) and refuses a delegation whose capabilities are not a subset
+ * of the grantor's (`ChildCaps extends ReadonlyArray<ParentCaps[number]>`);
+ * the issuers re-check both at runtime for callers with no compiler in the
+ * loop. Every grant, invocation and revocation lands on an append-only audit
+ * log, signed and hash-chained when a signer is wired. Refusals are the typed
+ * `MandateError` union, thrown as `MandateFailure`.
  */
 /**
  * A capability is identified by a stable string `key`. The compiler tracks
@@ -155,10 +145,6 @@ export type MandateError =
       readonly _tag: "DelegationChainBroken"
       readonly mandateId: MandateId
       readonly brokenAncestorId: MandateId
-    }
-  | {
-      readonly _tag: "DirectConstructionRejected"
-      readonly reason: string
     }
   | {
       // Raised at issue time when the grantor's tier cannot delegate the
@@ -301,8 +287,8 @@ export type MandateAuditEvent =
  *     most recent records remains catchable only by an external anchor, exactly
  *     as @sweetrust/verify documents for its receipt chain.)
  *   - signerPublicKeyHex: the public key the signature was computed with
- *     (per I10, persisted on every record so a verifier-only Layer can
- *     verify without knowing the private key; future-proofs key rotation).
+ *     (persisted on every record so a verifier-only consumer can verify
+ *     without the private key; future-proofs key rotation).
  *     NB: this proves internal consistency, not authorship — pinning the
  *     EXPECTED operator key is the caller's job (DAN-642).
  *   - signedAt: timestamp at signing (authenticated — inside the signature)
@@ -313,9 +299,9 @@ export type MandateAuditEvent =
  *     signature to its protocol context so it cannot be replayed as another
  *     record type under a shared key (DAN-641).
  *
- * Consumers without a MandateSigner Layer in scope continue to see raw
- * MandateAuditEvent objects (v0.0 + v0.1 + v0.1.1 backward compat). The
- * signed wrapper is opt-in via the SignedMandateAudit Layer composition.
+ * The unsigned audit factories record raw `MandateAuditEvent` objects; the
+ * signed factories (`makeInMemorySignedAuditLive`, `makeJsonlSignedAuditLive`)
+ * wrap each one in this envelope.
  */
 export interface Signed<P> {
   readonly payload: P
@@ -352,9 +338,11 @@ export interface VerifyAuditChainResult {
 }
 
 /**
- * MandateAudit — Layer interface for the append-only audit log. Mirrors the
- * EvalRecorder pattern from sense/evals/. v0.0 ships JSONL recording;
- * v0.1+ adds cryptographic signing.
+ * MandateAuditService — the append-only audit log every issuer, `useCapability`
+ * and `revokeMandate` take. Four factories produce one: `makeInMemoryAuditLive`
+ * and `makeJsonlAuditLive` (unsigned), and the `mandateAudit` half of
+ * `makeInMemorySignedAuditLive` / `makeJsonlSignedAuditLive` (signed and
+ * hash-chained).
  */
 export interface MandateAuditService {
   readonly record: (event: MandateAuditEvent) => void

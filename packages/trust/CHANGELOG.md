@@ -13,8 +13,8 @@ this package follows [Semantic Versioning](https://semver.org).
   permanently revoke the org root by naming its grantor. Scopes the module did not issue are now
   refused with `MandateScopeForged`. That covers copies, JSON round trips, and literals that copy
   every public field. `parentScope` is now a detached view with no authority.
-- **The tier ladder holds at runtime**, not only at compile time. Agent → agent, org → agent and
-  non-org grantors through `issueMandate` now throw the new `TierLadderViolation`.
+- **The tier ladder holds at runtime**, not only at compile time. Agent → project, project →
+  project, agent → agent and org → agent now throw the new `TierLadderViolation`.
 - **The signed JSONL store is now the audit log itself.** `makeJsonlSignedAuditLive` re-verifies
   the whole file against the signer's key on every read, including a direct `isRevoked`. It
   refuses to append past a corrupt line. Before this, a corrupt line made it sign the next record
@@ -154,6 +154,9 @@ this package follows [Semantic Versioning](https://semver.org).
 
 - `AuditLogCorrupt { storePath, line, reason, detail? }`, a new `MandateError` variant thrown by
   every read of a corrupt store.
+- `TierLadderViolation { grantorMandateId, grantorTier, requestedTier }`, a new `MandateError`
+  variant thrown by `issueProjectMandate` and `issueAgentMandate` when the grantor's tier cannot
+  delegate the requested tier (see *Security*).
 - `MandateFailure`, the `Error` subclass mandate refusals are thrown as, and `MandateFailure.is(e)`
   to narrow a caught value.
 - `VerifyAuditChainResult.reason` gains `"empty-chain"` and `"malformed-record"`, plus an optional
@@ -270,6 +273,10 @@ this package follows [Semantic Versioning](https://semver.org).
 
 ### Removed
 
+- **`DirectConstructionRejected` is gone from `MandateError`.** Nothing ever threw it and nothing
+  tested it, so a consumer's `case` for it handled a refusal that could not happen. **Breaking
+  (types):** an exhaustive switch over `MandateError["_tag"]` that still names it fails to compile.
+  The union has ten variants.
 - **`issueMandate` and `issueRootMandate` are gone.** This supersedes the Deprecated entry below,
   from earlier in this same release: they never shipped deprecated, they ship removed. Both stamped
   `"organization"` on every scope they minted, so an organization's child claimed to be an
