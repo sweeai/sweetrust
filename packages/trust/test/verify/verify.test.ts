@@ -1,5 +1,5 @@
 /**
- * Tests for @sweetrust/verify v0.1 — the evidence invariants, extracted from the
+ * Tests for sweetrust/verify v0.1 — the evidence invariants, extracted from the
  * demo that specified them (sweeai verify.demo.ts, 10/10: a hostile-handoff
  * drill where every attack on the exported chain must be caught, including
  * the one — tail truncation — only the on-chain anchor can catch).
@@ -66,7 +66,7 @@ describe("SignedReceiptLog", () => {
     expect(log.verifyChain()).toBe(true) // the interior kernel chain still verifies
   })
 
-  test("wrapper chain follows @sweetrust/mandate spec I8: previousHash = sha256(canonicalJSON(prev signed record)), null first", () => {
+  test("wrapper chain follows sweetrust/mandate spec I8: previousHash = sha256(canonicalJSON(prev signed record)), null first", () => {
     const { log } = session()
     const [first, second] = log.signed()
     expect(first!.previousHash).toBeNull()

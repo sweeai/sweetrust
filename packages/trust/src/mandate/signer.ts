@@ -1,7 +1,5 @@
 /**
- * @sweetrust/mandate v1.0 — MandateSigner (Ed25519 audit-record signing)
- *
- * Per the mandate multi-tier + signing specification v0.2 I6 + I7 + I10.
+ * sweetrust/mandate — MandateSigner (Ed25519 audit-record signing)
  *
  * Responsibilities:
  *   - Sign MandateAuditEvent payloads via Ed25519 over canonical JSON
@@ -17,10 +15,10 @@
  *     where Ed25519 setup is overkill.
  *   - makeEd25519SignerLive(config) — production signer using Node.js's
  *     `node:crypto` Ed25519 primitives. The signing key is INJECTED at
- *     construction (per INV-DCE-1 + INV-SEC-1). Never read from
- *     process.env inside the factory; that would be runtime config.
+ *     construction. Never read from process.env inside the factory; that
+ *     would be runtime config.
  *
- * Canonical JSON serialization (per I7):
+ * Canonical JSON serialization:
  *   - Object keys sorted alphabetically
  *   - No whitespace
  *   - Identical input produces identical bytes (deterministic signing)
@@ -53,7 +51,7 @@ export const MANDATE_AUDIT_DOMAIN = "swee.mandate-audit.v1"
 /**
  * signedPreimage — the EXACT bytes a Signed<P> record's signature is computed
  * over. THE single definition, shared by sign(), verify(), and any external
- * verifier (@sweetrust/verify's verifySignedChain), so the preimage can never
+ * verifier (sweetrust/verify's verifySignedChain), so the preimage can never
  * drift across packages — the same discipline that keeps canonicalJSON single.
  *
  * It binds the full authenticated envelope: the domain tag, the payload, the
@@ -98,7 +96,7 @@ export interface MandateSignerService {
     readonly previousHash: string | null
     /**
      * Domain-separation tag for this record type (e.g. MANDATE_AUDIT_DOMAIN,
-     * or @sweetrust/verify's RECEIPT_DOMAIN). Folded into the signed preimage so
+     * or sweetrust/verify's RECEIPT_DOMAIN). Folded into the signed preimage so
      * a signature is bound to its protocol context. Required on every record (DAN-641).
      */
     readonly domain: string
@@ -206,11 +204,10 @@ export const makeInMemorySignerLive = (
  *
  * The operator generates the key pair OUTSIDE the substrate (e.g., via
  * `openssl genpkey -algorithm ed25519`) and passes the PEM strings here
- * at construction time. Per INV-SEC-1 the keys are treated as
- * secrets; the substrate never logs them, never echoes them in errors,
- * never serializes them outside of the signing operation itself. Per
- * INV-DCE-1, the keys are NOT read from process.env inside the factory —
- * key wiring is compile-time wiring at the construction site.
+ * at construction time. The keys are treated as secrets: the factory never
+ * logs them, never echoes them in errors, never serializes them outside of
+ * the signing operation itself. The keys are NOT read from process.env inside
+ * the factory — key wiring is wiring at the construction site.
  *
  * For verifier-only consumers (audit consumers that should be able to
  * verify but NOT sign), use makeEd25519VerifierLive with only the public
@@ -293,7 +290,7 @@ export const makeEd25519SignerLive = (
   // bytes; the SPKI wrapper adds ~12 bytes of ASN.1 structure for a total
   // of ~44 bytes (88 hex chars). Verify (below) re-imports via the same
   // SPKI/DER pair so the format is symmetric. Persisted on every signed
-  // record per spec I10. (Cross-runtime verifiers that expect the raw
+  // record. (Cross-runtime verifiers that expect the raw
   // 32-byte key — e.g., browser WebCrypto, Sui Move — must strip the
   // ASN.1 wrapper themselves; v0.2.1 may add a `rawPublicKeyHex` field.)
   const publicKeyDer = publicKey.export({ format: "der", type: "spki" })
@@ -343,12 +340,12 @@ export const makeEd25519SignerLive = (
  * analysis pipelines) who must verify the signed audit chain WITHOUT being
  * able to sign new records. The `sign` operation is structurally
  * unreachable — calling it throws. `verify` works via the per-record
- * `signerPublicKeyHex` (per spec I10), so verification doesn't depend on the
- * verifier's own configured public key matching the records' public keys
- * (future-proofs key rotation per spec I11).
+ * `signerPublicKeyHex`, so verification doesn't depend on the verifier's own
+ * configured public key matching the records' public keys (future-proofs key
+ * rotation).
  *
- * Closes spec mandate-v0-2 reconstruction-test #8: persist signed JSONL,
- * restart with verifier-only signer, verifyAuditChain returns valid:true.
+ * The cross-process case this exists for: persist signed JSONL, restart with
+ * a verifier-only signer, `verifyAuditChain` returns valid:true.
  */
 export interface Ed25519VerifierConfig {
   readonly publicKeyPem: string
@@ -375,12 +372,10 @@ export const makeEd25519VerifierLive = (
       )
     },
     verify: <P>(signed: Signed<P>): boolean => {
-      // Verify against the public key declared on the record (per spec
-      // I10), not the verifier's own. Verifier-only consumers can validate
-      // chains signed by any signer whose records carry the matching
-      // public key; the operator decides which keys to trust at the
-      // application layer (allow-list via verifyAuditChain caller, future
-      // v0.2.1 work per spec I11).
+      // Verify against the public key declared on the record, not the
+      // verifier's own. Verifier-only consumers can validate chains signed
+      // by any signer whose records carry the matching public key; which
+      // keys to trust is the caller's pin in verifyAuditChain.
       // Each field is read once (the 2026-10-13 verify audit).
       const { signature, signerPublicKeyHex, payload, previousHash, signedAt, domain } = signed
       const signatureBuffer = Buffer.from(assertEd25519SignatureShape(signature), "hex")
@@ -396,7 +391,7 @@ export const makeEd25519VerifierLive = (
 
 /**
  * verifyAuditChain — walk a log of signed events, validate every signature
- * AND every hash-chain link. Per spec I8 + I9.
+ * AND every hash-chain link.
  *
  * Returns the first index where verification fails (or null if all valid)
  * plus a typed reason discriminator. Operators use this to identify
@@ -409,7 +404,7 @@ export const makeEd25519VerifierLive = (
  * verifier-only signers work correctly.
  *
  * `opts.trustedSignerPublicKeyHex` is REQUIRED, mirroring the sibling
- * `verifySignedChain` in @sweetrust/verify. Verifying a record against the key
+ * `verifySignedChain` in sweetrust/verify. Verifying a record against the key
  * it CARRIES proves the record is internally consistent, not that the honest
  * signer authored it — an attacker who obtains the log can rewrite every
  * event, re-sign under their OWN key, set each record's signerPublicKeyHex to

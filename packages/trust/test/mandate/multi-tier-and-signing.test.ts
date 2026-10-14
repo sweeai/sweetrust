@@ -1,5 +1,5 @@
 /**
- * Tests for @sweetrust/mandate v1.0 multi-tier hierarchy + signed audit chain.
+ * Tests for sweetrust/mandate v1.0 multi-tier hierarchy + signed audit chain.
  *
  * Per the mandate multi-tier + signing specification v0.2 reconstruction
  * tests. Coverage:

@@ -1,9 +1,7 @@
 /**
- * @sweetrust/mandate — issuance, invocation, revocation flows
+ * sweetrust/mandate — issuance, invocation, revocation flows
  *
- * Per the mandate capability-declaration specification v0.0.
- *
- * Inheritance: per spec I9, this module imports the constitutional pre-check
+ * This module imports the constitutional pre-check
  * primitive from ./security.ts (formerly a standalone package, folded back into mandate 2026-07-19). Mandate metadata (rationale strings and, since the
  * 2026-10-13 mandate audit, capability identifiers) is exactly the attack
  * surface the pre-check exists to defend.
@@ -318,7 +316,7 @@ const assertRequestedCapsBackedByGrantorGrant = (
 /**
  * useCapability — invoke a capability under a mandate.
  *
- * Per spec I6: the type system enforces this at the call site via the
+ * The type system enforces this at the call site via the
  * `Cap extends Caps[number]` constraint — passing a capability not in the
  * mandate's scope is a TYPE ERROR at the call site, not a runtime error.
  * At runtime, this helper also checks that the mandate is not revoked AND
@@ -346,7 +344,7 @@ export const useCapability = <
   const triggerSource: TriggerSource = args.triggerSource ?? "code"
   const mandateId: MandateId = mandate.id
 
-  // Per I8 + multi-tier-spec I4: a mandate is invocable iff the leaf AND every
+  // A mandate is invocable iff the leaf AND every
   // ancestor in the delegation chain is unrevoked. Revoking the org-tier
   // mandate must structurally disable every descendant; otherwise the
   // org-tier "kill switch" is silently inert (the substrate's load-bearing
@@ -483,7 +481,7 @@ export const useCapability = <
 /**
  * revokeMandate — remove a mandate from the active pool.
  *
- * Per spec I8: the revoker must be in the delegation chain. Since the authority
+ * The revoker must be in the delegation chain. Since the authority
  * binding fix (DAN-1157, F2) that means PROVEN by possession, not claimed by name. The caller presents
  * `revokerScope`, a scope this module issued, and it must BE the target or one
  * of the target's ancestors (the chain is walked from the audit log via
@@ -511,7 +509,7 @@ export const revokeMandate = (args: {
   const { mandateId, revokerScope, rationale } = args
   const triggerSource: TriggerSource = args.triggerSource ?? "code"
 
-  // I9: rationale pre-check
+  // rationale pre-check
   const rationaleCheck = constitutionalPreCheck(rationale)
   if (rationaleCheck) {
     failMandate({
@@ -576,7 +574,7 @@ export const revokeMandate = (args: {
 }
 
 // ============================================================================
-// v1.0 multi-tier issue functions (per spec mandate-v0-2-multi-tier-and-signing)
+// Multi-tier issue functions
 // ============================================================================
 //
 // Three named entry points encode the tier-transition discipline at the API
@@ -588,8 +586,8 @@ export const revokeMandate = (args: {
 // caller walks through it. `assertGrantorTier` is the runtime half, and it
 // reads `tier` only from an issued (frozen) grantor (DAN-1157, F3).
 //
-// Each function preserves the v0.0 + v0.1 + v0.1.1 invariants:
-//   - I9 constitutional pre-check on rationale strings BEFORE persistence
+// Each function preserves the invariants:
+//   - constitutional pre-check on rationale strings BEFORE persistence
 //   - Audit recording with triggerSource discriminator
 //   - Branded ULID-shaped MandateId
 //   - Immutable scope; re-grant via new function call
@@ -599,8 +597,8 @@ export const revokeMandate = (args: {
 //   - Typed parent-scope chain via the ParentScope generic parameter
 
 /**
- * issueOrgMandate — bootstrap an organization-tier mandate (the root tier
- * per spec I2 + I4). The grantor is the human-in-the-loop or any root
+ * issueOrgMandate — bootstrap an organization-tier mandate (the root tier).
+ * The grantor is the human-in-the-loop or any root
  * authority; there is no parent scope (this IS the root).
  */
 export const issueOrgMandate = <Caps extends ReadonlyArray<Capability>>(args: {
@@ -657,7 +655,7 @@ export const issueOrgMandate = <Caps extends ReadonlyArray<Capability>>(args: {
 
 /**
  * issueProjectMandate — derive a project-tier mandate from an
- * organization-tier grantor scope. Per spec I3, the compile-time constraint
+ * organization-tier grantor scope. The compile-time constraint
  * `ProjectCaps extends ReadonlyArray<OrgCaps[number]>` enforces that every
  * project-tier capability is a member of the parent org-tier capability
  * tuple. Granting a capability the org does not hold is a TYPE ERROR at
@@ -755,7 +753,7 @@ export const issueProjectMandate = <
 
 /**
  * issueAgentMandate — derive an agent-tier mandate from a project-tier
- * grantor scope. Per spec I3 + I4, the compile-time constraint
+ * grantor scope. The compile-time constraint
  * `AgentCaps extends ReadonlyArray<ProjectCaps[number]>` enforces project-
  * tier subset; the function signature requires a project-tier grantorScope
  * (NOT agent-tier), structurally refusing upward delegation from agent.

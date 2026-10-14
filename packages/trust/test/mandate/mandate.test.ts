@@ -1,5 +1,5 @@
 /**
- * Tests for @sweetrust/mandate — the root flow (issue / use / revoke).
+ * Tests for sweetrust/mandate — the root flow (issue / use / revoke).
  *
  * Written against the v0.0 pair `issueRootMandate` / `issueMandate`; migrated
  * to the tiered issuers when the pair was removed (2026-10-13 rail audit). Every

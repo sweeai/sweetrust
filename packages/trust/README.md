@@ -91,8 +91,6 @@ pay({ to: payee.value, amount })
 // and the refusal itself is on the receipt chain.
 ```
 
-Implements the trust-types specification §4–§5.
-
 ---
 
 ## `sweetrust/mandate` — authority

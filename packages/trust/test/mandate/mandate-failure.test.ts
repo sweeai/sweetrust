@@ -93,8 +93,8 @@ describe("a mandate refusal is an Error (DAN-1159 item 4c)", () => {
   })
 
   test.each(refusals())("GUARD, %s: the union's fields are still OWN properties", (_label, e) => {
-    // Consumers switch on `error._tag` today (the daemon kernel, the Linear
-    // integration). A wrapper shape (`e.error._tag`) would break every one.
+    // Consumers switch on `error._tag` today (the private hosts that consume
+    // this package). A wrapper shape (`e.error._tag`) would break every one.
     expect(Object.hasOwn(e, "_tag")).toBe(true)
     expect(Object.keys(e)[0]).toBe("_tag")
   })

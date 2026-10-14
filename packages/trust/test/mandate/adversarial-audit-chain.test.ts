@@ -120,7 +120,7 @@ describe("verifyAuditChain — adversarial (DAN-641 envelope signing)", () => {
     const chain = buildChain(signer, EVENTS)
     // drop the final record — the shorter chain is still internally consistent, validly signed,
     // AND signed by the pinned key. Only an external anchor over the head can catch this
-    // (as @sweetrust/verify documents for its receipt chain).
+    // (as sweetrust/verify documents for its receipt chain).
     expect(check(chain.slice(0, 2), signer).valid).toBe(true)
   })
 })

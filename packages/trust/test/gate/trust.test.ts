@@ -1,5 +1,5 @@
 /**
- * Tests for @sweetrust/gate v0.1 — the kernel invariants, extracted from the
+ * Tests for sweetrust/gate v0.1 — the kernel invariants, extracted from the
  * demo suite that specified them (sweeai trust.demo.ts 11/11 + the §6 attack
  * replay). The demos remain the narrative; these are the regressions.
  *
@@ -8,7 +8,7 @@
  *   Rule 2  — inference is not evidence (fromLLM is Untrusted, always;
  *             confidence rides along and never affects tier)
  *   Rule 3  — ascent only through the audited declassifier trio; no public
- *             ascent path is importable (Session-003 C6 forgery regression)
+ *             ascent path is importable (the forgery regression)
  *   Rule 3a — accumulation never reaches Verified (corroborate caps at
  *             Corroborated)
  *   Rule 3b — corroboration requires disjoint ancestry
@@ -120,7 +120,7 @@ describe("Sourced factories", () => {
   })
 })
 
-// ── Rule 3 structural: no importer can mint or re-tier (Session-003 C6) ──────
+// ── Rule 3 structural: no importer can mint or re-tier (the forgery regression) ──────
 
 describe("forgery resistance", () => {
   test("no public ascent path exists on the class or its instances", () => {

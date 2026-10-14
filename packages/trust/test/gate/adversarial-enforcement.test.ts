@@ -1,4 +1,4 @@
-// Adversarial pass on the enforcement kernel — the suite @sweetrust/gate never had.
+// Adversarial pass on the enforcement kernel — the suite sweetrust/gate never had.
 // ============================================================================
 // mandate carries three adversarial/property suites; verify carries one; gate —
 // the package whose entire job is REFUSING — carried none. These tests do not

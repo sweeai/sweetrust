@@ -3,17 +3,17 @@ title:       "ADR 0001: authority is possession of an issued scope, in-process"
 kind:        adr
 status:      accepted
 updated:     2026-10-13
-owner:       sweetrust g4
-verified_by: "pnpm -C packages/trust test (authority-binding.test.ts) + the six mutation witnesses in the DAN-1157 commit message + the 2026-10-13 getter-split block (8 tests, 7 watched RED)"
+owner:       sweetrust maintainers
+verified_by: "pnpm -C packages/trust test (authority-binding.test.ts) + the six mutation witnesses in the 23c67d1 commit message + the 2026-10-13 getter-split block (8 tests, 7 watched RED)"
 ---
 
 # ADR 0001: authority is possession of an issued scope, in-process
 
 **Status:** Accepted
-**Implementation:** shipped (`23c67d1`)
+**Implementation:** merged (`23c67d1`)
 **Force:** invariant. The check is `test/mandate/authority-binding.test.ts`, and each of its six
 defenses has a recorded mutation witness in the `23c67d1` commit message.
-**Date:** 2026-09-23 · **Ticket:** DAN-1157 · **Extends:** DAN-637
+**Date:** 2026-09-23 · **Extends:** the 2026-07-22 audit-log-is-truth decision (ARCHITECTURE.md § 2)
 
 ## Context
 
@@ -28,8 +28,8 @@ event*. That cannot work. `MandateGrantEvent` does not record `tier`, and it pri
 
 A second path needed no string at all. `issueProjectMandate` and `issueAgentMandate` stored the
 **genuine** grantor object in `parentScope`, typed as the parent scope. An agent reached the org
-root with `agent.parentScope.parentScope`: no cast, no forgery, and every check passed. DAN-637 had
-already ruled that this pointer must not be a *revocation* input. Nobody had asked whether it was an
+root with `agent.parentScope.parentScope`: no cast, no forgery, and every check passed. The 2026-07-22
+battle-test had already ruled that this pointer must not be a *revocation* input. Nobody had asked whether it was an
 *authority* input.
 
 ## Decision

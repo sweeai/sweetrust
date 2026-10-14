@@ -22,7 +22,7 @@ published consumer is affected.
 
 ### Security
 
-- **Mandate authority is now possession of an issued scope, not a string** (DAN-1157, ADR 0001).
+- **Mandate authority is now possession of an issued scope, not a string** (ADR 0001).
   Before this, an agent could invoke as its ancestors by naming their mandate id, or by reading
   `agent.parentScope.parentScope`. That second path needed no cast. The same agent could also
   permanently revoke the org root by naming its grantor. Scopes the module did not issue are now

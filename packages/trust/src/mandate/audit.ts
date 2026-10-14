@@ -1,8 +1,7 @@
 /**
- * @sweetrust/mandate — MandateAudit (in-memory + JSONL implementations)
+ * sweetrust/mandate — MandateAudit (in-memory + JSONL implementations)
  *
- * Per the mandate capability-declaration specification I10 — append-only
- * with cryptographic-signing scaffolding documented for v0.1.
+ * Append-only audit log, two storage backings.
  *
  * Two implementations for the unsigned audit:
  *   - InMemoryAudit — for tests and ephemeral demos
@@ -98,7 +97,7 @@ export const makeInMemoryAuditLive = (): MandateAuditService => {
 /**
  * SignedMandateAudit — v1.0 audit service that signs every recorded event
  * with the configured signer and chains records via SHA-256 `previousHash`
- * linkage. Per spec mandate-v0-2 I6 + I9.
+ * linkage.
  *
  * Two storage backings (mirroring the unsigned audit):
  *   - makeInMemorySignedAuditLive — plain array closure
