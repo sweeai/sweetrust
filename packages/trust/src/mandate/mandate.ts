@@ -144,8 +144,8 @@ const nowISO = (): ISO8601 => new Date().toISOString() as ISO8601
 // pointer is not a REVOCATION input. This makes it no AUTHORITY input either.
 //
 // Scope: in-process. A scope that crosses a process boundary arrives as data
-// and cannot invoke. Cross-process authority belongs to the Move kernel; the
-// named upgrade path, if a TS consumer ever needs it, is a per-mandate secret
+// and cannot invoke. Cross-process authority belongs to the chain's own
+// primitives; the named upgrade path, if a TS consumer ever needs it, is a per-mandate secret
 // whose hash is committed in the grant event (docs/adr/0001).
 //
 // The reference, once (the 2026-10-13 mandate audit). Possession is checked

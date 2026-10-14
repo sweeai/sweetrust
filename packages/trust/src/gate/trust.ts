@@ -5,9 +5,9 @@
 // to the sink, tiers rise ONLY through named declassifiers, and every sink
 // decision (allow or refuse) emits a receipt.
 //
-// SWEE AI anatomy: SweeMandate signs (@sweetrust/mandate, authority) · the
-// firewall ENFORCES (this package in-process + the Move SpendCage on-chain) ·
-// SweeVerify proves (@sweetrust/verify, evidence).
+// The rail: SweeMandate signs (sweetrust/mandate, authority) · SweeGate
+// ENFORCES (this module, in-process) · SweeVerify proves (sweetrust/verify,
+// evidence). Money limits are the chain's own job, never this module's.
 //
 // Dependency-free by design (node builtins only) — this package IS the kernel
 // of the standalone lib; Effect/BAML/cage integrations wrap it, never fork it.
@@ -241,7 +241,7 @@ export class Sourced<T> {
     }
     this.value = value
     this.tier = tier
-    // Runtime immutability, not just compile-time `readonly` (Session-003 C6):
+    // Runtime immutability, not just compile-time `readonly`:
     // in strict mode, reassigning tier/provenance on a frozen instance throws.
     // `ancestors` is sealed rather than merely frozen — see sealAncestors.
     // The chain array was frozen; the event OBJECTS in it were not, so
@@ -295,15 +295,15 @@ export class Sourced<T> {
    * (§5: the reference-plane write path is the attack surface; its mutation
    * ceremony lives with the registry, not here.)
    *
-   * TCB HONESTY (read before trusting a `verified` from this door — see the C8
-   * block below the class): this is the trust computing base. Any code that can
-   * import this module and call `fromAuthority("anything")` mints a `verified`
-   * value — the string is never checked against a registry, signature, or
-   * on-chain object. So a Gate `verified` is IN-PROCESS observe/warn/dev-time
-   * authority, NOT unforgeable enforcement. Unforgeable enforcement is the Move
-   * SpendCage's job (testnet 0x5c1588…fdfa), where capabilities cannot be minted
-   * by convention. Never treat a Gate `verified` receipt as proof that real
-   * authority was present; that is the four-property discriminator, in code.
+   * TCB HONESTY (read before trusting a `verified` from this door — see the
+   * honest-limits block below the class): this is the trust computing base. Any
+   * code that can import this module and call `fromAuthority("anything")` mints
+   * a `verified` value — the string is never checked against a registry,
+   * signature, or on-chain object. So a Gate `verified` is IN-PROCESS
+   * observe/warn/dev-time authority, NOT unforgeable enforcement. In-process
+   * TypeScript cannot be unforgeable; money limits belong to the chain's own
+   * primitives (on Sui, native `sui::allowance`). Never treat a Gate `verified`
+   * receipt as proof that real authority was present.
    */
   static fromAuthority<T>(value: T, authority: string): Sourced<T> {
     // An object value is frozen IN PLACE, shallowly. `allowlisted` hands its
@@ -342,16 +342,16 @@ Object.freeze(Sourced)
 Object.freeze(Sourced.prototype)
 
 // ── Tier ascent (module-private — Rule 3 made structural) ───────────────────
-// Session-003 C6 (Adversary): ascent MUST NOT be reachable from outside this
-// module, or the declassifiers are audited doors in a wall with a hole next
-// to them. Only the three declassifiers below may call this.
+// Ascent MUST NOT be reachable from outside this module, or the declassifiers
+// are audited doors in a wall with a hole next to them. Only the three
+// declassifiers below may call this.
 //
-// TCB honesty (C8): within this process, `fromAuthority` and this module are
-// the trust computing base — any code that can import trust.ts and lie about
-// an authority name can mint Verified values. The TS runtime is therefore an
-// OBSERVE/WARN/dev-time authority; UNFORGEABLE enforcement is the Move cage's
-// job (SpendCage, testnet 0x5c1588…fdfa), where capabilities cannot be minted
-// by convention. This is the spec's four-property discriminator, in code.
+// TCB honesty: within this process, `fromAuthority` and this module are the
+// trust computing base — any code that can import trust.ts and lie about an
+// authority name can mint Verified values. The TS runtime is therefore an
+// OBSERVE/WARN/dev-time authority. In-process TypeScript cannot be
+// unforgeable; money limits belong to the chain's own primitives (on Sui,
+// native `sui::allowance`).
 
 //
 // `prev` is the declassifier's own SNAPSHOT of the value it checked — its

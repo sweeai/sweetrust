@@ -55,10 +55,10 @@ same reason: the only way to hold one is to be handed one.
 
 ## Consequences
 
-- **In-process only, by design.** A scope that crosses a process boundary (JSONL, a Linear round
-  trip, an HTTP body) arrives as data and **cannot invoke**. That makes `README.md`'s "deserialized
-  payloads do not get through" literally true. Cross-process authority belongs to the Move kernel,
-  which is already the unforgeable layer (`SECURITY.md` § *Honest limits*).
+- **In-process only, by design.** A scope that crosses a process boundary (JSONL, an issue-tracker
+  round trip, an HTTP body) arrives as data and **cannot invoke**. That makes `README.md`'s
+  "deserialized payloads do not get through" literally true. Cross-process authority belongs to the
+  chain's own primitives, which are the unforgeable layer (`SECURITY.md` § *Honest limits*).
 - **The host's job is now explicit:** hand each agent its own scope and nothing above it. Whoever
   holds a reference holds its authority. That is the object-capability contract, and it is what the
   detached `parentScope` protects.
@@ -106,4 +106,4 @@ remain.
 3. **A per-mandate bearer secret** whose sha256 is committed in the grant event. This works across
    processes and is **the named upgrade path** if a TypeScript consumer ever needs a rehydrated
    scope to invoke. Not taken now: no consumer needs it, it adds secret-handling hazards (scopes are
-   logged and printed), and the Move kernel already owns cross-process authority.
+   logged and printed), and cross-process authority belongs to the chain's own primitives.

@@ -64,7 +64,7 @@ test/
 - **Rule 3 is structural, not conventional.** The `Sourced` constructor and `ascend` are module-private; the three declassifiers are the only doors. Any change that makes ascent reachable from outside `src/gate/trust.ts` reopens the Session-003 forgery hole. `test/gate/trust.test.ts` "forgery resistance" guards it.
 - **One canonicalization across the rail.** `canonicalJSON` and `sha256Hex` are defined once, in `src/canon.ts`, a leaf that imports only `node:crypto`. Mandate's signed preimage and chain link, verify's wrapper link and the gate's interior receipt hash all go through it; `signer.ts` re-exports the two names so `sweetrust/mandate`, `sweetrust/verify` and the root hand out the identical function objects. Never grow a second implementation, and never hash with a bare `JSON.stringify` — two canonicalizations means bytes produced on one side fail on the other, and `JSON.stringify` is a second canonicalization (insertion-order keys). `test/index-barrel.test.ts` and `test/canon.test.ts` assert identity, not name-equality, and `test/canon.test.ts` asserts the leaf has no import but `node:crypto`.
 - **The root barrel is curated on purpose.** `src/index.ts` star-exports mandate and gate but names verify's surface by hand. Two `export *` clauses offering the same name make it ambiguous, and ESM resolves ambiguity by **silently omitting** the name — no error, no warning. Do not "simplify" it to three stars.
-- **TCB honesty.** Never claim unforgeability for this package. In-process TypeScript is observe/warn/dev-time authority; the Move cage owns unforgeable enforcement. Keep the honest-limits comment blocks in `src/gate/trust.ts` and `src/verify/verify.ts` intact.
+- **TCB honesty.** Never claim unforgeability for this package. In-process TypeScript is observe/warn/dev-time authority and cannot be unforgeable; money limits belong to the chain's own primitives (on Sui, native `sui::allowance`). Keep the honest-limits comment blocks in `src/gate/trust.ts` and `src/verify/verify.ts` intact.
 - **Receipt hash discipline.** The interior receipt hash is `sha256Hex(receiptBody(receipt))`, and `receiptBody` is `canonicalJSON` over the receipt's seven fields (`src/gate/trust.ts`). `ReceiptLog.nextReceipt`, `verifyChain` and verify's recomputation all call that one function, so there is no key order to agree on and no second site to keep in step. Changing the body SHAPE (adding or renaming a field) still changes every hash: it is a 0.x breaking change with a CHANGELOG entry and an ADR, never a quiet edit. `docs/adr/0002-receipt-interior-hash-is-canonical.md` records the move from `JSON.stringify`.
 - **Wrap, never fork.** Integrations that need an external service live *outside* this package, as separate adapter packages. That is what keeps the zero-dependency claim true.
 - **Constitutional pre-check before persistence.** Any function that persists an authored string must run `constitutionalPreCheck` first. Inherited v0.0 I9 invariant.
@@ -90,9 +90,10 @@ Every public-API change ships with a test. When you change the export surface, t
 
 ## Related
 
-- **On-chain revocation.** A Move `RevocationRegistry` is the authoritative kill switch over
-  custodied funds. It is a sibling implementation under a shared name and a separate deployment —
-  **this package makes zero chain calls by design.** `SECURITY.md` § *Honest limits* explains why
-  that distinction decides whether your "Revoke" button actually stops money.
+- **Revocation and money.** `revokeMandate` writes only to this package's audit log; the kernel
+  (`mandate`, `gate`, `verify`) makes **zero chain calls by design.** Money limits belong to the
+  chain's own primitives (on Sui, native `sui::allowance`), and a "Revoke" button that is supposed
+  to stop money must act there. `SECURITY.md` § *Honest limits* explains why that distinction
+  decides whether the button does anything.
 - **Adapters.** Anything that needs a network, a vendor SDK or an API key belongs outside this
   package. That constraint is what makes the zero-dependency claim true.

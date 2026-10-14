@@ -151,7 +151,7 @@ console.log(verifyAuditChain(signedAudit.listAllSigned(), signer, {
 }).valid) // true; tampering flips it
 ```
 
-**Honest boundary:** this is the *off-chain* authority layer. Its subset gates are compile-time plus audit-log-backed, and a fully compromised host could bypass them. Unforgeable enforcement is the Move `SpendCage`'s job. The two compose; neither claims the other's property.
+**Honest boundary:** this is in-process authority. Its subset gates are compile-time plus audit-log-backed, and a fully compromised host could bypass them. In-process TypeScript cannot be unforgeable. Money limits belong to the chain's own primitives (on Sui, native `sui::allowance`); this package's `revokeMandate` writes only to this log.
 
 ---
 
@@ -207,15 +207,13 @@ Both demos are in this repository, not in the published tarball — clone to run
 
 The multi-tier demo is the centerpiece: it builds an org → project → agent chain, signs every record, then **rewrites a rationale after signing** and reports the exact corrupted index — followed by removing a middle record and catching the broken hash link.
 
-Beyond the suite, the rail has a live testnet weld: a legitimate invoice settles on-chain, a poisoned one never forms a transaction, a bypassed firewall is still caged, and the receipts verify as third-party evidence — including the refusal that never touched the chain.
-
 ---
 
 ## What's free, and what isn't
 
-**Everything in this package is free, forever.** That includes the Move modules and on-chain enforcement — not just the TypeScript.
+**Everything in this package is free, forever**, under Apache-2.0: the mandates, the gate, the receipt chains and their verification.
 
-The line is drawn by **who is buying**, never by which language a feature is written in:
+The line is drawn by **who is buying**, never by which feature it is:
 
 > **Free — what one person can run for themselves.**
 > **Paid — what an organization needs someone else to operate or vouch for.**
@@ -223,16 +221,15 @@ The line is drawn by **who is buying**, never by which language a feature is wri
 | Free forever | Paid |
 |---|---|
 | Compile-time provenance checking | Hosted anchoring and verification, with uptime |
-| Branded capability types | Org policy administration — delegation hierarchies, multi-tenant issuance, revocation at scale |
+| Branded capability types and tiered mandates | Org policy administration — delegation hierarchies, multi-tenant issuance, revocation at scale |
 | Runtime gate and boundary enforcement | Compliance artifacts — audit export, retention attestation, the bundle a security review asks for |
-| **On-chain enforcement and anchoring** | Managed deployment under our `AdminCap`, with a written custody policy |
-| Local audit log and self-generated receipts | Support and SLA |
+| Signed audit logs, receipt chains, third-party verification and the anchor-memo convention | Support and SLA |
 
 The test for anything new: **could one person self-serve this?** If yes, it is free.
 
-Two reasons the line sits here rather than at the language boundary. Published Move bytecode on a permissionless chain is public and callable by anyone with gas — it was never a sellable artifact, so charging for it would only have taxed adoption. And a free tier without enforcement is an advisory guardrail, which is the exact failure this project exists to eliminate. **Nothing free will ever depend on anything paid.**
+A free tier without enforcement is an advisory guardrail, which is the exact failure this project exists to eliminate, so enforcement sits in the free column. **Nothing free will ever depend on anything paid.**
 
-**The free column is real today** — six Move modules on testnet, anchoring and chain verification in `sweetrust/verify`, 177 passing tests, a live testnet weld. Use all of it.
+**The free column is real today** — everything in it is in this package and covered by its test suite. Use all of it.
 
 **The paid column is not something you can buy yet.** Note what it actually describes: *operating* and *vouching for* what the free column already does. The capabilities exist; the service around them does not. There is no server running, no uptime commitment, and nobody to call. It is listed here so the boundary is legible before there is anything to sell, rather than negotiated later, feature by feature.
 

@@ -311,5 +311,5 @@ and is not carried forward.
 ### Notes
 
 - Read `SECURITY.md` § *Honest limits* before adopting. It names what this package does **not**
-  protect — in particular that the TypeScript revocation and the on-chain revocation are two
-  separate kill switches, and only the on-chain one stops money.
+  protect — in particular that `revokeMandate` writes only to this package's log and stops no
+  money a chain already holds.

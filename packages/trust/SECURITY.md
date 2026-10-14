@@ -13,28 +13,28 @@ This section exists because a security library that only lists its guarantees is
 of what you need. Everything below is a real boundary of what this package can do, stated before
 you find it yourself.
 
-### The TypeScript revocation and the on-chain revocation are TWO kill switches, and only one stops money
+### Revoking here does not stop money a chain already holds
 
 `revokeMandate()` writes to the audit log. It gates **runtime capability invocations** — an agent
 that asks this rail for authority will be refused.
 
-It makes **zero chain calls, by design.** So if funds are custodied in an on-chain `SpendCage`, an
-operator who calls `revokeMandate()` believing the agent is dead **has done nothing to stop a
-spend.** The delegate key can keep draining an existing cage up to `max_total` until an on-chain
-`mandate::revoke` transaction lands.
+The kernel (`mandate`, `gate`, `verify`) makes **zero chain calls, by design.** So if an agent's
+budget is held by a chain, an operator who calls `revokeMandate()` believing the agent is dead
+**has done nothing to stop a spend.** The key can keep spending within whatever limits the chain
+itself enforces until a revocation lands on that chain.
 
-**The fund kill switch is the on-chain revoke, full stop.** Any "Revoke" control in your product
-that is supposed to stop money must emit that transaction. Wire a single button to the TypeScript
-half and you have built a kill switch that reports success and stops nothing.
+**The fund kill switch is the chain's own primitive, full stop** — on Sui, native `sui::allowance`.
+Any "Revoke" control in your product that is supposed to stop money must act there. Wire a single
+button to the TypeScript half and you have built a kill switch that reports success and stops
+nothing.
 
-🔑 The layered design is sound — each layer is self-sufficient for its own domain, and the cage
-needs no TypeScript input to be safe. The hazard is one word naming two switches.
+🔑 Each layer is self-sufficient for its own domain, and a chain-side limit needs no TypeScript
+input to be safe. The hazard is one word, "revoke", naming two switches.
 
 ### In-process TypeScript is dev-time and observe/warn-tier authority
 
 Code that can import this module and lie about an authority name can mint verified values. That is
-a property of running in the same process, not a defect we intend to fix here. Unforgeable
-enforcement belongs to the on-chain layer.
+a property of running in the same process, not a defect we intend to fix here. In-process TypeScript cannot be unforgeable. Money limits belong to the chain's own primitives (on Sui, native `sui::allowance`); this package's `revokeMandate` writes only to this log.
 
 Use the tiers to find and shape your trust boundaries, and to make refusals auditable. Do not use
 them as the only thing standing between an attacker and custody.
@@ -49,7 +49,7 @@ fields. Two things follow for a host:
   object hands it the parent's authority. A child's `parentScope` is a detached view and carries
   none, so the child itself is safe to hand over.
 - **A scope does not survive a process boundary.** A rehydrated scope cannot invoke. Authority
-  that must cross processes belongs to the on-chain layer. See `docs/adr/0001-authority-is-possession-of-an-issued-scope.md`.
+  that must cross processes belongs to the chain's own primitives. See `docs/adr/0001-authority-is-possession-of-an-issued-scope.md`.
 
 ### Tail truncation is catchable only by an anchor
 
