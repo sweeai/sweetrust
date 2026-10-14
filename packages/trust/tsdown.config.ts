@@ -42,35 +42,6 @@ function assertShippedFilesClean(outDir: string): void {
   }
 }
 
-// Only sweetrust/sui may reach the Sui SDK. Walks the relative-import graph of
-// every OTHER entry's shipped .mjs and fails if any file in it imports
-// `@mysten/sui`, so a shared chunk cannot smuggle the SDK into gate, mandate or
-// verify. The positive control: the sui entry itself MUST reach it, or the walk
-// is not seeing imports at all.
-const IMPORT_SPEC = /(?:import|export)\s*(?:[^'"]*?\sfrom\s*)?['"]([^'"]+)['"]/g;
-
-function reachesSuiSdk(outDir: string, entry: string, seen = new Set<string>()): boolean {
-  if (seen.has(entry)) return false;
-  seen.add(entry);
-  const code = readFileSync(join(outDir, entry), 'utf8');
-  for (const [, spec] of code.matchAll(IMPORT_SPEC)) {
-    if (spec.startsWith('@mysten/sui')) return true;
-    if (spec.startsWith('./') && reachesSuiSdk(outDir, spec.slice(2), seen)) return true;
-  }
-  return false;
-}
-
-function assertSuiIsolated(outDir: string): void {
-  if (!reachesSuiSdk(outDir, 'sui.mjs')) {
-    throw new Error('ship check: sui.mjs does not reach @mysten/sui; the import walk is blind');
-  }
-  for (const entry of ['index.mjs', 'mandate.mjs', 'gate.mjs', 'verify.mjs']) {
-    if (reachesSuiSdk(outDir, entry)) {
-      throw new Error(`ship check: ${entry} reaches @mysten/sui; only sweetrust/sui may import the Sui SDK`);
-    }
-  }
-}
-
 export default defineConfig({
   // One entry per public subpath. The keys MUST match the `exports` map in
   // package.json — `./mandate` is served by `dist/mandate.mjs`, and nothing
@@ -80,7 +51,6 @@ export default defineConfig({
     mandate: 'src/mandate/index.ts',
     gate: 'src/gate/index.ts',
     verify: 'src/verify/index.ts',
-    sui: 'src/sui/index.ts',
   },
   format: ['esm'],
   dts: true,
@@ -90,7 +60,6 @@ export default defineConfig({
   hooks: {
     'build:done': (ctx) => {
       assertShippedFilesClean(ctx.options.outDir);
-      assertSuiIsolated(ctx.options.outDir);
     },
   },
 });

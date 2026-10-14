@@ -54,6 +54,3 @@ export {
   type VerifyFailure,
   type VerifyReport,
 } from "./verify/index.ts"
-
-// Chain-agnostic cage types only (no runtime). The Sui adapter lives at sweetrust/sui.
-export type { CagePolicy, CageSpend, CageSpendResult, CageRefusal, ChainCage } from "./cage/index.ts"

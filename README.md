@@ -4,7 +4,7 @@ Swee's open-source packages. Currently one: [`sweetrust`](packages/trust), unsco
 
 | Package | What it is |
 |---|---|
-| [`sweetrust`](packages/trust) | Trust rails for AI agents — issue authority, enforce it, prove what happened. Zero runtime dependencies in the kernel. |
+| [`sweetrust`](packages/trust) | Trust rails for AI agents — issue authority, enforce it, prove what happened. Zero runtime dependencies. |
 
 ## Why one repository
 

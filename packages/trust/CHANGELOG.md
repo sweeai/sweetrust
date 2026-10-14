@@ -325,8 +325,8 @@ this repository and is not carried forward.
 - **`@swee/trust/gate`** — `Sourced<T>` provenance tiers with sticky taint, three audited
   declassifiers as the only ways a value can rise, fail-closed sinks that declare their appetite,
   and tamper-evident receipts for every decision — allowed *and* refused.
-- **`@swee/trust/verify`** — signed receipt chains re-checkable from public material alone, plus a
-  Sui anchor convention that makes tail truncation detectable.
+- **`@swee/trust/verify`** — signed receipt chains re-checkable from public material alone, plus an
+  anchor-memo convention that makes tail truncation detectable.
 - **Zero runtime dependencies.** Node builtins only.
 
 ### Notes

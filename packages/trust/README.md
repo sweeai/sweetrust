@@ -11,7 +11,7 @@ SweeMandate signs  ──▶  SweeGate enforces  ──▶  SweeVerify proves
 npm i sweetrust
 ```
 
-Zero runtime dependencies for `sweetrust`, `sweetrust/mandate`, `sweetrust/gate` and `sweetrust/verify` — Node builtins only (`node:crypto`, `node:fs`, `node:path`). `sweetrust/sui` is the one entry that needs a peer, `@mysten/sui`.
+Zero runtime dependencies. Node builtins only (`node:crypto`, `node:fs`, `node:path`). Nothing else enters your tree.
 
 ---
 

@@ -384,8 +384,8 @@ function ascend<T>(prev: { readonly value: T; readonly provenance: Provenance },
  * which is byte-identical to the STRING "5n", and a non-finite number became
  * `null`, byte-identical to a literal null. A receipt is evidence of what
  * reached the sink; two different values must not leave identical evidence.
- * Every Sui amount in MIST is a bigint, so this is the common case, not an
- * edge. Everything else renders exactly as before.
+ * On-chain amounts are bigints, so this is the common case, not an edge.
+ * Everything else renders exactly as before.
  *
  * This lives HERE, in gate, and deliberately not in the rail's `canonicalJSON`
  * (src/canon.ts): that function defines signed and hashed bytes for the whole

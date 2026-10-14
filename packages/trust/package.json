@@ -1,7 +1,7 @@
 {
   "name": "sweetrust",
   "version": "0.4.0",
-  "description": "Trust rails for AI agents: issue authority, enforce it, prove what happened. Ed25519-signed mandates, provenance-tiered values with fail-closed sinks, and receipt chains a stranger can verify. Zero runtime dependencies for sweetrust, sweetrust/mandate, sweetrust/gate and sweetrust/verify; sweetrust/sui needs @mysten/sui as an optional peer.",
+  "description": "Trust rails for AI agents: issue authority, enforce it, prove what happened. Ed25519-signed mandates, provenance-tiered values with fail-closed sinks, and receipt chains a stranger can verify. Zero runtime dependencies.",
   "type": "module",
   "main": "./dist/index.mjs",
   "types": "./dist/index.d.mts",
@@ -25,11 +25,6 @@
       "types": "./dist/verify.d.mts",
       "import": "./dist/verify.mjs",
       "default": "./dist/verify.mjs"
-    },
-    "./sui": {
-      "types": "./dist/sui.d.mts",
-      "import": "./dist/sui.mjs",
-      "default": "./dist/sui.mjs"
     },
     "./package.json": "./package.json"
   },
@@ -65,8 +60,7 @@
     "receipts",
     "evidence",
     "verification",
-    "mandate",
-    "sui"
+    "mandate"
   ],
   "engines": {
     "node": ">=20.19.0"
@@ -80,7 +74,6 @@
     "typecheck:forgery": "node --experimental-strip-types scripts/forgery-typecheck.ts"
   },
   "devDependencies": {
-    "@mysten/sui": "2.33.1",
     "@types/node": "^22.0.0",
     "fast-check": "^3.23.2",
     "tsdown": "^0.21.10",
@@ -90,13 +83,5 @@
   "publishConfig": {
     "access": "public"
   },
-  "sideEffects": false,
-  "peerDependencies": {
-    "@mysten/sui": "^2.33.1"
-  },
-  "peerDependenciesMeta": {
-    "@mysten/sui": {
-      "optional": true
-    }
-  }
+  "sideEffects": false
 }

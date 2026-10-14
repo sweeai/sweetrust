@@ -291,7 +291,7 @@ export const makeEd25519SignerLive = (
   // of ~44 bytes (88 hex chars). Verify (below) re-imports via the same
   // SPKI/DER pair so the format is symmetric. Persisted on every signed
   // record. (Cross-runtime verifiers that expect the raw
-  // 32-byte key — e.g., browser WebCrypto, Sui Move — must strip the
+  // 32-byte key — e.g., browser WebCrypto — must strip the
   // ASN.1 wrapper themselves; v0.2.1 may add a `rawPublicKeyHex` field.)
   const publicKeyDer = publicKey.export({ format: "der", type: "spki" })
   const publicKeyHex = publicKeyDer.toString("hex")

@@ -41,19 +41,15 @@ src/
   mandate/        authority   → subpath "sweetrust/mandate"  (types, mandate, audit, signer, security, errors, two demos)
   gate/           enforcement → subpath "sweetrust/gate"     (trust.ts — one file, on purpose)
   verify/         evidence    → subpath "sweetrust/verify"
-  cage/           ChainCage types only, no runtime; re-exported as types from the root
-  sui/            the ChainCage adapter for Sui → subpath "sweetrust/sui"; the one entry with a peer (@mysten/sui)
 scripts/
   readme-typecheck.ts    compiles the README's ts blocks against dist/*.d.mts (a `pnpm typecheck` gate)
   forgery-typecheck.ts   proves an object literal cannot satisfy Sourced in the shipped declarations (same)
-examples/
-  caged-spend-agent.ts   the Sui cage live on testnet; needs a funded key and runs in no gate
 docs/adr/         decisions with force — 0001 authority is possession · 0002 the interior hash is canonical
 test/
   index-barrel.test.ts   guards the barrel against silent export loss
   canon.test.ts          one canonicalization across the rail; the leaf imports only node:crypto
   intake-poison.test.ts  every object-taking export under the second-read Proxy in helpers/poison.ts
-  mandate/ gate/ verify/ sui/   mirror src/
+  mandate/ gate/ verify/   mirror src/
 ```
 
 | File | Role |
