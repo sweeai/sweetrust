@@ -1,5 +1,5 @@
 /**
- * @sweetrust/mandate v1.0 — multi-tier hierarchy + signed audit demo
+ * sweetrust/mandate v1.0 — multi-tier hierarchy + signed audit demo
  *
  * Working code for the whole authority story: a three-tier hierarchy where every
  * grant, use and revocation lands on one Ed25519-signed hash chain.
@@ -67,7 +67,7 @@ const formatSigned = (e: SignedMandateAuditEvent): string => {
 
 const main = (): void => {
   // Generate a fresh Ed25519 key pair for the demo. In production these
-  // come from operator-managed key material per spec I10 / INV-SEC-1.
+  // come from operator-managed key material.
   const { publicKey, privateKey } = generateKeyPairSync("ed25519")
   const signerConfig = {
     privateKeyPem: privateKey.export({ format: "pem", type: "pkcs8" }) as string,
@@ -76,7 +76,7 @@ const main = (): void => {
   const signer = makeEd25519SignerLive(signerConfig)
   const { mandateAudit, signedAudit } = makeInMemorySignedAuditLive(signer)
 
-  console.log("=== @sweetrust/mandate v1.0 — multi-tier + signed audit demo ===\n")
+  console.log("=== sweetrust/mandate v1.0 — multi-tier + signed audit demo ===\n")
 
   // === Step 1: Arthur's organization-tier mandate ===
   const orgScope = issueOrgMandate(

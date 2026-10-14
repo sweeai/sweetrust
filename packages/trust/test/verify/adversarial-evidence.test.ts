@@ -146,7 +146,7 @@ describe("V4 — a signing failure desyncs the two chains permanently", () => {
 })
 
 describe("V5 — an action that throws leaves no receipt at all", () => {
-  // This one is in @sweetrust/gate's makeSink but only shows up here, because here
+  // This one is in sweetrust/gate's makeSink but only shows up here, because here
   // is where the receipt is the DELIVERABLE. makeSink does:
   //     const result = spec.execute(args)   // the irreversible thing happens
   //     const receipt = spec.log.append(…)  // the evidence is written

@@ -3,18 +3,33 @@
 All notable changes to this package. Format follows [Keep a Changelog](https://keepachangelog.com);
 this package follows [Semantic Versioning](https://semver.org).
 
+## Versioning
+
+`sweetrust` is 0.x: **a minor version may break.** Until 1.0 the following are explicitly unstable
+and may change in a minor: the `Receipt["decision"]` union, `VerifyFailure` and
+`VerifyAuditChainResult["reason"]`, the `MandateError` union, the receipt hash body (the bytes
+`receiptBody` returns) and the signed preimage, the width of a `MandateId`'s random suffix, and the
+`swee.*.v1` domain tags. Persisted JSONL is versioned by its `domain` tag. A chain written and
+verified by one version is unaffected by an upgrade; a chain that crosses a version line is
+re-verified by the newer code, which may refuse it — each such change is a *Breaking* bullet in the
+release that makes it. A patch version changes none of these.
+
 ## [Unreleased]
+
+**0.4.0 is the first npm release of this package.** 0.3.0 and everything before it were never
+published, so every *Breaking* bullet below is breaking relative to an unpublished tree: no
+published consumer is affected.
 
 ### Security
 
-- **Mandate authority is now possession of an issued scope, not a string** (DAN-1157, ADR 0001).
+- **Mandate authority is now possession of an issued scope, not a string** (ADR 0001).
   Before this, an agent could invoke as its ancestors by naming their mandate id, or by reading
   `agent.parentScope.parentScope`. That second path needed no cast. The same agent could also
   permanently revoke the org root by naming its grantor. Scopes the module did not issue are now
   refused with `MandateScopeForged`. That covers copies, JSON round trips, and literals that copy
   every public field. `parentScope` is now a detached view with no authority.
-- **The tier ladder holds at runtime**, not only at compile time. Agent → agent, org → agent and
-  non-org grantors through `issueMandate` now throw the new `TierLadderViolation`.
+- **The tier ladder holds at runtime**, not only at compile time. Agent → project, project →
+  project, agent → agent and org → agent now throw the new `TierLadderViolation`.
 - **The signed JSONL store is now the audit log itself.** `makeJsonlSignedAuditLive` re-verifies
   the whole file against the signer's key on every read, including a direct `isRevoked`. It
   refuses to append past a corrupt line. Before this, a corrupt line made it sign the next record
@@ -27,9 +42,8 @@ this package follows [Semantic Versioning](https://semver.org).
   Null records, records with no key and malformed anchors used to throw; they now fail with a
   reason. An empty chain passed `verifyAuditChain` vacuously and is now `empty-chain`.
 - **An action no longer runs without its receipt when the caller's input is the problem.**
-  Receipt arguments are rendered to a JSON snapshot BEFORE `execute()`. A `BigInt` is written as
-  `1000000000n`. An argument that cannot be rendered is a violation, so `enforce` refuses before
-  the action runs. The `raw` policy used to store the caller's object by reference, so editing it
+  Receipt arguments are rendered to a JSON snapshot BEFORE `execute()`. An argument that cannot be
+  rendered is a violation, so `enforce` refuses before the action runs. The `raw` policy used to store the caller's object by reference, so editing it
   after the call rewrote the receipt and made `verifyChain()` report tampering.
 - **Correction to the 0.3.0 entry below.** It says every decision lands in the receipt log,
   allowed *and* refused. Two decisions do not yet: a declassifier's refusal, and an action whose
@@ -154,6 +168,9 @@ this package follows [Semantic Versioning](https://semver.org).
 
 - `AuditLogCorrupt { storePath, line, reason, detail? }`, a new `MandateError` variant thrown by
   every read of a corrupt store.
+- `TierLadderViolation { grantorMandateId, grantorTier, requestedTier }`, a new `MandateError`
+  variant thrown by `issueProjectMandate` and `issueAgentMandate` when the grantor's tier cannot
+  delegate the requested tier (see *Security*).
 - `MandateFailure`, the `Error` subclass mandate refusals are thrown as, and `MandateFailure.is(e)`
   to narrow a caught value.
 - `VerifyAuditChainResult.reason` gains `"empty-chain"` and `"malformed-record"`, plus an optional
@@ -179,6 +196,12 @@ this package follows [Semantic Versioning](https://semver.org).
   another user. The 0.3.0 entry below still uses the old name.
 - **Breaking:** `revokeMandate` takes `revokerScope` (the scope you hold) in place of `revoker`
   (a name). It succeeds when that scope is the target or one of its ancestors.
+- **Breaking:** the host-produced `human-context` audit event names no vendor.
+  `MandateHumanContextEvent` carries `externalRef: { system, id, url? }` (the new `ExternalRef`
+  type) in place of `linearCommentUrl` and `linearIssueId`, and `TriggerSource` is
+  `"external" | "code"` in place of `"linear" | "code"`. Nothing in this package produces the event
+  or reads those fields; the shape is what a host records about a comment made in its own tool.
+  No published consumer existed.
 - **Breaking:** issued scopes and their capability lists are frozen.
 - **Breaking:** `makeJsonlSignedAuditLive` returns `{ mandateAudit, signedAudit }`, not the
   signed surface alone. Pass `mandateAudit` wherever an audit log is taken.
@@ -203,11 +226,10 @@ this package follows [Semantic Versioning](https://semver.org).
   judgment provider sees the same snapshot. Before this, a getter that answered one value when
   checked and another when used cleared `enforce` with a receipt for the first value.
 - **Breaking:** a receipt renders a BigInt as `{"$bigint":"5"}` and a non-finite number as
-  `{"$number":"NaN"}` (or `"Infinity"`, `"-Infinity"`). This supersedes the bullet above that says
-  a BigInt is written as `1000000000n`: that form was byte-identical to the *string*
-  `"1000000000n"`, and `null` was shared by `NaN` and a literal null. Hashed bytes change for those
-  two value kinds only; every other value renders exactly as before, under `raw`, `hash` and
-  `truncate` alike.
+  `{"$number":"NaN"}` (or `"Infinity"`, `"-Infinity"`). Before 0.4.0 a BigInt was written as its
+  digits plus `n`, byte-identical to the *string* `"1000000000n"`, and `null` was shared by `NaN`
+  and a literal null. Hashed bytes change for those two value kinds only; every other value
+  renders exactly as before, under `raw`, `hash` and `truncate` alike.
 - **Breaking:** in `observe` mode every receipt is labelled `observed`, violations or not. A call
   with violations used to be labelled `warned`. `warn` is unchanged.
 - **Breaking:** `Sourced.fromAuthority` freezes an object or array value in place, shallowly. If
@@ -264,8 +286,12 @@ this package follows [Semantic Versioning](https://semver.org).
 
 ### Removed
 
-- **`issueMandate` and `issueRootMandate` are gone.** This supersedes the Deprecated entry below,
-  from earlier in this same release: they never shipped deprecated, they ship removed. Both stamped
+- **`DirectConstructionRejected` is gone from `MandateError`.** Nothing ever threw it and nothing
+  tested it, so a consumer's `case` for it handled a refusal that could not happen. **Breaking
+  (types):** an exhaustive switch over `MandateError["_tag"]` that still names it fails to compile.
+  The union has ten variants.
+- **`issueMandate` and `issueRootMandate` are gone.** They were deprecated earlier in this same
+  release and never shipped that way: they ship removed. Both stamped
   `"organization"` on every scope they minted, so an organization's child claimed to be an
   organization, and `issueMandate` ignored the grantor's tier until a runtime check was bolted on.
   Migrate `issueRootMandate` → `issueOrgMandate` (same arguments) and `issueMandate` →
@@ -283,16 +309,11 @@ this package follows [Semantic Versioning](https://semver.org).
   outside the lattice, and `minTier` floors a combination containing it to `untrusted`. Receipts
   are unaffected: no receipt ever carried the tier.
 
-### Deprecated
+## [0.3.0] — 2026-07-30 (internal, never published)
 
-- `issueMandate` and `issueRootMandate`. Use `issueOrgMandate`, then `issueProjectMandate` and
-  `issueAgentMandate`. They will be removed in a future release. *(Superseded above: removed in this
-  release.)*
-
-## [0.3.0] — first public release
-
-First release under the `@swee` scope. The package's development history predates this repository
-and is not carried forward.
+Formed by merging `@sweetrust/mandate`, `@sweetrust/gate` and `@sweetrust/verify` into one package,
+then planned for the `@swee` scope. It never reached npm. The package's development history predates
+this repository and is not carried forward.
 
 ### Added
 
@@ -304,12 +325,12 @@ and is not carried forward.
 - **`@swee/trust/gate`** — `Sourced<T>` provenance tiers with sticky taint, three audited
   declassifiers as the only ways a value can rise, fail-closed sinks that declare their appetite,
   and tamper-evident receipts for every decision — allowed *and* refused.
-- **`@swee/trust/verify`** — signed receipt chains re-checkable from public material alone, plus a
-  Sui anchor convention that makes tail truncation detectable.
+- **`@swee/trust/verify`** — signed receipt chains re-checkable from public material alone, plus an
+  anchor-memo convention that makes tail truncation detectable.
 - **Zero runtime dependencies.** Node builtins only.
 
 ### Notes
 
 - Read `SECURITY.md` § *Honest limits* before adopting. It names what this package does **not**
-  protect — in particular that the TypeScript revocation and the on-chain revocation are two
-  separate kill switches, and only the on-chain one stops money.
+  protect — in particular that `revokeMandate` writes only to this package's log and stops no
+  money a chain already holds.

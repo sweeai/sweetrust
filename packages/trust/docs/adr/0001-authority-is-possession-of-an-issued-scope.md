@@ -3,17 +3,17 @@ title:       "ADR 0001: authority is possession of an issued scope, in-process"
 kind:        adr
 status:      accepted
 updated:     2026-10-13
-owner:       sweetrust g4
-verified_by: "pnpm -C packages/trust test (authority-binding.test.ts) + the six mutation witnesses in the DAN-1157 commit message + the 2026-10-13 getter-split block (8 tests, 7 watched RED)"
+owner:       sweetrust maintainers
+verified_by: "pnpm -C packages/trust test (authority-binding.test.ts) + the six mutation witnesses in the 23c67d1 commit message + the 2026-10-13 getter-split block (8 tests, 7 watched RED)"
 ---
 
 # ADR 0001: authority is possession of an issued scope, in-process
 
 **Status:** Accepted
-**Implementation:** shipped (`23c67d1`)
+**Implementation:** merged (`23c67d1`)
 **Force:** invariant. The check is `test/mandate/authority-binding.test.ts`, and each of its six
 defenses has a recorded mutation witness in the `23c67d1` commit message.
-**Date:** 2026-09-23 · **Ticket:** DAN-1157 · **Extends:** DAN-637
+**Date:** 2026-09-23 · **Extends:** the 2026-07-22 audit-log-is-truth decision (ARCHITECTURE.md § 2)
 
 ## Context
 
@@ -28,15 +28,15 @@ event*. That cannot work. `MandateGrantEvent` does not record `tier`, and it pri
 
 A second path needed no string at all. `issueProjectMandate` and `issueAgentMandate` stored the
 **genuine** grantor object in `parentScope`, typed as the parent scope. An agent reached the org
-root with `agent.parentScope.parentScope`: no cast, no forgery, and every check passed. DAN-637 had
-already ruled that this pointer must not be a *revocation* input. Nobody had asked whether it was an
+root with `agent.parentScope.parentScope`: no cast, no forgery, and every check passed. The 2026-07-22
+battle-test had already ruled that this pointer must not be a *revocation* input. Nobody had asked whether it was an
 *authority* input.
 
 ## Decision
 
 **Authority is possession of a scope object this module issued.**
 
-- A module-private `WeakSet` records every scope the five issuers mint. Issued scopes and their
+- A module-private `WeakSet` records every scope an issuer mints. Issued scopes and their
   capability lists are frozen, so once a scope passes the check its `tier` and `grantor` are fact.
 - `useCapability` and every delegating issuer refuse a scope that was not issued
   (`MandateScopeForged`). The check runs *after* the existing audit-log checks, so a scope that is
@@ -55,10 +55,10 @@ same reason: the only way to hold one is to be handed one.
 
 ## Consequences
 
-- **In-process only, by design.** A scope that crosses a process boundary (JSONL, a Linear round
-  trip, an HTTP body) arrives as data and **cannot invoke**. That makes `README.md`'s "deserialized
-  payloads do not get through" literally true. Cross-process authority belongs to the Move kernel,
-  which is already the unforgeable layer (`SECURITY.md` § *Honest limits*).
+- **In-process only, by design.** A scope that crosses a process boundary (JSONL, an issue-tracker
+  round trip, an HTTP body) arrives as data and **cannot invoke**. That makes `README.md`'s
+  "deserialized payloads do not get through" literally true. Cross-process authority belongs to the
+  chain's own primitives, which are the unforgeable layer (`SECURITY.md` § *Honest limits*).
 - **The host's job is now explicit:** hand each agent its own scope and nothing above it. Whoever
   holds a reference holds its authority. That is the object-capability contract, and it is what the
   detached `parentScope` protects.
@@ -66,9 +66,8 @@ same reason: the only way to hold one is to be handed one.
   new root. It cannot act inside an existing tree it was not handed. An agent that receives only a
   scope and a sink (the daemon's shape) cannot mint roots.
 - **Breaking against the unpublished 0.3.0:** `revokeMandate`'s signature, frozen return values,
-  and a new `MandateError` variant. Consumers outside this repo that must migrate:
-  `sweeai/integrations/linear` (revoke with the scope from its existing `creatorScopeLookup`) and
-  the SweeAI daemon (present the org scope it already holds).
+  and a new `MandateError` variant. The two private consumers were migrated with this change; no
+  public consumer existed.
 
 ## Amended 2026-10-13
 
@@ -106,4 +105,4 @@ remain.
 3. **A per-mandate bearer secret** whose sha256 is committed in the grant event. This works across
    processes and is **the named upgrade path** if a TypeScript consumer ever needs a rehydrated
    scope to invoke. Not taken now: no consumer needs it, it adds secret-handling hazards (scopes are
-   logged and printed), and the Move kernel already owns cross-process authority.
+   logged and printed), and cross-process authority belongs to the chain's own primitives.

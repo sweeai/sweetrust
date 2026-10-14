@@ -1,21 +1,19 @@
 /**
  * Constitutional pre-check — foundational security primitives.
  *
- * v0.2.0 ships ONE primitive: constitutionalPreCheck — a compile-time-inlined
- * catalog of prompt-injection patterns (MIP-1, MIP-3, MIP-4, MIP-5; MIP-2 +
- * MIP-6 deferred by design) per the security-hardened-judge specification
- * I3 + I4.
+ * One primitive: constitutionalPreCheck — a compile-time-inlined catalog of
+ * prompt-injection patterns (MIP-1, MIP-3, MIP-4, MIP-5; MIP-2 and MIP-6
+ * deferred by design).
  *
  * The pattern catalog is defined as source-code constants so an attacker
  * compromising a runtime config file cannot weaken the defense. Adding a new
- * pattern requires a supersession ADR + new build per
- * security-hardened-judge.allium I4.
+ * pattern is a new build with a CHANGELOG entry, never a config change.
  *
  * Consumers call constitutionalPreCheck on EVERY authored input BEFORE EVERY
- * model call (or, in the case of @sweetrust/mandate, before any audit-log
+ * model call (or, in the case of sweetrust/mandate, before any audit-log
  * persistence of mandate metadata).
  *
- * v0.2.0 deltas vs v0.1.0 (Council 2 audit, 2026-05-07):
+ * 0.2.0 deltas vs 0.1.0 (the 2026-05-07 audit):
  *   - NFKC pre-normalization closes Unicode-confusable bypasses
  *   - MIP-4 charset extended to include base64url (-_)
  *   - MIP-4 exempts 0x-prefixed blobs (chain calldata is not an injection signal)
@@ -25,7 +23,7 @@
  *     family (Trojan Source attacks), and Tag-character family (modern stego)
  *   - MaliciousInputMatch carries startOffset, endOffset, catalogVersion
  *   - toMaliciousInputError() factory ships the typed-error wrap
- *   - CATALOG_VERSION exported for forensic correlation per parent spec I9
+ *   - CATALOG_VERSION exported for forensic correlation
  *
  * 0.2.1 delta (the 2026-10-13 mandate audit):
  *   - Invisible/format characters are STRIPPED in the normalization stage,
@@ -40,11 +38,10 @@
  * invisible or format characters. Multilingual paraphrase (CJK, RTL scripts)
  * and natural-language paraphrase ("never mind what was said") are
  * deliberately out of scope. They are left to the HOST's defense in depth,
- * none of which this package provides: sentinel framing (parent spec I1),
- * constraining the model's output shape (I2) and conservative-fail (I7).
- * I2 was written as forced `tool_choice`; some current models reject that
- * outright (Opus 5.5 returns a 400 for anything but "auto"), so a host must
- * not count on it being available.
+ * none of which this package provides: sentinel framing, constraining the
+ * model's output shape, and conservative-fail. Constraining the output shape
+ * is often written as a forced `tool_choice`; some current models reject that
+ * outright, so a host must not count on it being available.
  */
 
 export const CATALOG_VERSION = "0.2.1"
@@ -81,8 +78,8 @@ const HEX_PREFIX_AT_START = /^0x/i
 // different code points. UTS #39 has ~1000 confusable mappings; this table
 // covers the ~20 high-leverage Latin-lookalikes used in published
 // prompt-injection bypass corpora (Cyrillic + Greek vowels and common
-// consonants). Adding new entries is a supersession-ADR-equivalent decision
-// per security-hardened-judge.allium I4.
+// consonants). Adding new entries is a CHANGELOG-recorded decision, never a
+// config change.
 const CONFUSABLE_TO_LATIN: Record<string, string> = {
   "а": "a", "А": "A", // U+0430 / U+0410 Cyrillic
   "е": "e", "Е": "E", // U+0435 / U+0415 Cyrillic

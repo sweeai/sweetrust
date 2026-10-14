@@ -1,25 +1,15 @@
 /**
- * @sweetrust/mandate — core types
+ * sweetrust/mandate — core types
  *
- * Implements the mandate capability-declaration specification v0.0.
- *
- * The wedge primitive: type-enforced agent capability declaration. A
- * MandateScope structurally constrains what capabilities an agent can
- * invoke. The TypeScript compiler refuses to satisfy a function whose
- * Effect.R-channel requires a capability not declared in the agent's scope.
- *
- * v0.0 ships:
- *   - Capability tagging (via Effect.Context.Tag)
- *   - MandateScope with provenance (delegation DAG)
- *   - Typed errors (MandateError union)
- *   - MandateAudit Layer interface (implementation in audit.ts)
- *
- * v0.1+ deferred:
- *   - Runtime mandate-check on every capability invocation
- *   - Linear-as-state-machine integration (per Tim/Lalph pattern)
- *   - On-chain settlement integration (per s402)
- *   - Multi-tier mandate hierarchy
- *   - Cryptographic signing of audit records
+ * Type-enforced agent capability declaration. A `MandateScope` is a typed
+ * bundle of capabilities at a tier. The compiler refuses a `useCapability`
+ * call whose capability is not in the scope's tuple (`Cap extends
+ * Caps[number]`) and refuses a delegation whose capabilities are not a subset
+ * of the grantor's (`ChildCaps extends ReadonlyArray<ParentCaps[number]>`);
+ * the issuers re-check both at runtime for callers with no compiler in the
+ * loop. Every grant, invocation and revocation lands on an append-only audit
+ * log, signed and hash-chained when a signer is wired. Refusals are the typed
+ * `MandateError` union, thrown as `MandateFailure`.
  */
 /**
  * A capability is identified by a stable string `key`. The compiler tracks
@@ -49,12 +39,11 @@ export type GrantorId = string & { readonly __brand: "GrantorId" }
 export type ISO8601 = string & { readonly __brand: "ISO8601" }
 
 /**
- * MandateTier — discriminator for the three-tier mandate hierarchy per
- * the mandate multi-tier + signing specification v0.2 I2. The tier is
+ * MandateTier — discriminator for the three-tier mandate hierarchy. The tier is
  * tracked at the type level via the `Tier` generic parameter on
  * MandateScope.
  *
- * Tier semantics (spec I4 — strictly decreasing scope, no upward delegation):
+ * Tier semantics (strictly decreasing scope, no upward delegation):
  *   - "organization": root tier; the workspace's "company charter" of all
  *     capabilities ANY agent in this workspace may EVER hold. Set at
  *     workspace bootstrap; rarely modified. ParentScope MUST be null.
@@ -81,10 +70,10 @@ export type MandateTier = "organization" | "project" | "agent"
  *     null for organization-tier (root) scopes, which `issueOrgMandate`
  *     mints with `parentScope: null`.
  *
- * The scope is IMMUTABLE post-construction (per v0.0 I2). To "add" a
- * capability, issue a new MandateScope via re-grant (per v0.0 I7).
+ * The scope is IMMUTABLE post-construction. To "add" a capability, issue a
+ * new MandateScope via re-grant.
  *
- * Per spec I3, the type-level chain enforces multi-tier subset gating
+ * The type-level chain enforces multi-tier subset gating
  * structurally — issuing a project-tier mandate from an organization-tier
  * grantor requires `ProjectCaps extends ReadonlyArray<OrgCaps[number]>`,
  * and similarly for project→agent. The compile-time gate is the load-
@@ -108,8 +97,8 @@ export interface MandateScope<
 
 /**
  * MandateError — typed union covering every failure mode of the mandate
- * flow. Per spec I9, no untyped errors leak; every failure has a
- * discriminated _tag the caller can pattern-match on.
+ * flow. No untyped errors leak: every failure has a discriminated _tag the
+ * caller can pattern-match on, and is thrown as `MandateFailure`.
  */
 export type MandateError =
   | { readonly _tag: "CapabilityNotInGrantorScope"; readonly capability: string }
@@ -157,10 +146,6 @@ export type MandateError =
       readonly brokenAncestorId: MandateId
     }
   | {
-      readonly _tag: "DirectConstructionRejected"
-      readonly reason: string
-    }
-  | {
       // Raised at issue time when the grantor's tier cannot delegate the
       // requested tier: agent → anything, org → agent (skipping project), or
       // a non-org grantor through `issueProjectMandate`. The compiler refuses
@@ -195,19 +180,20 @@ export type MandateError =
     }
 
 /**
- * TriggerSource — forensic primitive distinguishing audit records that
- * originated from a direct code call (`"code"`) versus a Linear-issue-driven
- * flow (`"linear"`). Per mandate-v0-1-linear-integration.allium I11.
+ * TriggerSource — which kind of caller produced an audit record: a direct code
+ * path (`"code"`), or a host-side flow driven from outside this process — a
+ * human acting through an issue tracker, a chat command, a ticket
+ * (`"external"`).
  *
- * When something goes wrong, "did a human do this via Linear, or did a code
- * path do this directly?" must be answerable instantly. Both are legitimate;
- * both must be auditable; the distinction matters for trust analysis.
+ * When something goes wrong, "did a person do this through a tool, or did a
+ * code path do this directly?" must be answerable from the log alone. Both are
+ * legitimate; both are audited; the distinction is for forensics.
  *
- * Default for every entry point (the three issuers, useCapability,
- * revokeMandate) is `"code"`. A Linear-triggered flow passes `"linear"`
- * explicitly.
+ * Every entry point (the three issuers, `useCapability`, `revokeMandate`)
+ * defaults to `"code"`. A host that drives them from an external system passes
+ * `"external"` explicitly.
  */
-export type TriggerSource = "linear" | "code"
+export type TriggerSource = "external" | "code"
 
 /**
  * MandateGrantEvent — append-only audit record for an issuance.
@@ -225,7 +211,6 @@ export interface MandateGrantEvent {
 
 /**
  * MandateInvocationEvent — append-only audit record for a capability use.
- * Captured per spec I6 + INV-EVAL-1.
  */
 export interface MandateInvocationEvent {
   readonly type: "invoke"
@@ -248,25 +233,35 @@ export interface MandateRevokeEvent {
 }
 
 /**
- * MandateHumanContextEvent — documentation-only audit record streamed from
- * Linear comments on a mandate-linked issue. Per
- * mandate-v0-1-linear-integration.allium I8: comments on a mandate-linked
- * issue do NOT trigger state changes; they are documentation queryable
- * alongside the typed grant/invoke/revoke events for forensic analysis.
+ * ExternalRef — where, outside this process, a record came from: the system's
+ * name as the host names it (an issue tracker, a chat tool, a mail system), the
+ * record's id inside that system, and a URL when the system has one. This
+ * package never produces or follows one; it records what the host hands it.
+ */
+export interface ExternalRef {
+  readonly system: string
+  readonly id: string
+  readonly url?: string
+}
+
+/**
+ * MandateHumanContextEvent — a documentation-only audit record a HOST appends
+ * when a human says something about a mandate in an external system (a comment
+ * on a ticket, a message in a channel). It changes no state. It is queryable
+ * alongside the typed grant / invoke / revoke events so a forensic reader sees
+ * what people said next to what the code did.
  *
- * Only ever has `triggerSource: "linear"` — code paths cannot manufacture
- * "human context" out of nowhere; this event class only exists because a
- * human wrote a comment on a Linear issue.
+ * Nothing in this package produces one. Its `triggerSource` is always
+ * `"external"`: a code path cannot manufacture human context.
  */
 export interface MandateHumanContextEvent {
   readonly type: "human-context"
   readonly mandateId: MandateId
-  readonly linearCommentUrl: string
-  readonly linearIssueId: string
+  readonly externalRef: ExternalRef
   readonly author: string
   readonly body: string
   readonly timestamp: ISO8601
-  readonly triggerSource: "linear"
+  readonly triggerSource: "external"
 }
 
 export type MandateAuditEvent =
@@ -276,9 +271,8 @@ export type MandateAuditEvent =
   | MandateHumanContextEvent
 
 /**
- * SignedMandateAuditEvent — v1.0 cryptographically-signed wrapper around an
- * audit event per the mandate multi-tier + signing specification v0.2
- * I6 + I7 + I9.
+ * Signed<P> — the cryptographically-signed wrapper around a record;
+ * `SignedMandateAuditEvent` is `Signed<MandateAuditEvent>`.
  *
  * Wraps any MandateAuditEvent with:
  *   - signature: Ed25519 signature over the canonical-JSON ENVELOPE
@@ -288,23 +282,23 @@ export type MandateAuditEvent =
  *     against an adversary who recomputes the (public) hash links: any relink
  *     breaks a signature they cannot reforge (DAN-641). (Tail truncation of the
  *     most recent records remains catchable only by an external anchor, exactly
- *     as @sweetrust/verify documents for its receipt chain.)
+ *     as sweetrust/verify documents for its receipt chain.)
  *   - signerPublicKeyHex: the public key the signature was computed with
- *     (per I10, persisted on every record so a verifier-only Layer can
- *     verify without knowing the private key; future-proofs key rotation).
+ *     (persisted on every record so a verifier-only consumer can verify
+ *     without the private key; future-proofs key rotation).
  *     NB: this proves internal consistency, not authorship — pinning the
  *     EXPECTED operator key is the caller's job (DAN-642).
  *   - signedAt: timestamp at signing (authenticated — inside the signature)
  *   - previousHash: SHA-256 of canonical JSON of the previous signed event
  *     in the same audit log, or null for the first event (authenticated —
- *     inside the signature, per I8 + I9).
+ *     inside the signature).
  *   - domain: domain-separation tag (e.g. MANDATE_AUDIT_DOMAIN) binding the
  *     signature to its protocol context so it cannot be replayed as another
  *     record type under a shared key (DAN-641).
  *
- * Consumers without a MandateSigner Layer in scope continue to see raw
- * MandateAuditEvent objects (v0.0 + v0.1 + v0.1.1 backward compat). The
- * signed wrapper is opt-in via the SignedMandateAudit Layer composition.
+ * The unsigned audit factories record raw `MandateAuditEvent` objects; the
+ * signed factories (`makeInMemorySignedAuditLive`, `makeJsonlSignedAuditLive`)
+ * wrap each one in this envelope.
  */
 export interface Signed<P> {
   readonly payload: P
@@ -341,9 +335,11 @@ export interface VerifyAuditChainResult {
 }
 
 /**
- * MandateAudit — Layer interface for the append-only audit log. Mirrors the
- * EvalRecorder pattern from sense/evals/. v0.0 ships JSONL recording;
- * v0.1+ adds cryptographic signing.
+ * MandateAuditService — the append-only audit log every issuer, `useCapability`
+ * and `revokeMandate` take. Four factories produce one: `makeInMemoryAuditLive`
+ * and `makeJsonlAuditLive` (unsigned), and the `mandateAudit` half of
+ * `makeInMemorySignedAuditLive` / `makeJsonlSignedAuditLive` (signed and
+ * hash-chained).
  */
 export interface MandateAuditService {
   readonly record: (event: MandateAuditEvent) => void

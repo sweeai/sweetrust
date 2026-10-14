@@ -53,8 +53,8 @@ Values carry their provenance, and privileged operations can demand it.
 - **The tier lattice** — `untrusted → corroborated → verified`. Combining taints **down**: mixing anything with untrusted data yields untrusted data. LLM output is born untrusted no matter how good the model. *Inference is not evidence.*
 - **Three declassifiers** — the only ways a value can rise, and the constructor is module-private — at runtime too, not only in the types — so there is no fourth. A successful ascent is recorded in the value's provenance; a refusal is not yet recorded anywhere (see `SECURITY.md`): `allowlisted` (matches a registry you control → verified), `corroborate` (independent sources agree → corroborated, never verified), `humanConfirm` (asks a person, with the provenance rendered into the question so the answer is informed rather than reflexive).
 - **Sinks that declare their appetite** — `makeSink` refuses under-tier arguments and fails closed, naming the tier gap in the refusal. Adoption ladder: `observe → warn → enforce`, so you can install it into a running system without breaking it on day one; a mode outside the ladder is a `TypeError` at construction, never a guess. `execute()` receives a snapshot of the declared arguments, read once when they were checked.
-- **The judgment seam** — a pluggable calibrated scorer that runs *after* the tiers pass, to catch the action that is in-bounds but still wrong. It is allowed to say "unsure" and defer to a human. It never confidently blocks.
-- **`ReceiptLog`** — every decision, allow *and* refuse, lands on a hash-chained tamper-evident log.
+- **The judgment seam** — a pluggable calibrated scorer that runs *after* the tiers pass, to catch the action that is in-bounds but still wrong. An `unsure` verdict never blocks — it flags and defers to a human. A `mismatch` at or above the sink's `floor` blocks in `enforce`, and so does a provider that throws or cannot score; both flag in `observe` and `warn`.
+- **`ReceiptLog`** — every **sink** decision, allow *and* refuse, lands on a hash-chained tamper-evident log. A declassifier's refusal does not (see `SECURITY.md`).
 
 <!-- readme-check: prelude
 import type { Sourced as S } from "sweetrust/gate"
@@ -90,8 +90,6 @@ pay({ to: payee.value, amount })
 // Refused? The refusal names the tier gap AND renders the provenance —
 // and the refusal itself is on the receipt chain.
 ```
-
-Implements the trust-types specification §4–§5.
 
 ---
 
@@ -151,7 +149,7 @@ console.log(verifyAuditChain(signedAudit.listAllSigned(), signer, {
 }).valid) // true; tampering flips it
 ```
 
-**Honest boundary:** this is the *off-chain* authority layer. Its subset gates are compile-time plus audit-log-backed, and a fully compromised host could bypass them. Unforgeable enforcement is the Move `SpendCage`'s job. The two compose; neither claims the other's property.
+**Honest boundary:** this is in-process authority. Its subset gates are compile-time plus audit-log-backed, and a fully compromised host could bypass them. In-process TypeScript cannot be unforgeable. Money limits belong to the chain's own primitives (on Sui, native `sui::allowance`); this package's `revokeMandate` writes only to this log.
 
 ---
 
@@ -197,25 +195,23 @@ const report = verifySignedChain(parseJSONL(file), {
 ## Proof it runs
 
 ```bash
-pnpm -C packages/trust test        # 177 tests
-pnpm -C packages/trust typecheck
+pnpm -C packages/trust test        # the whole suite
+pnpm -C packages/trust typecheck   # tsc, then the README and forgery gates against dist/
 node packages/trust/src/mandate/demo.ts             # grant → invoke → revoke → refuse
 node packages/trust/src/mandate/multi-tier-demo.ts  # tamper + chain-break detection, live
 ```
 
-Both demos are in this repository, not in the published tarball — clone to run them.
+Both demos are in this repository, not in the published tarball — clone to run them. The demos and `pnpm typecheck` run TypeScript directly and need **Node ≥ 22.18**; the published `dist/` needs only the `engines` floor, Node ≥ 20.19.
 
 The multi-tier demo is the centerpiece: it builds an org → project → agent chain, signs every record, then **rewrites a rationale after signing** and reports the exact corrupted index — followed by removing a middle record and catching the broken hash link.
-
-Beyond the suite, the rail has a live testnet weld: a legitimate invoice settles on-chain, a poisoned one never forms a transaction, a bypassed firewall is still caged, and the receipts verify as third-party evidence — including the refusal that never touched the chain.
 
 ---
 
 ## What's free, and what isn't
 
-**Everything in this package is free, forever.** That includes the Move modules and on-chain enforcement — not just the TypeScript.
+**Everything in this package is free, forever**, under Apache-2.0: the mandates, the gate, the receipt chains and their verification.
 
-The line is drawn by **who is buying**, never by which language a feature is written in:
+The line is drawn by **who is buying**, never by which feature it is:
 
 > **Free — what one person can run for themselves.**
 > **Paid — what an organization needs someone else to operate or vouch for.**
@@ -223,16 +219,15 @@ The line is drawn by **who is buying**, never by which language a feature is wri
 | Free forever | Paid |
 |---|---|
 | Compile-time provenance checking | Hosted anchoring and verification, with uptime |
-| Branded capability types | Org policy administration — delegation hierarchies, multi-tenant issuance, revocation at scale |
+| Branded capability types and tiered mandates | Org policy administration — delegation hierarchies, multi-tenant issuance, revocation at scale |
 | Runtime gate and boundary enforcement | Compliance artifacts — audit export, retention attestation, the bundle a security review asks for |
-| **On-chain enforcement and anchoring** | Managed deployment under our `AdminCap`, with a written custody policy |
-| Local audit log and self-generated receipts | Support and SLA |
+| Signed audit logs, receipt chains, third-party verification and the anchor-memo convention | Support and SLA |
 
 The test for anything new: **could one person self-serve this?** If yes, it is free.
 
-Two reasons the line sits here rather than at the language boundary. Published Move bytecode on a permissionless chain is public and callable by anyone with gas — it was never a sellable artifact, so charging for it would only have taxed adoption. And a free tier without enforcement is an advisory guardrail, which is the exact failure this project exists to eliminate. **Nothing free will ever depend on anything paid.**
+A free tier without enforcement is an advisory guardrail, which is the exact failure this project exists to eliminate, so enforcement sits in the free column. **Nothing free will ever depend on anything paid.**
 
-**The free column is real today** — six Move modules on testnet, anchoring and chain verification in `sweetrust/verify`, 177 passing tests, a live testnet weld. Use all of it.
+**The free column is real today** — everything in it is in this package and covered by its test suite. Use all of it.
 
 **The paid column is not something you can buy yet.** Note what it actually describes: *operating* and *vouching for* what the free column already does. The capabilities exist; the service around them does not. There is no server running, no uptime commitment, and nobody to call. It is listed here so the boundary is legible before there is anything to sell, rather than negotiated later, feature by feature.
 
@@ -240,7 +235,11 @@ Two reasons the line sits here rather than at the language boundary. Published M
 
 ## Status
 
-**v0.3.0**, unpublished. Formed 2026-07-30 by merging `@sweetrust/mandate`, `@sweetrust/gate` and `@sweetrust/verify` into one package with subpath exports. All three were unpublished, so nothing broke and no migration is owed to anyone.
+**v0.4.0 is the first npm release.** The package was formed 2026-07-30 by merging three unpublished packages (`@sweetrust/mandate`, `@sweetrust/gate`, `@sweetrust/verify`) into one with subpath exports, then hardened through the adversarial passes `SECURITY.md` lists. Nothing before 0.4.0 was ever published, so no migration is owed to anyone. `CHANGELOG.md` ships in the tarball.
+
+## Versioning
+
+0.x: **a minor version may break.** Until 1.0 these may change in a minor, and are stated here rather than discovered: the `Receipt["decision"]` union, `VerifyFailure` and `VerifyAuditChainResult["reason"]`, the `MandateError` union, the receipt hash body and the signed preimage, the `MandateId` suffix width, and the `swee.*.v1` domain tags. Persisted JSONL is versioned by its `domain` tag. The full statement is at the head of `CHANGELOG.md`.
 
 ## License
 

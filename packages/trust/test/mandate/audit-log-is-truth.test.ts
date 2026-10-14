@@ -147,7 +147,7 @@ describe("DAN-637: useCapability ancestor-revocation reconstructs from the audit
     const audit = makeInMemoryAuditLive()
     const { orgScope, agentScope } = issueTypedChain(audit)
 
-    // Persistence convention (JSONL, Linear round-trip, cross-process handoff)
+    // Persistence convention (JSONL, an issue-tracker round-trip, cross-process handoff)
     // stores the parentMandateId LINK, not the in-memory object graph — the
     // rehydrated scope arrives with parentScope: null.
     const wire = JSON.stringify({ ...agentScope, parentScope: null })

@@ -2,7 +2,7 @@
 # substitute for those, and that is deliberate: a package protected only by an
 # outer repo's ignore rules loses that protection the moment it moves.
 
-node_modules/
+node_modules
 dist/
 *.tsbuildinfo
 

@@ -1057,11 +1057,13 @@ describe("#3 — execute() and the judge see the checked snapshot, never the cal
 // returns a rejected promise, which is a normal return value: the receipt said
 // `executed`, the promise rejected afterwards, and the log never heard. Every
 // real sink — an RPC, a transfer, a send — is async. The sink now notices a
-// thenable result and attaches a rejection handler that appends an `errored`
-// receipt; the `executed` receipt still PRECEDES the outcome (it cannot wait
-// for it), and the `errored` receipt TRAILS it. SECURITY.md § Honest limits
-// states that ordering. The host's own promise is returned unchanged, and the
-// host must still handle its rejection — the gate observes, it does not catch.
+// thenable result and returns a wrapped promise that appends an `errored`
+// receipt and re-raises the same error; the `executed` receipt still PRECEDES
+// the outcome (it cannot wait for it), and the `errored` receipt TRAILS it.
+// SECURITY.md § Honest limits states that ordering. The host still handles the
+// rejection as it always did; a host that forgets keeps Node's crash (the
+// 2026-10-13 chunk 4 flip — the first version attached a handler to the host's
+// own promise and returned it unchanged, which marked it handled).
 describe("#5 — an async action that rejects leaves an `errored` receipt behind its `executed` one", () => {
   const good = () => Sourced.fromAuthority("ACME", "reg")
   const settle = async () => {

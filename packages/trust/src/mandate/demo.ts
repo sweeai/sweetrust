@@ -1,5 +1,5 @@
 /**
- * @sweetrust/mandate — bootstrap demo
+ * sweetrust/mandate — bootstrap demo
  *
  * Demonstrates the type-enforced capability ladder, org → project → agent:
  *   1. Define three capabilities (FileRead, FileWrite, ShellExec)
@@ -46,7 +46,7 @@ const AGENT_A: GrantorId = "AGENT_A" as GrantorId
 const main = (): void => {
   const audit = makeInMemoryAuditLive()
 
-  console.log("=== @sweetrust/mandate demo ===\n")
+  console.log("=== sweetrust/mandate demo ===\n")
 
   // Step 1+2: Arthur issues the organization root with all three caps.
   console.log("[1] Arthur issues the org mandate with [FileRead, FileWrite, ShellExec]")

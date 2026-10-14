@@ -1,6 +1,6 @@
 # sweetrust
 
-Swee's open-source packages. Everything published under the **`@swee`** scope lives here.
+Swee's open-source packages. Currently one: [`sweetrust`](packages/trust), unscoped.
 
 | Package | What it is |
 |---|---|

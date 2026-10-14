@@ -1,9 +1,9 @@
-// @sweetrust/verify — SweeVerify's kernel (signed receipts + third-party verification)
+// sweetrust/verify — SweeVerify's kernel (signed receipts + third-party verification)
 // ============================================================================
-// @sweetrust/gate ends where the receipt is hashed. This package is the next wall:
+// sweetrust/gate ends where the receipt is hashed. This subpath is the next wall:
 //   1. SIGN    — every receipt is Ed25519-signed at append time BY
-//                @sweetrust/mandate's signer (the company sentence is literal:
-//                SweeMandate signs, the firewall enforces, SweeVerify proves).
+//                sweetrust/mandate's signer (the rail's sentence is literal:
+//                SweeMandate signs, SweeGate enforces, SweeVerify proves).
 //   2. EXPORT  — the signed chain serializes to JSONL: the artifact you hand
 //                an auditor, an insurer, or a court.
 //   3. VERIFY  — a verifier holding ONLY the public key re-checks every
@@ -13,22 +13,22 @@
 //
 // Honest limits (stated, not hidden):
 //   - TAIL TRUNCATION is invisible to the local chain: deleting the last K
-//     receipts leaves a perfectly valid shorter chain. Only the on-chain
-//     anchor (the chain head carried in a Sui PaymentReceipt memo) catches
-//     it. This is WHY the anchor exists — the demo proves it, not just says it.
+//     receipts leaves a perfectly valid shorter chain. Only an external anchor
+//     (the chain head sealed in an on-chain memo) catches it. This is WHY the
+//     anchor exists — the tests prove it (test/verify/), not just say it.
 //   - The signing key lives with the agent runtime; a compromised host can
 //     sign lies going FORWARD. What it cannot do is rewrite the PAST behind
 //     an anchor, or forge records under a key it doesn't hold.
 //
-// Wraps @sweetrust/gate, never forks it (SignedReceiptLog extends ReceiptLog).
+// Wraps sweetrust/gate, never forks it (SignedReceiptLog extends ReceiptLog).
 // Chain shape: TWO chains, both signed —
-//   · interior (kernel) chain: Receipt.prevHash/hash, computed by @sweetrust/gate
+//   · interior (kernel) chain: Receipt.prevHash/hash, computed by sweetrust/gate
 //   · wrapper chain: Signed.previousHash = sha256(canonicalJSON(previous
-//     signed record)) — @sweetrust/mandate audit-chain semantics (spec I8), so
+//     signed record)) — the same link mandate's audit chain uses, so
 //     mandate's own verifyAuditChain tooling can walk a receipt log too.
-// @sweetrust/gate stays dependency-free; THIS package is the integration layer
-// (peers: @sweetrust/gate for the kernel, @sweetrust/mandate for the
-// signing discipline — one canonicalization across the whole rail).
+// sweetrust/gate stays free of everything but node builtins; THIS subpath is
+// the integration layer: it imports gate for the kernel and mandate for the
+// signing discipline — one canonicalization across the whole rail.
 // ============================================================================
 
 import { createPublicKey, generateKeyPairSync, verify as edVerify } from "node:crypto"
@@ -57,9 +57,9 @@ export const RECEIPT_DOMAIN = "swee.receipt.v1"
 // ── Signed receipts ──────────────────────────────────────────────────────────
 
 /**
- * A Receipt wrapped with authorship — @sweetrust/mandate's Signed<P> record
- * (payload-generic since mandate v1.1). The public key rides on every record
- * (spec I10) so a verifier-only consumer needs no key distribution channel.
+ * A Receipt wrapped with authorship — sweetrust/mandate's Signed<P> record.
+ * The public key rides on every record, so a verifier-only consumer needs no
+ * key distribution channel; pinning the key it expects is still its job.
  */
 export type SignedReceipt = Signed<Receipt>
 
@@ -68,7 +68,7 @@ export interface ReceiptSigner {
   sign(receipt: Receipt, previousHash: string | null): SignedReceipt
 }
 
-/** Ephemeral keypair for demos/tests. Production: operator-held PEM (Keychain). */
+/** Ephemeral keypair for demos/tests. In production the operator holds the PEM. */
 export function generateSigningKeypair(): { privateKeyPem: string; publicKeyPem: string } {
   const { privateKey, publicKey } = generateKeyPairSync("ed25519")
   return {
@@ -84,7 +84,7 @@ export function generateSigningKeypair(): { privateKeyPem: string; publicKeyPem:
 export { publicKeyHexFromPem } from "../mandate/index.ts"
 
 /**
- * The receipt signer IS @sweetrust/mandate's Ed25519 signer (construction +
+ * The receipt signer IS sweetrust/mandate's Ed25519 signer (construction +
  * sign are pure synchronous operations).
  */
 export function makeEd25519ReceiptSigner(config: {
@@ -122,13 +122,13 @@ export class SignedReceiptLog extends ReceiptLog {
    * chain one record ahead of the signed chain — permanently, since every later
    * wrapper link then hung off a stale predecessor, and `exportJSONL()` handed
    * an auditor an artifact silently short a receipt. Found by the 2026-07-25
-   * adversarial pass; `nextReceipt`/`commit` exist in @sweetrust/gate to make this
+   * adversarial pass; `nextReceipt`/`commit` exist in sweetrust/gate to make this
    * orderable.
    */
   override append(entry: Parameters<ReceiptLog["append"]>[0]): Receipt {
     const receipt = this.nextReceipt(entry)
     const prev = this.signedEvents.at(-1)
-    // Wrapper chain per @sweetrust/mandate spec I8: hash of the previous SIGNED
+    // Wrapper chain, mandate's audit-chain link: hash of the previous SIGNED
     // record (signature included), null for the first.
     const previousHash = prev ? sha256Hex(canonicalJSON(prev)) : null
     const signedRecord = this.signer.sign(receipt, previousHash) // may throw — nothing committed yet
@@ -270,11 +270,11 @@ const envelopeKeyProblem = (keys: ReadonlyArray<string>): string | null => {
  * `trustedSignerPublicKeyHex` is REQUIRED, not optional: verifying a record
  * against the key it carries proves internal consistency, not authorship —
  * an attacker who re-signs a forged record with their own key passes that
- * check. Pinning the expected key closes the hole (@sweetrust/mandate documents
+ * check. Pinning the expected key closes the hole (sweetrust/mandate documents
  * this same gap as caller responsibility; here it is structural).
  *
- * `anchor`, when supplied (parsed from the on-chain PaymentReceipt memo via
- * `parseAnchorMemo`), is the ONLY check that catches tail truncation, which a
+ * `anchor`, when supplied (parsed from the on-chain memo via `parseAnchorMemo`),
+ * is the ONLY check that catches tail truncation, which a
  * locally-consistent chain cannot reveal. Its `kind` is load-bearing (DAN-643):
  *   - `kind: "anchor"` — a SEAL over the whole chain (`swee:anchor:`). The head
  *     must EQUAL the last record's hash. This is what actually catches tail
@@ -334,7 +334,7 @@ export function verifySignedChain(
 
   // An empty chain used to fold to `valid: true` — the identity element of the
   // loop is the strongest possible claim (adversarial pass V2, 2026-07-25; the
-  // same shape as @sweetrust/gate's minTier() returning "verified" over an empty
+  // same shape as sweetrust/gate's minTier() returning "verified" over an empty
   // list). An auditor handed an empty file and told "valid" has been told
   // something false in every sense that matters. Nothing to check is not a pass.
   if (records.length === 0) {
@@ -416,7 +416,7 @@ export function verifySignedChain(
     try {
       const publicKey = createPublicKey({ key: Buffer.from(r.signerPublicKeyHex, "hex"), format: "der", type: "spki" })
       // Signature covers the full envelope (domain + payload + previousHash +
-      // signedAt) via the ONE shared preimage definition from @sweetrust/mandate —
+      // signedAt) via the ONE shared preimage definition from sweetrust/mandate —
       // never the payload alone, so previousHash/signedAt are authenticated and
       // no second preimage definition can drift from the signer's (DAN-641).
       sigOk = edVerify(null, Buffer.from(signedPreimage(r)), publicKey, Buffer.from(r.signature, "hex"))
@@ -443,7 +443,7 @@ export function verifySignedChain(
     if (rebuilt !== payload.hash) {
       return { valid: false, firstInvalidIndex: i, reason: "hash-mismatch", anchoredThrough: null }
     }
-    // Both chains must link: interior (kernel) and wrapper (mandate spec I8).
+    // Both chains must link: interior (kernel) and wrapper (mandate's link).
     if (payload.prevHash !== prevInteriorHash || payload.seq !== i || r.previousHash !== prevWrapperHash) {
       return { valid: false, firstInvalidIndex: i, reason: "hash-chain-broken", anchoredThrough: null }
     }
@@ -508,12 +508,12 @@ export function verifySignedChain(
   return { valid: true, firstInvalidIndex: null, reason: "ok", anchoredThrough: null }
 }
 
-// ── Anchor memo convention (the Sui side reads/writes these) ─────────────────
-// Every cage settlement carries the chain head AS OF THE DECISION in its memo
-// ("swee:rcpt:<head>"); a final anchor tx seals the full chain
-// ("swee:anchor:<head>"). The memo lands in the on-chain PaymentReceipt object
-// (payment.move `memo` field, accessor `receipt_memo`) — immutable, public,
-// fetchable by any third party. No new Move code: the anchor rides the money.
+// ── Anchor memo convention ───────────────────────────────────────────────────
+// A settlement carries the chain head AS OF THE DECISION in its memo
+// ("swee:rcpt:<head>"); a final anchor transaction seals the full chain
+// ("swee:anchor:<head>"). The memo is a string. Where it lands is the host's
+// chain's business; what makes the seal evidence is that it is an on-chain
+// memo any third party can fetch. This module writes and parses the strings.
 
 export const RECEIPT_MEMO_PREFIX = "swee:rcpt:"
 export const ANCHOR_MEMO_PREFIX = "swee:anchor:"

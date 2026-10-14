@@ -3,14 +3,14 @@ title:       "ADR 0002: the receipt's interior hash is over canonical JSON, from
 kind:        adr
 status:      accepted
 updated:     2026-10-13
-owner:       sweetrust audit chunk 4
+owner:       sweetrust maintainers
 verified_by: "pnpm -C packages/trust test (test/canon.test.ts: 2 watched RED before the fix, 2 controls; test/index-barrel.test.ts identity)"
 ---
 
 # ADR 0002: the receipt's interior hash is over canonical JSON, from one leaf module
 
 **Status:** Accepted
-**Implementation:** shipped (the commit after the red one, 2026-10-13 rail audit, chunk 4 item 1)
+**Implementation:** merged (`f6c16a5`, 2026-10-13 rail audit)
 **Force:** invariant. `test/canon.test.ts` holds `receiptBody` to `canonicalJSON`, holds mandate,
 verify and the root to the identical function objects from `src/canon.ts`, and holds `src/canon.ts`
 to a single import, `node:crypto`.

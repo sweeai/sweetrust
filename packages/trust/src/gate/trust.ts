@@ -1,19 +1,19 @@
-// sweetrust/gate — the enforcement kernel (trust-types spec v1.1, §4–§5)
+// sweetrust/gate — the enforcement kernel
 // ============================================================================
 // Types constrain SHAPE. Nothing constrains PEDIGREE — until values carry
 // their provenance. Sourced<T> tags ride values from the extraction boundary
 // to the sink, tiers rise ONLY through named declassifiers, and every sink
 // decision (allow or refuse) emits a receipt.
 //
-// SWEE AI anatomy: SweeMandate signs (@sweetrust/mandate, authority) · the
-// firewall ENFORCES (this package in-process + the Move SpendCage on-chain) ·
-// SweeVerify proves (@sweetrust/verify, evidence).
+// The rail: SweeMandate signs (sweetrust/mandate, authority) · SweeGate
+// ENFORCES (this module, in-process) · SweeVerify proves (sweetrust/verify,
+// evidence). Money limits are the chain's own job, never this module's.
 //
-// Dependency-free by design (node builtins only) — this package IS the kernel
-// of the standalone lib; Effect/BAML/cage integrations wrap it, never fork it.
+// Dependency-free by design (node builtins only) — this module IS the kernel;
+// integrations wrap it, never fork it.
 // Adding a dependency here is an architecture decision requiring an ADR.
 //
-// Spec rules implemented:
+// The rules:
 //   Rule 1  — taint is sticky (combining takes the minimum tier)
 //   Rule 2  — inference is not evidence (LLM output is Untrusted, always)
 //   Rule 3  — ascent only through explicit declassifiers (each ascent recorded in provenance)
@@ -28,7 +28,7 @@ import { createHash } from "node:crypto"
 // This is NOT an import of mandate: the gate still stands alone (src/index.ts).
 import { canonicalJSON } from "../canon.ts"
 
-// ── Tiers (§3, the lattice) ─────────────────────────────────────────────────
+// ── Tiers (the lattice) ─────────────────────────────────────────────────────
 // Three rungs. The spec drew a fourth, `asserted`, between untrusted and
 // corroborated; no factory and no declassifier in this package ever produced
 // it, so SECURITY.md told readers to treat the ladder as three until the code
@@ -73,7 +73,7 @@ export const minTier = (...tiers: Tier[]): Tier =>
     ? "untrusted"
     : tiers.reduce((lo, t) => (RANK[t] < RANK[lo] ? t : lo), "verified" as Tier)
 
-// ── Sourced<T> (§4) ─────────────────────────────────────────────────────────
+// ── Sourced<T> ──────────────────────────────────────────────────────────────
 
 export interface UpgradeEvent {
   readonly declassifier: string
@@ -95,7 +95,7 @@ export interface Provenance {
    * tier answers "how did this value earn its trust?" (structural); confidence
    * answers "how sure is the source it's right?" (epistemic). An LLM extraction
    * is Untrusted (tier) yet may be 0.97-confident (extractor's self-report); a
-   * judgment provider (§ JudgmentProvider) emits confidence a sink can floor on.
+   * judgment provider (JudgmentProvider) emits confidence a sink can floor on.
    * `undefined` = not applicable / not measured (channels, authorities). It never
    * substitutes for tier — a high-confidence Untrusted value is still Untrusted.
    */
@@ -241,7 +241,7 @@ export class Sourced<T> {
     }
     this.value = value
     this.tier = tier
-    // Runtime immutability, not just compile-time `readonly` (Session-003 C6):
+    // Runtime immutability, not just compile-time `readonly`:
     // in strict mode, reassigning tier/provenance on a frozen instance throws.
     // `ancestors` is sealed rather than merely frozen — see sealAncestors.
     // The chain array was frozen; the event OBJECTS in it were not, so
@@ -292,18 +292,18 @@ export class Sourced<T> {
    * A value read from an authority the deployment itself governs (own
    * registry, own reference plane): Verified at birth. The `authority` name is
    * the provenance label, NOT a checked credential — nothing here validates it.
-   * (§5: the reference-plane write path is the attack surface; its mutation
+   * (The reference-plane write path is the attack surface; its mutation
    * ceremony lives with the registry, not here.)
    *
-   * TCB HONESTY (read before trusting a `verified` from this door — see the C8
-   * block below the class): this is the trust computing base. Any code that can
-   * import this module and call `fromAuthority("anything")` mints a `verified`
-   * value — the string is never checked against a registry, signature, or
-   * on-chain object. So a Gate `verified` is IN-PROCESS observe/warn/dev-time
-   * authority, NOT unforgeable enforcement. Unforgeable enforcement is the Move
-   * SpendCage's job (testnet 0x5c1588…fdfa), where capabilities cannot be minted
-   * by convention. Never treat a Gate `verified` receipt as proof that real
-   * authority was present; that is the four-property discriminator, in code.
+   * TCB HONESTY (read before trusting a `verified` from this door — see the
+   * honest-limits block below the class): this is the trust computing base. Any
+   * code that can import this module and call `fromAuthority("anything")` mints
+   * a `verified` value — the string is never checked against a registry,
+   * signature, or on-chain object. So a Gate `verified` is IN-PROCESS
+   * observe/warn/dev-time authority, NOT unforgeable enforcement. In-process
+   * TypeScript cannot be unforgeable; money limits belong to the chain's own
+   * primitives (on Sui, native `sui::allowance`). Never treat a Gate `verified`
+   * receipt as proof that real authority was present.
    */
   static fromAuthority<T>(value: T, authority: string): Sourced<T> {
     // An object value is frozen IN PLACE, shallowly. `allowlisted` hands its
@@ -342,16 +342,16 @@ Object.freeze(Sourced)
 Object.freeze(Sourced.prototype)
 
 // ── Tier ascent (module-private — Rule 3 made structural) ───────────────────
-// Session-003 C6 (Adversary): ascent MUST NOT be reachable from outside this
-// module, or the declassifiers are audited doors in a wall with a hole next
-// to them. Only the three declassifiers below may call this.
+// Ascent MUST NOT be reachable from outside this module, or the declassifiers
+// are audited doors in a wall with a hole next to them. Only the three
+// declassifiers below may call this.
 //
-// TCB honesty (C8): within this process, `fromAuthority` and this module are
-// the trust computing base — any code that can import trust.ts and lie about
-// an authority name can mint Verified values. The TS runtime is therefore an
-// OBSERVE/WARN/dev-time authority; UNFORGEABLE enforcement is the Move cage's
-// job (SpendCage, testnet 0x5c1588…fdfa), where capabilities cannot be minted
-// by convention. This is the spec's four-property discriminator, in code.
+// TCB honesty: within this process, `fromAuthority` and this module are the
+// trust computing base — any code that can import trust.ts and lie about an
+// authority name can mint Verified values. The TS runtime is therefore an
+// OBSERVE/WARN/dev-time authority. In-process TypeScript cannot be
+// unforgeable; money limits belong to the chain's own primitives (on Sui,
+// native `sui::allowance`).
 
 //
 // `prev` is the declassifier's own SNAPSHOT of the value it checked — its
@@ -384,8 +384,8 @@ function ascend<T>(prev: { readonly value: T; readonly provenance: Provenance },
  * which is byte-identical to the STRING "5n", and a non-finite number became
  * `null`, byte-identical to a literal null. A receipt is evidence of what
  * reached the sink; two different values must not leave identical evidence.
- * Every Sui amount in MIST is a bigint, so this is the common case, not an
- * edge. Everything else renders exactly as before.
+ * On-chain amounts are bigints, so this is the common case, not an edge.
+ * Everything else renders exactly as before.
  *
  * This lives HERE, in gate, and deliberately not in the rail's `canonicalJSON`
  * (src/canon.ts): that function defines signed and hashed bytes for the whole
@@ -417,7 +417,7 @@ const show = (value: unknown): string => {
   }
 }
 
-// ── Declassifiers (§5 — the three doors) ────────────────────────────────────
+// ── Declassifiers (the three doors) ─────────────────────────────────────────
 
 export type DeclassifyResult<T> =
   | { readonly ok: true; readonly value: Sourced<T> }
@@ -588,7 +588,7 @@ const HUMAN_CONFIRM_VALUE_CHARS = 256
 
 /**
  * Human confirmation → Verified. The provenance is RENDERED to the human
- * (§5: confirmation fatigue is an attack vector — the human must see what
+ * (Confirmation fatigue is an attack vector — the human must see what
  * they are actually vouching for, not "Confirm? y/n"). It is rendered FIRST,
  * before the value, and the value is bounded — see the body.
  */
@@ -643,7 +643,7 @@ export function humanConfirm<T>(
 // ── Receipts (SweeVerify's lowercase artifact) ──────────────────────────────
 // Hash-chained decision log: every sink invocation — allowed OR refused —
 // appends an event whose hash covers the previous hash. Tamper-evident by
-// construction; Ed25519 signing is the next layer up (@sweetrust/verify's
+// construction; Ed25519 signing is the next layer up (sweetrust/verify's
 // SignedReceiptLog wraps this class — wrap, never fork).
 
 export interface Receipt {
@@ -677,7 +677,7 @@ export interface Receipt {
 
 /**
  * The exact bytes ReceiptLog hashes for a receipt — the single definition of the
- * interior-hash serialization. Exported so verifiers (@sweetrust/verify) recompute
+ * interior-hash serialization. Exported so verifiers (sweetrust/verify) recompute
  * hashes from this function instead of hand-mirroring it across packages.
  *
  * Canonical JSON (src/canon.ts): keys sorted at EVERY depth, no whitespace,
@@ -729,7 +729,7 @@ export class ReceiptLog {
    * Compute the next receipt WITHOUT committing it. Pure.
    *
    * Split out of append() 2026-07-25 so a subclass that must do fallible work
-   * per record — @sweetrust/verify signs each one — can do that work before
+   * per record — sweetrust/verify signs each one — can do that work before
    * anything lands. The old shape committed first and let the subclass sign
    * second, so a signing failure left the interior chain one ahead of the
    * signed chain, permanently, with every later wrapper link built on a stale
@@ -781,7 +781,7 @@ export class ReceiptLog {
     return [...this.events]
   }
 
-  /** The head hash — what an external anchor (@sweetrust/verify) commits to. */
+  /** The head hash — what an external anchor (sweetrust/verify) commits to. */
   head(): string {
     return this.events.at(-1)?.hash ?? "genesis"
   }
@@ -794,7 +794,7 @@ export class ReceiptLog {
    * tamper evidence. A hash chain reconstructed from bytes alone cannot prove
    * it is complete — only that it is internally consistent. Proving a log has
    * not been truncated across a process or a machine requires an external
-   * commitment to the head; that is @sweetrust/verify's job, not this class's.
+   * commitment to the head; that is sweetrust/verify's job, not this class's.
    */
   verifyChain(): boolean {
     if (this.events.length !== this.appended) return false
@@ -860,7 +860,7 @@ export function mockJudgmentProvider(intent: {
   }
 }
 
-// ── Sinks (§4 Rule 4 + §6.5 adoption ladder) ────────────────────────────────
+// ── Sinks (Rule 4 + the adoption ladder) ─────────────────────────────────────
 
 export type EnforcementMode = "observe" | "warn" | "enforce"
 const MODES: ReadonlySet<string> = new Set<EnforcementMode>(["observe", "warn", "enforce"])

@@ -1,14 +1,13 @@
 /**
- * @sweetrust/mandate — public API surface
+ * sweetrust/mandate — public API surface
  *
- * v0.0 — type-enforced agent capability declaration with constitutional
- * pre-check inheritance from EM-2 / security-hardened-judge.allium.
- *
- * Per the mandate capability-declaration specification v0.0.
+ * Type-enforced agent capability declaration, with the constitutional
+ * pre-check folded in (2026-07-19).
  */
 
 export type {
   Capability,
+  ExternalRef,
   GrantorId,
   ISO8601,
   MandateAuditEvent,
