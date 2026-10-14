@@ -11,7 +11,7 @@ SweeMandate signs  ──▶  SweeGate enforces  ──▶  SweeVerify proves
 npm i sweetrust
 ```
 
-Zero runtime dependencies. Node builtins only (`node:crypto`, `node:fs`, `node:path`). Nothing else enters your tree.
+Zero runtime dependencies for `sweetrust`, `sweetrust/mandate`, `sweetrust/gate` and `sweetrust/verify` — Node builtins only (`node:crypto`, `node:fs`, `node:path`). `sweetrust/sui` is the one entry that needs a peer, `@mysten/sui`.
 
 ---
 
@@ -197,13 +197,13 @@ const report = verifySignedChain(parseJSONL(file), {
 ## Proof it runs
 
 ```bash
-pnpm -C packages/trust test        # 177 tests
-pnpm -C packages/trust typecheck
+pnpm -C packages/trust test        # the whole suite
+pnpm -C packages/trust typecheck   # tsc, then the README and forgery gates against dist/
 node packages/trust/src/mandate/demo.ts             # grant → invoke → revoke → refuse
 node packages/trust/src/mandate/multi-tier-demo.ts  # tamper + chain-break detection, live
 ```
 
-Both demos are in this repository, not in the published tarball — clone to run them.
+Both demos are in this repository, not in the published tarball — clone to run them. The demos and `pnpm typecheck` run TypeScript directly and need **Node ≥ 22.18**; the published `dist/` needs only the `engines` floor, Node ≥ 20.19.
 
 The multi-tier demo is the centerpiece: it builds an org → project → agent chain, signs every record, then **rewrites a rationale after signing** and reports the exact corrupted index — followed by removing a middle record and catching the broken hash link.
 
@@ -237,7 +237,11 @@ A free tier without enforcement is an advisory guardrail, which is the exact fai
 
 ## Status
 
-**v0.3.0**, unpublished. Formed 2026-07-30 by merging `@sweetrust/mandate`, `@sweetrust/gate` and `@sweetrust/verify` into one package with subpath exports. All three were unpublished, so nothing broke and no migration is owed to anyone.
+**v0.4.0 is the first npm release.** The package was formed 2026-07-30 by merging three unpublished packages (`@sweetrust/mandate`, `@sweetrust/gate`, `@sweetrust/verify`) into one with subpath exports, then hardened through the adversarial passes `SECURITY.md` lists. Nothing before 0.4.0 was ever published, so no migration is owed to anyone. `CHANGELOG.md` ships in the tarball.
+
+## Versioning
+
+0.x: **a minor version may break.** Until 1.0 these may change in a minor, and are stated here rather than discovered: the `Receipt["decision"]` union, `VerifyFailure` and `VerifyAuditChainResult["reason"]`, the `MandateError` union, the receipt hash body and the signed preimage, the `MandateId` suffix width, and the `swee.*.v1` domain tags. Persisted JSONL is versioned by its `domain` tag. The full statement is at the head of `CHANGELOG.md`.
 
 ## License
 

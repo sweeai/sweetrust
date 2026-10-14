@@ -2,7 +2,7 @@
   "name": "sweetrust",
   "private": true,
   "type": "module",
-  "description": "Swee's open-source packages. Everything published under the @swee scope lives here.",
+  "description": "Swee's open-source packages. Currently one: sweetrust.",
   "license": "Apache-2.0",
   "scripts": {
     "build": "pnpm -r build",

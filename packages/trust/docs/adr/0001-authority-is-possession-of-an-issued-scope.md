@@ -36,7 +36,7 @@ already ruled that this pointer must not be a *revocation* input. Nobody had ask
 
 **Authority is possession of a scope object this module issued.**
 
-- A module-private `WeakSet` records every scope the five issuers mint. Issued scopes and their
+- A module-private `WeakSet` records every scope an issuer mints. Issued scopes and their
   capability lists are frozen, so once a scope passes the check its `tier` and `grantor` are fact.
 - `useCapability` and every delegating issuer refuse a scope that was not issued
   (`MandateScopeForged`). The check runs *after* the existing audit-log checks, so a scope that is

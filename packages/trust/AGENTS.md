@@ -18,7 +18,7 @@ The three predecessor `AGENTS.md` files had drifted from the code. If you find a
 | *"Effect-TS idioms: all flows are `Effect.gen` generators"* | **Effect was removed on purpose** (DAN-600, 2026-07-20). `src/mandate/mandate.ts` says so at the definition site: `failMandate` is the "plain-TS replacement for the former `Effect.fail`", and `defineCapability` "replaces the former `Context.Tag(...)` (which required Effect)." There is no `effect` dependency and no `effect` import anywhere in this package. **Do not write `Effect.gen` code here.** |
 | *"TypeScript source-shipping … no build step"* | There **is** a build step: `tsdown`, four entries, emitting `dist/*.mjs` + `.d.mts`. `main`/`types`/`exports` all point at `dist/`. |
 | *"Layer composition is the only authentication primitive"* / `makeXLive` = Effect Layers | The `makeXLive` names survive as plain factory functions. They are not Effect Layers. The dependency-injection *discipline* still holds; the framework is gone. |
-| Version `v1.1.0` (mandate) / `v0.1.0` (gate, verify) | The package is **0.3.0**. Predecessors were all 0.2.0. |
+| Version `v1.1.0` (mandate) / `v0.1.0` (gate, verify) | One version for the whole package — read it from `package.json`, never from prose. |
 | `@sweetrust/verify` has peer deps on gate + mandate | They are internal now — plain relative imports. No peers. |
 
 The lesson worth keeping: **all five of these were true when written.** An `AGENTS.md` is a living document, and a living document that nobody re-reads against the code becomes an instruction to write the wrong thing. Version numbers in prose rot fastest — prefer pointing at `package.json` over restating it.
@@ -74,11 +74,13 @@ test/
 ## Gates
 
 ```bash
-pnpm -C packages/trust typecheck   # tsc --noEmit
+pnpm -C packages/trust build       # tsdown → dist/ (the two typecheck gates read dist/, so build first)
 pnpm -C packages/trust test        # vitest
-pnpm -C packages/trust build       # tsdown → dist/
-pnpm typecheck                # workspace, honest coverage report
+pnpm -C packages/trust typecheck   # tsc --noEmit, then scripts/readme-typecheck.ts and scripts/forgery-typecheck.ts against dist/
+pnpm typecheck                     # from the repository root: every package's typecheck, in turn
 ```
+
+The demos (`src/mandate/*demo.ts`) and `pnpm typecheck` run TypeScript directly (`node --experimental-strip-types`) and need **Node ≥ 22.18**. The shipped `dist/` needs only `engines`: Node ≥ 20.19. Do not raise `engines` to match the dev tooling; the floor is a promise to consumers.
 
 Every public-API change ships with a test. When you change the export surface, the subpath entries in `tsdown.config.ts` and the `exports` map in `package.json` must stay in correspondence — nothing checks that but the smoke path in `README.md`.
 

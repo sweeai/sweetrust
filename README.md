@@ -1,10 +1,10 @@
 # sweetrust
 
-Swee's open-source packages. Everything published under the **`@swee`** scope lives here.
+Swee's open-source packages. Currently one: [`sweetrust`](packages/trust), unscoped.
 
 | Package | What it is |
 |---|---|
-| [`sweetrust`](packages/trust) | Trust rails for AI agents — issue authority, enforce it, prove what happened. Zero runtime dependencies. |
+| [`sweetrust`](packages/trust) | Trust rails for AI agents — issue authority, enforce it, prove what happened. Zero runtime dependencies in the kernel. |
 
 ## Why one repository
 
