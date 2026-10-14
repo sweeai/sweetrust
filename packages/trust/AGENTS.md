@@ -38,12 +38,22 @@ The lesson worth keeping: **all five of these were true when written.** An `AGEN
 src/
   index.ts        the whole-rail barrel (curated — see below)
   canon.ts        the one canonicalization (canonicalJSON, sha256Hex) — a leaf, node:crypto only
-  mandate/        authority   → subpath "sweetrust/mandate"
-  gate/           enforcement → subpath "sweetrust/gate"
+  mandate/        authority   → subpath "sweetrust/mandate"  (types, mandate, audit, signer, security, errors, two demos)
+  gate/           enforcement → subpath "sweetrust/gate"     (trust.ts — one file, on purpose)
   verify/         evidence    → subpath "sweetrust/verify"
+  cage/           ChainCage types only, no runtime; re-exported as types from the root
+  sui/            the ChainCage adapter for Sui → subpath "sweetrust/sui"; the one entry with a peer (@mysten/sui)
+scripts/
+  readme-typecheck.ts    compiles the README's ts blocks against dist/*.d.mts (a `pnpm typecheck` gate)
+  forgery-typecheck.ts   proves an object literal cannot satisfy Sourced in the shipped declarations (same)
+examples/
+  caged-spend-agent.ts   the Sui cage live on testnet; needs a funded key and runs in no gate
+docs/adr/         decisions with force — 0001 authority is possession · 0002 the interior hash is canonical
 test/
   index-barrel.test.ts   guards the barrel against silent export loss
-  mandate/ gate/ verify/ mirror src/
+  canon.test.ts          one canonicalization across the rail; the leaf imports only node:crypto
+  intake-poison.test.ts  every object-taking export under the second-read Proxy in helpers/poison.ts
+  mandate/ gate/ verify/ sui/   mirror src/
 ```
 
 | File | Role |
@@ -54,6 +64,8 @@ test/
 | `src/mandate/audit.ts` | audit-log factories, signed and unsigned |
 | `src/mandate/signer.ts` | Ed25519 signer + verifier, `verifyAuditChain`, `signedPreimage`; re-exports `canonicalJSON` and `sha256Hex` from `src/canon.ts` |
 | `src/mandate/security.ts` | `constitutionalPreCheck` + the MIP-1..MIP-6 catalog |
+| `src/mandate/errors.ts` | `MandateFailure`, the `Error` every mandate refusal is thrown as; the union's fields are own properties and `message` is the `_tag` alone |
+| `src/mandate/{demo,multi-tier-demo}.ts` | runnable narrations of the flow, `node src/mandate/<demo>.ts`; not shipped |
 | `src/gate/trust.ts` | the enforcement kernel — one file, deliberately |
 | `src/verify/verify.ts` | signed receipt chains, JSONL, third-party verification, anchor memos |
 

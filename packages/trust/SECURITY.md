@@ -171,6 +171,23 @@ artifact rather than the source, and the findings are recorded rather than quiet
   declassifiers threw on a BigInt; a throwing or unscorable judgment provider executed. The rest
   LOW and documentation. All twenty closed, each with a regression watched red against the pre-fix
   source before its fix was accepted.
+- **2026-10-13** — the same day, a pass over the **mandate** kernel. One CRITICAL: a getter on the
+  `args` object split the scope the possession check saw from the scope every later read acted on,
+  so a caller holding only its own leaf could invoke an unheld capability under another id, mint a
+  project outside its subtree and revoke the org root. Also closed: a 40-bit mandate id the types
+  called "collision-free", and a keyword split by one invisible character walking past the
+  pre-check. Every exported function now reads each field once;
+  `test/mandate/authority-binding.test.ts` pins the count.
+- **2026-10-13** — and a pass over the **verify** kernel. A seventh key on a chain's head record
+  was authenticated by nothing, and the next signature then made it permanent; a pin of
+  `undefined` matched a record with no key; a lenient hex decoder accepted uppercase, trailing
+  bytes and odd-length signatures; a getter on a record could show the pin one key and the crypto
+  another. All closed; `test/verify/adversarial-envelope.test.ts` is the record.
+- **2026-10-13** — a rail-wide pass after those three. The interior receipt hash moved to canonical
+  JSON (ADR 0002); the never-produced `asserted` tier and the v0.0 issuers were removed; every
+  object-taking export was put under a second-read Proxy (`test/intake-poison.test.ts`), which
+  caught three more double reads; and the sink's `errored` receipt for an async action was made to
+  re-raise instead of swallowing the host's crash.
 
 🔑 **The lesson we keep relearning, offered because it will apply to your code too:** a check and
 the decision it authorizes must name the same binding. If you compare A and act on B, you have not
