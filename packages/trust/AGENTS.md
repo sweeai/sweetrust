@@ -88,6 +88,8 @@ pnpm -C packages/trust typecheck   # tsc --noEmit, then scripts/readme-typecheck
 pnpm typecheck                     # from the repository root: every package's typecheck, in turn
 ```
 
+CI runs these same gates on every push to `main` and every pull request (`.github/workflows/ci.yml`): build, test and typecheck on Node 22 and 24, and build and test on the engines floor, Node 20.19. A red CI is a red gate.
+
 The demos (`src/mandate/*demo.ts`) and `pnpm typecheck` run TypeScript directly (`node --experimental-strip-types`) and need **Node ≥ 22.18**. The shipped `dist/` needs only `engines`: Node ≥ 20.19. Do not raise `engines` to match the dev tooling; the floor is a promise to consumers.
 
 Every public-API change ships with a test. When you change the export surface, the subpath entries in `tsdown.config.ts` and the `exports` map in `package.json` must stay in correspondence — nothing checks that but the smoke path in `README.md`.
