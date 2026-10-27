@@ -16,19 +16,31 @@ on:
 permissions:
   contents: read
 
+# A newer push to a pull request cancels its older run. On main every commit
+# keeps its own run, so each one ends with a pass or a fail.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   gates:
-    name: build · test · typecheck (Node ${{ matrix.node }})
+    name: gates (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        # The typecheck gate and the demos run TypeScript directly and need Node ≥ 22.18.
-        node: ["22.x", "24.x"]
+        include:
+          # The typecheck gate and the demos run TypeScript directly and need Node ≥ 22.18.
+          - node: "22.x"
+            typecheck: true
+          - node: "24.x"
+            typecheck: true
+          # The engines floor: package.json promises consumers Node ≥ 20.19, so this
+          # leg builds, tests and loads dist/ on it. It skips the typecheck gate,
+          # which is dev tooling.
+          - node: "20.19"
+            typecheck: false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -37,28 +49,23 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node }}
+          # The newest release in the range, not whatever the runner image cached.
+          check-latest: true
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       # Build first: the test suite and both typecheck gates read dist/.
       - run: pnpm build
       - run: pnpm test
-      - run: pnpm typecheck
-
-  engines-floor:
-    # The published dist/ promises Node ≥ 20.19 (package.json "engines"). This job
-    # holds that promise: it builds and tests on the floor itself. It skips the
-    # typecheck gate, which is dev tooling and needs Node 22.18.
-    name: build · test on the engines floor (Node 20.19)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0, reads packageManager
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: "20.19"
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm build
-      - run: pnpm test
+      # The tests run src/ through vitest. This step loads what a consumer imports:
+      # the built dist/, by package name, through the exports map.
+      - name: load dist/ through the exports map
+        working-directory: packages/trust
+        run: |
+          node --input-type=module -e '
+            for (const entry of ["sweetrust", "sweetrust/mandate", "sweetrust/gate", "sweetrust/verify"]) {
+              const m = await import(entry)
+              if (Object.keys(m).length === 0) throw new Error(`${entry} exports nothing`)
+              console.log(`${entry}: ${Object.keys(m).length} exports`)
+            }'
+      - if: matrix.typecheck
+        run: pnpm typecheck
