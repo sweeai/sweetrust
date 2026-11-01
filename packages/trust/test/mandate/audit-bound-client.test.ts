@@ -18,12 +18,18 @@
  * Every test below was watched RED before the fix existed (2026-10-31, the
  * import of `createTrust` failed because nothing exported it).
  */
+import { mkdtempSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { describe, expect, test } from "vitest"
 import * as mandate from "../../src/mandate/index.ts"
 import {
   createTrust,
   defineCapability,
   makeInMemoryAuditLive,
+  makeInMemorySignedAuditLive,
+  makeInMemorySignerLive,
+  makeJsonlAuditLive,
   MandateFailure,
   type GrantorId,
   type ISO8601,
@@ -116,7 +122,7 @@ describe("audit bound at construction — the 2026-10-31 audit-swap bypass", () 
     expect(store.query(agent.id).filter((ev) => ev.type === "invoke")).toHaveLength(2)
   })
 
-  test("(d) the client's audit view reads and never writes, and the client is frozen", () => {
+  test("(d) the client's audit view reads and never writes: no record, and a returned event cannot be edited into an un-revoke", () => {
     const { trust, agent, org } = chain()
     expect("record" in trust.audit).toBe(false)
     expect(trust.audit.isRevoked(agent.id)).toBe(false)
@@ -125,6 +131,45 @@ describe("audit bound at construction — the 2026-10-31 audit-swap bypass", () 
     expect(trust.audit.isRevoked(agent.id)).toBe(true)
     expect(Object.isFrozen(trust)).toBe(true)
     expect(Object.isFrozen(trust.audit)).toBe(true)
+
+    // The 2026-10-31 pre-review: the view returned the stored objects, so
+    // `revoke.type = "noop"` flipped isRevoked to false and the use was
+    // allowed. Every stored event is frozen now; in strict mode the write
+    // throws, and either way the verdict does not move.
+    const revoke = trust.audit.query(agent.id).find((ev) => ev.type === "revoke")!
+    expect(Object.isFrozen(revoke)).toBe(true)
+    expect(() => {
+      ;(revoke as { type: string }).type = "noop"
+    }).toThrow(TypeError)
+    expect(trust.audit.isRevoked(agent.id)).toBe(true)
+    expect(thrown(() => trust.useCapability({ mandate: agent, capability: Buy }))._tag).toBe("MandateRevoked")
+  })
+
+  test("(d2) the same holds on the signed in-memory store, through payload and envelope", () => {
+    const signer = makeInMemorySignerLive()
+    const { mandateAudit, signedAudit } = makeInMemorySignedAuditLive(signer)
+    const trust = createTrust({ store: mandateAudit })
+    const org = trust.issueOrgMandate({ grantor: DANNY, capabilities: [Buy] as const, rationale: "org" })
+    trust.revokeMandate({ mandateId: org.id, revokerScope: org, rationale: "retire" })
+    const payload = trust.audit.query(org.id).find((ev) => ev.type === "revoke")!
+    const envelope = signedAudit.listAllSigned().at(-1)!
+    expect(Object.isFrozen(payload)).toBe(true)
+    expect(Object.isFrozen(envelope)).toBe(true)
+    expect(() => {
+      ;(payload as { type: string }).type = "noop"
+    }).toThrow(TypeError)
+    expect(trust.audit.isRevoked(org.id)).toBe(true)
+  })
+
+  test("(h) two store OBJECTS over one JSONL path are two stores: the second refuses the first's scopes as foreign, fail-closed", () => {
+    const path = join(mkdtempSync(join(tmpdir(), "sweetrust-bound-")), "audit.jsonl")
+    const a = createTrust({ store: makeJsonlAuditLive(path) })
+    const org = a.issueOrgMandate({ grantor: DANNY, capabilities: [Buy] as const, rationale: "org" })
+    a.useCapability({ mandate: org, capability: Buy })
+    const b = createTrust({ store: makeJsonlAuditLive(path) })
+    expect(b.audit.query(org.id).some((ev) => ev.type === "grant")).toBe(true) // same file, same facts
+    expect(thrown(() => b.useCapability({ mandate: org, capability: Buy }))._tag).toBe("MandateScopeForeign")
+    expect(b.audit.query(org.id).filter((ev) => ev.type === "invoke")).toHaveLength(1) // b recorded nothing
   })
 
   test("(e) surface: sweetrust/mandate exports createTrust and no longer exports the five free functions", () => {

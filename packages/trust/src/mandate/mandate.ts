@@ -518,13 +518,13 @@ export const useCapability = <
     })
   }
 
-  audit.record({
+  audit.record(Object.freeze({
     type: "invoke",
     mandateId,
     capability: capId,
     timestamp: nowISO(),
     triggerSource,
-  })
+  }))
 }
 
 /**
@@ -605,7 +605,9 @@ export const revokeMandate = (args: {
     })
   }
   const revoker = (presented as MandateScope<any, any, any>).grantor
-  assertBoundTo(audit, presented as object, mandateId)
+  // Names the PRESENTED scope, as the issuers do for a foreign grantor: the
+  // mismatch is between that scope and this store, not about the target.
+  assertBoundTo(audit, presented as object, (presented as MandateScope<any, any, any>).id)
 
   // Idempotent: if already revoked, do not double-record.
   const alreadyRevoked = events.some((e) => e.type === "revoke")
@@ -613,14 +615,14 @@ export const revokeMandate = (args: {
     return
   }
 
-  audit.record({
+  audit.record(Object.freeze({
     type: "revoke",
     mandateId,
     revokedBy: revoker,
     rationale,
     timestamp: nowISO(),
     triggerSource,
-  })
+  }))
 }
 
 // ============================================================================
@@ -691,7 +693,7 @@ export const issueOrgMandate = <Caps extends ReadonlyArray<Capability>>(args: {
 
   bindTo(audit, scope)
 
-  audit.record({
+  audit.record(Object.freeze({
     type: "grant",
     mandateId: newId,
     grantor,
@@ -700,7 +702,7 @@ export const issueOrgMandate = <Caps extends ReadonlyArray<Capability>>(args: {
     parentMandateId: null,
     timestamp: grantTimestamp,
     triggerSource,
-  })
+  }))
 
   return scope
 }
@@ -792,7 +794,7 @@ export const issueProjectMandate = <
 
   bindTo(audit, scope)
 
-  audit.record({
+  audit.record(Object.freeze({
     type: "grant",
     mandateId: newId,
     grantor,
@@ -801,7 +803,7 @@ export const issueProjectMandate = <
     parentMandateId: grantorScope.id,
     timestamp: grantTimestamp,
     triggerSource,
-  })
+  }))
 
   return scope
 }
@@ -899,7 +901,7 @@ export const issueAgentMandate = <
 
   bindTo(audit, scope)
 
-  audit.record({
+  audit.record(Object.freeze({
     type: "grant",
     mandateId: newId,
     grantor,
@@ -908,7 +910,7 @@ export const issueAgentMandate = <
     parentMandateId: grantorScope.id,
     timestamp: grantTimestamp,
     triggerSource,
-  })
+  }))
 
   return scope
 }

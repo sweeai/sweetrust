@@ -36,7 +36,12 @@ release that makes it. A patch version changes none of these.
   parameter. Migration: build your store as before, then
   `const trust = createTrust({ store })` and call `trust.useCapability(args)` where you called
   `useCapability(args, store)`. The client also exposes `audit` (`query`, `isRevoked`), a read-only
-  view of the store.
+  view of the store. The binding is to the store **object**: two `makeJsonlAuditLive(path)` calls
+  over one file are two stores, and the second refuses the first's scopes as `MandateScopeForeign`
+  (fail-closed). Build one store per file and share it.
+- The in-memory stores freeze every event they keep, and the kernel freezes every event it
+  records, so an event handed back by `query` is a record and not a handle: editing a returned
+  revoke can no longer un-revoke a mandate (found in the 2026-10-31 pre-review, before release).
 - `MandateError` gains the variant `MandateScopeForeign { mandateId }` (0.x: the union may change
   in a minor, per § Versioning).
 

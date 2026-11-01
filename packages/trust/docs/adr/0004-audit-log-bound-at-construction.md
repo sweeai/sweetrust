@@ -61,7 +61,10 @@ grant.**
 - The reproduction above now ends in `MandateScopeForeign`, and nothing is recorded in the
   attacker's store. Same-client revocation still cascades (`AncestorMandateRevoked`).
 - A host that needs the store in more than one place constructs a client in each place over the
-  same store. A host must not hand an agent the store or the client; it hands the agent its own
+  same store **object**. The binding is object identity, so two `makeJsonlAuditLive(path)` calls
+  over one file are two stores: the second refuses the first's scopes as `MandateScopeForeign`,
+  fail-closed, even though it reads the same facts from the file. Build one store per file and
+  pass it around; do not rebuild it from the path. A host must not hand an agent the store or the client; it hands the agent its own
   scope, as ADR 0001 and `SECURITY.md` already said.
 - **Honest limit, unchanged from ADR 0001.** Code in the same process that can call
   `createTrust` with a store of its own can mint a fresh org mandate on that store and act under
