@@ -29,6 +29,9 @@ trust.useCapability(args)              // the same args, no store
 const r = await humanConfirm(value, render) // render may now answer with a Promise<boolean>
 ```
 
+A host that re-issued mandates at every boot should store the mandate ids and call
+`trust.resume()` instead; a re-mint is a fresh id and a fresh budget.
+
 ### Security
 
 - **The audit store is bound at construction, never passed per call** (ADR 0004). In 0.4.0 every
@@ -55,15 +58,37 @@ const r = await humanConfirm(value, render) // render may now answer with a Prom
   same audit log at every use. Nothing is counted in memory, so a restart refunds nothing, and the
   holder of a scope has nothing it can edit to reset its budget. Grant events gain `limits` and
   invoke events gain `amount`; both fields are optional, so a 0.4.0 log reads unchanged.
-- A delegated mandate may only tighten its grantor's limits: a larger `amount` or `count`, a
-  longer or missing `windowMs`, a different `unit`, or no limit where the grantor has one, is
-  refused at issue. `unit` is a label the kernel compares and never converts.
+- A delegated mandate may only tighten its grantor's limits. A larger `amount` or `count`, a
+  different `unit`, or no limit where the grantor has one is refused at issue. On windows, no
+  `windowMs` means the life of the mandate, the tightest of all: a child of a lifetime cap must be
+  lifetime too, and a child of a windowed cap may have no window or a window at least as long. A
+  shorter window is looser, because spend falls out of it sooner, and is refused. `unit` is a
+  label the kernel compares and never converts.
 - The types `CapabilityLimit` and `CapabilityLimits` are exported from `sweetrust/mandate`, and a
   scope carries a read-only `limits` mirror (`{}` when none). Enforcement reads the grant event,
   never the mirror.
-- Not yet: a parent's cap is not a shared budget across its children. Spend counts against each
-  leaf's own cap, so two agents capped at $20 under a project capped at $30 can spend $40 between
-  them. Cap each leaf to the share you mean it to have.
+- What a cap does not do yet, so you can plan around it. A cap binds the scope it is written on:
+  a parent's cap is not a shared budget across its children, so two agents capped at $20 under a
+  project capped at $30 can spend $40 between them. Cap the agent-tier scope you hand each agent,
+  to the share you mean it to have. `amount` is what the host declares; the kernel enforces the
+  spend it is told, so the host, never the agent, makes that call with the true figure. Amounts
+  are any finite, non-negative JavaScript number and are summed as floats, so for money use
+  integers in minor units (cents).
+- **`trust.resume({ mandateId, capabilities, tier? })`** (ADR 0006) picks an issued, unrevoked
+  mandate back up from the store's log after a restart, as the same id with the same budget. You
+  declare the capability set (order does not matter) and optionally the tier; the log confirms
+  both. It runs the same revocation walk a use runs, so it refuses exactly where `useCapability`
+  would (`MandateRevoked`, `AncestorMandateRevoked`, `DelegationChainBroken`, `MandateNotIssued`).
+  The scope it returns is bound to this client's store like any issued scope. Resuming twice gives
+  two genuine objects over one recorded authority, and revoking the id revokes both. Only the id
+  crosses the process boundary; no scope is persisted.
+- A `resume` audit event (`MandateResumeEvent`) records every resume. It never counts toward a
+  limit. A 0.4.0 reader that ignores unknown event types reads the log unchanged.
+- `ResumedScope<Caps, Tier>` types what `resume` returns: with a declared tier, a resumed project
+  can be handed to `issueAgentMandate` without a cast; with none, the scope is typed loosely and
+  you narrow on `tier`.
+- `grantorId(string)` builds a `GrantorId` from a non-empty string, so you no longer cast
+  (`"ARTHUR" as GrantorId`). An empty or non-string argument is a `TypeError`.
 
 ### Changed
 
@@ -86,6 +111,10 @@ const r = await humanConfirm(value, render) // render may now answer with a Prom
   `MandateAmountRequired`, `MandateAmountInvalid` (with what was `received`) and
   `LimitNotWithinGrantor` (naming the `field` that was looser). A `switch` over `_tag` that is
   exhaustive needs the new cases.
+- `MandateError` gains `ResumeMismatch { mandateId, field, declared, recorded }`, raised by
+  `resume` when the declared `capabilities` or `tier` is not what the log recorded; both lists are
+  sorted. `MandateAuditEvent` gains the `resume` member, so a `switch` over `event.type` that is
+  exhaustive needs a `resume` case.
 - **Breaking:** `humanConfirm` is async. Its `render` may return `boolean | Promise<boolean>`, and
   it always returns `Promise<DeclassifyResult<T>>`, so you can ask a human who answers over a
   network: a phone, a voice call, a chat approval. Migration: add `await`; a synchronous renderer

@@ -192,8 +192,9 @@ artifact rather than the source, and the findings are recorded rather than quiet
   mints `verified` on any string. They were filed as the next tickets. Closed since, in 0.5.0:
   `humanConfirm` is async, so it awaits a human who answers over a network, and a renderer that
   throws or rejects is a refusal; and a grant can cap a capability by amount, count and rolling
-  window, counted from the audit log (ADR 0005). Still open: a parent's cap is not a shared
-  budget across its children.
+  window, counted from the audit log (ADR 0005); and authority survives a restart, because
+  `trust.resume` picks a mandate back up from the log by id, with its budget (ADR 0006). Still
+  open: a parent's cap is not a shared budget across its children.
 - **2026-10-13** — the same day, a pass over the **mandate** kernel. One CRITICAL: a getter on the
   `args` object split the scope the possession check saw from the scope every later read acted on,
   so a caller holding only its own leaf could invoke an unheld capability under another id, mint a
