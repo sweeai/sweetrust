@@ -243,7 +243,7 @@ describe("delegation: a child may only tighten", () => {
       grantorScope: org,
       capabilities: [Buy] as const,
       rationale: "groceries",
-      limits: { [Buy.key]: { amount: 30, count: 3, windowMs: 3_600_000, unit: "USD" } },
+      limits: { [Buy.key]: { amount: 30, count: 3, windowMs: 7 * 86_400_000, unit: "USD" } },
     })
     trust.useCapability({ mandate: project, capability: Buy, amount: 30 })
     expect(tagOf(() => trust.useCapability({ mandate: project, capability: Buy, amount: 1 }))).toBe(
@@ -254,8 +254,7 @@ describe("delegation: a child may only tighten", () => {
   test.each([
     ["a larger amount", { amount: 150, count: 10, windowMs: 86_400_000, unit: "USD" }, "amount"],
     ["a larger count", { amount: 100, count: 11, windowMs: 86_400_000, unit: "USD" }, "count"],
-    ["a longer window", { amount: 100, count: 10, windowMs: 86_400_001, unit: "USD" }, "windowMs"],
-    ["no window where the parent has one", { amount: 100, count: 10, unit: "USD" }, "windowMs"],
+    ["a shorter window (more per day)", { amount: 100, count: 10, windowMs: 3_600_000, unit: "USD" }, "windowMs"],
     ["no amount where the parent has one", { count: 10, windowMs: 86_400_000, unit: "USD" }, "amount"],
     ["another unit", { amount: 100, count: 10, windowMs: 86_400_000, unit: "EUR" }, "unit"],
   ])("a child with %s is refused, naming the field", (_label, childLimit, field) => {
@@ -274,6 +273,42 @@ describe("delegation: a child may only tighten", () => {
       expect(err.capability).toBe("amazon.buy")
       expect(err.field).toBe(field)
     }
+  })
+
+  test("a child with no window under a windowed parent is a lifetime cap: tighter, allowed", () => {
+    const { trust, org } = seed()
+    const project = trust.issueProjectMandate({
+      grantor: ARTHUR,
+      grantorScope: org,
+      capabilities: [Buy] as const,
+      rationale: "ever",
+      limits: { [Buy.key]: { amount: 100, count: 10, unit: "USD" } },
+    })
+    vi.useFakeTimers()
+    trust.useCapability({ mandate: project, capability: Buy, amount: 100 })
+    vi.advanceTimersByTime(365 * 86_400_000)
+    expect(tagOf(() => trust.useCapability({ mandate: project, capability: Buy, amount: 1 }))).toBe("MandateLimitExceeded")
+  })
+
+  test("a child with a window under a lifetime parent would renew forever: refused", () => {
+    const trust = createTrust({ store: makeInMemoryAuditLive() })
+    const org = trust.issueOrgMandate({
+      grantor: ARTHUR,
+      capabilities: [Buy] as const,
+      rationale: "100 ever",
+      limits: { [Buy.key]: { amount: 100 } },
+    })
+    const err = errorOf(() =>
+      trust.issueProjectMandate({
+        grantor: ARTHUR,
+        grantorScope: org,
+        capabilities: [Buy] as const,
+        rationale: "100 a day",
+        limits: { [Buy.key]: { amount: 100, windowMs: 86_400_000 } },
+      }),
+    )
+    expect(err._tag).toBe("LimitNotWithinGrantor")
+    if (err._tag === "LimitNotWithinGrantor") expect(err.field).toBe("windowMs")
   })
 
   test("a child that carries a capped capability with no limit of its own is refused", () => {

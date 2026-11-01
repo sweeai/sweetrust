@@ -359,8 +359,17 @@ const captureLimits = (raw: unknown, capabilityIds: ReadonlyArray<string>): Capa
  * A child may only tighten. For every capability the child carries that the
  * grantor's RECORDED grant caps, the child must carry a cap of its own that is
  * at least as tight in every field the grantor set: no larger `amount` or
- * `count`, no longer or missing `windowMs`, the same `unit`. Read from the
- * grantor's grant event, never from the in-memory scope (audit-log-is-truth).
+ * `count`, the same `unit`, and a window that cannot out-spend the parent's.
+ *
+ * The window direction is the one that is easy to get backwards, and the
+ * first draft of this function did (caught by a blind review, 2026-11-01):
+ * for a fixed amount, a SHORTER window is LOOSER (100 per hour is 2,400 per
+ * day), and no window at all is a lifetime cap, the tightest there is. So:
+ * a parent with no window (lifetime) needs a child with no window; a parent
+ * with a window accepts a child with no window or with a window at least as
+ * LONG. (The exact rule, `child.amount × ceil(parent.window / child.window)
+ * ≤ parent.amount`, admits a few more children; this one is a sound subset.)
+ * Read from the grantor's grant event, never from the in-memory scope.
  */
 const assertLimitsWithinGrantor = (
   audit: MandateAuditService,
@@ -381,7 +390,9 @@ const assertLimitsWithinGrantor = (
       failMandate({ _tag: "LimitNotWithinGrantor", grantorMandateId, capability: capId, field })
     if (parent.amount !== undefined && (child?.amount === undefined || child.amount > parent.amount)) refuse("amount")
     if (parent.count !== undefined && (child?.count === undefined || child.count > parent.count)) refuse("count")
-    if (parent.windowMs !== undefined && (child?.windowMs === undefined || child.windowMs > parent.windowMs)) {
+    if (parent.windowMs === undefined) {
+      if (child?.windowMs !== undefined) refuse("windowMs")
+    } else if (child?.windowMs !== undefined && child.windowMs < parent.windowMs) {
       refuse("windowMs")
     }
     if (parent.unit !== undefined && child?.unit !== parent.unit) refuse("unit")

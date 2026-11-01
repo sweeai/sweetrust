@@ -38,8 +38,16 @@ export interface Capability<Id extends string = string> {
  * signed store, unforgeable; the spend is summed from the INVOKE EVENTS of the
  * same log at every use. No counter lives in memory, so the verdict is the
  * same after a restart as before one, and nothing the holder can edit changes
- * it. Honest limit: spend counts against the leaf's own cap; a parent's cap is
- * not a shared budget across its children yet.
+ * it.
+ *
+ * Three honest limits. (1) A cap binds a LEAF: a holder of a capped scope that
+ * can still delegate may mint children each capped at the same amount, so cap
+ * the agent-tier scope you hand the agent, never only its parents; subtree
+ * summation is a later decision. (2) `amount` is what the HOST declares to
+ * `useCapability`; the kernel enforces declared spend, so the host, never the
+ * agent, must make that call with the true figure. (3) Amounts are summed as
+ * JavaScript numbers; use integers in minor units (cents) for money, or a
+ * cap of 0.3 will refuse 0.1 + 0.2.
  */
 export interface CapabilityLimit {
   /** Cap on the sum of invocation `amount`s. A capped capability refuses an invoke that declares none. */
@@ -212,9 +220,10 @@ export type MandateError =
   | {
       // Raised at delegation when the child's limit on a capability is looser
       // than the grantor's RECORDED limit, or absent where the grantor has
-      // one: a larger `amount` or `count`, a longer or missing `windowMs`, a
-      // different `unit`. A child may only tighten. `field` names the first
-      // field that failed.
+      // one: a larger `amount` or `count`, a
+      // different `unit`, a SHORTER window (more per day), or a window where
+      // the grantor's cap is for life. A child may only tighten. `field`
+      // names the first field that failed.
       readonly _tag: "LimitNotWithinGrantor"
       readonly grantorMandateId: MandateId
       readonly capability: string
