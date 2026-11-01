@@ -41,6 +41,30 @@ const r = await humanConfirm(value, render) // render may now answer with a Prom
   with the new `MandateScopeForeign`. Regression: `test/mandate/audit-bound-client.test.ts`,
   watched red before the fix.
 
+### Added
+
+- **Capability limits** (ADR 0005). `issueOrgMandate`, `issueProjectMandate` and
+  `issueAgentMandate` take an optional `limits`, keyed by capability key: `{ amount?, count?,
+  windowMs?, unit? }`. `amount` caps the sum of what the uses spend, `count` caps how many uses
+  there are, and `windowMs` makes either one rolling. "Under $30 a day, I just trust you" is
+  `limits: { "amazon.buy": { amount: 30, unit: "USD", windowMs: 86_400_000 } }`.
+- `useCapability` takes an optional `amount`. A capability capped by amount refuses a use that
+  states none, and an amount that is not a finite, non-negative number is refused whether or not
+  the capability is capped. A refused use records nothing.
+- The cap is recorded in the grant event, and the spend is summed from the invoke events in the
+  same audit log at every use. Nothing is counted in memory, so a restart refunds nothing, and the
+  holder of a scope has nothing it can edit to reset its budget. Grant events gain `limits` and
+  invoke events gain `amount`; both fields are optional, so a 0.4.0 log reads unchanged.
+- A delegated mandate may only tighten its grantor's limits: a larger `amount` or `count`, a
+  longer or missing `windowMs`, a different `unit`, or no limit where the grantor has one, is
+  refused at issue. `unit` is a label the kernel compares and never converts.
+- The types `CapabilityLimit` and `CapabilityLimits` are exported from `sweetrust/mandate`, and a
+  scope carries a read-only `limits` mirror (`{}` when none). Enforcement reads the grant event,
+  never the mirror.
+- Not yet: a parent's cap is not a shared budget across its children. Spend counts against each
+  leaf's own cap, so two agents capped at $20 under a project capped at $30 can spend $40 between
+  them. Cap each leaf to the share you mean it to have.
+
 ### Changed
 
 - **Breaking:** `issueOrgMandate`, `issueProjectMandate`, `issueAgentMandate`, `useCapability`
@@ -57,6 +81,11 @@ const r = await humanConfirm(value, render) // render may now answer with a Prom
   revoke can no longer un-revoke a mandate (found in the 2026-10-31 pre-review, before release).
 - `MandateError` gains the variant `MandateScopeForeign { mandateId }` (0.x: the union may change
   in a minor, per § Versioning).
+- `MandateError` gains four variants for capability limits: `MandateLimitExceeded` (with the
+  `limit`, what was already `used` in the window, and the `requested` amount),
+  `MandateAmountRequired`, `MandateAmountInvalid` (with what was `received`) and
+  `LimitNotWithinGrantor` (naming the `field` that was looser). A `switch` over `_tag` that is
+  exhaustive needs the new cases.
 - **Breaking:** `humanConfirm` is async. Its `render` may return `boolean | Promise<boolean>`, and
   it always returns `Promise<DeclassifyResult<T>>`, so you can ask a human who answers over a
   network: a phone, a voice call, a chat approval. Migration: add `await`; a synchronous renderer
