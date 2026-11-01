@@ -189,7 +189,9 @@ artifact rather than the source, and the findings are recorded rather than quiet
   regression was watched red before the fix. The same review's HIGH findings are open and named:
   the three subpaths do not compose (no amount, count, rate or time anywhere in mandate; the ask
   tier's `humanConfirm` is synchronous); authority does not survive a restart; `fromAuthority`
-  mints `verified` on any string. They are the next tickets, not this release.
+  mints `verified` on any string. They were filed as the next tickets. Closed since, in 0.5.0:
+  `humanConfirm` is async, so it awaits a human who answers over a network, and a renderer that
+  throws or rejects is a refusal.
 - **2026-10-13** — the same day, a pass over the **mandate** kernel. One CRITICAL: a getter on the
   `args` object split the scope the possession check saw from the scope every later read acted on,
   so a caller holding only its own leaf could invoke an unheld capability under another id, mint a

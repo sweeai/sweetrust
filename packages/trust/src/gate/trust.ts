@@ -591,11 +591,30 @@ const HUMAN_CONFIRM_VALUE_CHARS = 256
  * (Confirmation fatigue is an attack vector — the human must see what
  * they are actually vouching for, not "Confirm? y/n"). It is rendered FIRST,
  * before the value, and the value is bounded — see the body.
+ *
+ * ASYNC SINCE 0.5.0. A human who answers over a network (a phone, a voice
+ * call, a chat approval) answers later, so `render` may return a boolean or a
+ * Promise of one, and the verdict is always a Promise. Three properties ride
+ * on that shape; do not trade them for convenience:
+ *
+ * - The candidate is snapshotted and the question is built SYNCHRONOUSLY, at
+ *   the call, before the first `await`. The value the human is asked about is
+ *   the value that ascends, however long the human takes to answer.
+ * - The return is a Promise even for a synchronous `render`. A caller who
+ *   forgets `await` holds a Promise, whose `.ok` is `undefined`, so the
+ *   forgotten await reads as a refusal. Overloads that hand a sync renderer a
+ *   sync result would make the same mistake silent in one shape and loud in
+ *   the other; one shape keeps it fail-closed in both.
+ * - A `render` that throws or rejects has given no answer, and no answer is a
+ *   refusal, never an exception (as `corroborate`'s throwing `equals` is).
+ *
+ * The caller owns the wait. A render that never settles never confirms;
+ * reject it from your own timeout to turn silence into a refusal.
  */
-export function humanConfirm<T>(
+export async function humanConfirm<T>(
   candidate: Sourced<T>,
-  render: (question: string) => boolean,
-): DeclassifyResult<T> {
+  render: (question: string) => boolean | Promise<boolean>,
+): Promise<DeclassifyResult<T>> {
   // The PROVENANCE leads and the VALUE trails, cut to 256 characters with its
   // full length declared. The question used to open with the value — attacker-
   // controlled, any length — so a value beginning "… — provenance: VERIFIED
@@ -622,11 +641,37 @@ export function humanConfirm<T>(
       ? `${json.slice(0, HUMAN_CONFIRM_VALUE_CHARS)}… [${json.length} chars total; first ${HUMAN_CONFIRM_VALUE_CHARS} shown]`
       : json
   const question = `Confirm the value with provenance ${candidate.describe()} — value: ${shown}?`
-  // `!== true`, not `!`: only the literal true is a confirmation. A Promise (an
-  // `async` renderer) and the string "no" are both truthy, and either used to
-  // mint verified before the human had answered (the 2026-10-13 gate audit).
-  if (render(question) !== true) {
-    return { ok: false, reason: `human declined (render() must return exactly true): ${question}` }
+  // Everything above ran synchronously, at the call. The await below is the
+  // first point at which time passes; nothing after it reads `candidate`.
+  //
+  // A throw and a rejection land in the same catch: either way the renderer
+  // returned no answer, and no answer is a refusal (fail closed), never an
+  // exception the caller might read as an outage and retry around.
+  let answer: unknown
+  try {
+    answer = await render(question)
+  } catch (err) {
+    // The rejection reason is caller-controlled too: `String()` of a
+    // null-prototype object throws, and a throw from here would turn the
+    // refusal back into the exception this catch exists to prevent.
+    let why: string
+    try {
+      why = firstLine(err)
+    } catch {
+      why = "a reason that could not be rendered"
+    }
+    return {
+      ok: false,
+      reason: `human confirmation refused: render() threw or rejected before an answer (${why}): ${question}`,
+    }
+  }
+  // `!== true`, not `!`: only the literal true is a confirmation. The string
+  // "no" is truthy, and so was an unawaited Promise when this function was
+  // synchronous; either used to mint verified before the human had answered
+  // (the 2026-10-13 gate audit). The Promise is now awaited, so what is tested
+  // here is the human's settled answer, and it must still be exactly `true`.
+  if (answer !== true) {
+    return { ok: false, reason: `human declined (render() must return or resolve to exactly true): ${question}` }
   }
   return {
     ok: true,

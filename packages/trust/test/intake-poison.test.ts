@@ -113,6 +113,27 @@ const sameVerdict = <R>(label: string, plain: () => R, poisoned: () => R, pick?:
   expect(b, `${label}: poisoned verdict differs from plain`).toEqual(a)
 }
 
+/** `verdict` for an export that returns a Promise: a rejection becomes its tag. */
+const verdictAsync = async <R>(fn: () => Promise<R>, pick: (r: R) => unknown = (r) => r): Promise<Verdict> => {
+  try {
+    return { kind: "returned", summary: pick(await fn()) }
+  } catch (e) {
+    return { kind: "threw", tag: tagOf(e) }
+  }
+}
+
+/** `sameVerdict` for an async export (humanConfirm, since 0.5.0). */
+const sameVerdictAsync = async <R>(
+  label: string,
+  plain: () => Promise<R>,
+  poisoned: () => Promise<R>,
+  pick?: (r: R) => unknown,
+): Promise<void> => {
+  const a = await verdictAsync(plain, pick)
+  const b = await verdictAsync(poisoned, pick)
+  expect(b, `${label}: poisoned verdict differs from plain`).toEqual(a)
+}
+
 // ── Fixtures ─────────────────────────────────────────────────────────────────
 
 const Read = defineCapability("intake/read")
@@ -541,7 +562,7 @@ describe("gate: the sink spec, its nested bags, the call's args bag, the log ent
     )
   })
 
-  test("allowlisted, corroborate, humanConfirm — their Sourced arguments and the registry, every verdict", () => {
+  test("allowlisted, corroborate, humanConfirm — their Sourced arguments and the registry, every verdict", async () => {
     // A Sourced is frozen and rail-minted, so no caller can put a getter on
     // one; poisoning it here holds the declassifiers to the same discipline as
     // everything else, so the rule has no carve-out.
@@ -586,9 +607,13 @@ describe("gate: the sink spec, its nested bags, the call's args bag, the log ent
       expect(readsOf(p)).toEqual(new Map<PropertyKey, number>([["value", 1], ["tier", 1], ["provenance", 1]]))
     }
 
-    const confirmSummary = (r: ReturnType<typeof humanConfirm<string>>) => (r.ok ? ["ok", r.value.tier, r.value.value] : ["refused", r.reason])
-    sameVerdict("humanConfirm (yes)", () => humanConfirm(claim(), () => true), () => humanConfirm(poison(claim(), "candidate"), () => true), confirmSummary)
-    sameVerdict("humanConfirm (no)", () => humanConfirm(claim(), () => false), () => humanConfirm(poison(claim(), "candidate"), () => false), confirmSummary)
+    const confirmSummary = (r: Awaited<ReturnType<typeof humanConfirm<string>>>) => (r.ok ? ["ok", r.value.tier, r.value.value] : ["refused", r.reason])
+    await sameVerdictAsync("humanConfirm (yes)", () => humanConfirm(claim(), () => true), () => humanConfirm(poison(claim(), "candidate"), () => true), confirmSummary)
+    await sameVerdictAsync("humanConfirm (no)", () => humanConfirm(claim(), () => false), () => humanConfirm(poison(claim(), "candidate"), () => false), confirmSummary)
+    // The async answer path: the candidate is read before the first await, and
+    // nothing after the await may read it again.
+    await sameVerdictAsync("humanConfirm (async yes)", () => humanConfirm(claim(), async () => true), () => humanConfirm(poison(claim(), "candidate"), async () => true), confirmSummary)
+    await sameVerdictAsync("humanConfirm (async no)", () => humanConfirm(claim(), async () => false), () => humanConfirm(poison(claim(), "candidate"), async () => false), confirmSummary)
   })
 })
 
