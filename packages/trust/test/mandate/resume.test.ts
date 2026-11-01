@@ -115,7 +115,7 @@ describe("resume picks the mandate up where the log left it", () => {
           grantorScope: a as any,
           capabilities: [Buy] as const,
           rationale: "x",
-          limits: { [Buy.key]: { amount: 1, unit: "USD", windowMs: 1000 } },
+          limits: { [Buy.key]: { amount: 1, unit: "USD", windowMs: 86_400_000 } },
         }),
       ),
     ).toBe("TierLadderViolation")
