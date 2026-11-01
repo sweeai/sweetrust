@@ -26,6 +26,44 @@ export interface Capability<Id extends string = string> {
 }
 
 /**
+ * CapabilityLimit — how much of one capability a grant allows (DAN-1319).
+ *
+ * `amount` caps the SUM of `amount`s passed to `useCapability` for the
+ * capability; `count` caps the number of uses; `windowMs` makes both rolling
+ * (only uses inside the last `windowMs` count), and absent means for the life
+ * of the mandate. `unit` is a label the kernel compares for equality at
+ * delegation and never interprets: "USD", "SUI", "emails" are all fine.
+ *
+ * The limit is recorded in the GRANT EVENT, so it is immutable and, under a
+ * signed store, unforgeable; the spend is summed from the INVOKE EVENTS of the
+ * same log at every use. No counter lives in memory, so the verdict is the
+ * same after a restart as before one, and nothing the holder can edit changes
+ * it.
+ *
+ * Three honest limits. (1) A cap binds a LEAF: a holder of a capped scope that
+ * can still delegate may mint children each capped at the same amount, so cap
+ * the agent-tier scope you hand the agent, never only its parents; subtree
+ * summation is a later decision. (2) `amount` is what the HOST declares to
+ * `useCapability`; the kernel enforces declared spend, so the host, never the
+ * agent, must make that call with the true figure. (3) Amounts are summed as
+ * JavaScript numbers; use integers in minor units (cents) for money, or a
+ * cap of 0.3 will refuse 0.1 + 0.2.
+ */
+export interface CapabilityLimit {
+  /** Cap on the sum of invocation `amount`s. A capped capability refuses an invoke that declares none. */
+  readonly amount?: number
+  /** Cap on the number of invocations. */
+  readonly count?: number
+  /** Rolling window in milliseconds; absent = the life of the mandate. */
+  readonly windowMs?: number
+  /** A label for `amount`; compared for equality at delegation, never interpreted. */
+  readonly unit?: string
+}
+
+/** Per-capability limits, keyed by capability key. */
+export type CapabilityLimits = Readonly<Record<string, CapabilityLimit>>
+
+/**
  * Branded ID types for the mandate flow. A `MandateId` is sortable (a base36
  * millisecond prefix), carries 64 bits of `node:crypto` randomness, and is
  * never minted twice into the same log: an issuer refuses an id the log already
@@ -88,12 +126,27 @@ export interface MandateScope<
   readonly tier: Tier
   readonly id: MandateId
   readonly capabilities: Caps
+  /** Mirrors the grant event's limits (`{}` when none). The EVENT is what enforcement reads. */
+  readonly limits: CapabilityLimits
   readonly grantor: GrantorId
   readonly grantTimestamp: ISO8601
   readonly grantRationale: string
   readonly parentMandateId: MandateId | null
   readonly parentScope: ParentScope
 }
+
+/**
+ * ResumedScope — the scope `resume` returns for a declared tier (DAN-1320).
+ * The parent chain is typed by tier so a resumed project can be handed to
+ * `issueAgentMandate` without a cast; with no tier declared the scope is
+ * typed loosely (any tier, any parent) and the host narrows on `tier`.
+ */
+export type ResumedScope<Caps extends ReadonlyArray<Capability>, Tier extends MandateTier> =
+  MandateTier extends Tier ? MandateScope<Caps, MandateTier, MandateScope<any, any, any> | null>
+  : Tier extends "organization" ? MandateScope<Caps, "organization", null>
+  : Tier extends "project" ? MandateScope<Caps, "project", MandateScope<any, "organization", null>>
+  : Tier extends "agent" ? MandateScope<Caps, "agent", MandateScope<any, "project", MandateScope<any, "organization", null>>>
+  : never
 
 /**
  * MandateError — typed union covering every failure mode of the mandate
@@ -146,6 +199,59 @@ export type MandateError =
       // `MandateScopeForged`; this one names the store mismatch alone.
       readonly _tag: "MandateScopeForeign"
       readonly mandateId: MandateId
+    }
+  | {
+      // Raised at use when the spend or count this invoke would bring the
+      // capability to exceeds the limit recorded in the mandate's grant event
+      // (DAN-1319). `used` is what the audit log already holds inside the
+      // window; `requested` is this invoke's amount (0 when none was given).
+      // Nothing is recorded for a refused invoke.
+      readonly _tag: "MandateLimitExceeded"
+      readonly mandateId: MandateId
+      readonly capability: string
+      readonly limit: CapabilityLimit
+      readonly used: { readonly amount: number; readonly count: number }
+      readonly requested: number
+    }
+  | {
+      // Raised at use when the grant caps the capability by `amount` and the
+      // invoke declares none. Fail closed: an unstated spend against a budget
+      // is a spend the budget cannot count.
+      readonly _tag: "MandateAmountRequired"
+      readonly mandateId: MandateId
+      readonly capability: string
+    }
+  | {
+      // Raised at use when `amount` is not a finite, non-negative number
+      // (NaN, ±Infinity, negative, a string). Refused whether or not the
+      // capability is capped: a value the kernel cannot add is not recorded.
+      readonly _tag: "MandateAmountInvalid"
+      readonly mandateId: MandateId
+      readonly capability: string
+      readonly received: unknown
+    }
+  | {
+      // Raised at delegation when the child's limit on a capability is looser
+      // than the grantor's RECORDED limit, or absent where the grantor has
+      // one: a larger `amount` or `count`, a
+      // different `unit`, a SHORTER window (more per day), or a window where
+      // the grantor's cap is for life. A child may only tighten. `field`
+      // names the first field that failed.
+      readonly _tag: "LimitNotWithinGrantor"
+      readonly grantorMandateId: MandateId
+      readonly capability: string
+      readonly field: "amount" | "count" | "windowMs" | "unit"
+    }
+  | {
+      // Raised by `resume` when what the caller declares about the mandate
+      // (its capability set, its tier) is not what the log recorded
+      // (DAN-1320). Both lists are sorted. A host that resumes with the wrong
+      // shape is a host that would type-check the wrong calls.
+      readonly _tag: "ResumeMismatch"
+      readonly mandateId: MandateId
+      readonly field: "capabilities" | "tier"
+      readonly declared: ReadonlyArray<string>
+      readonly recorded: ReadonlyArray<string>
     }
   | {
       // Raised at enforcement time (useCapability) when the delegation chain
@@ -219,6 +325,8 @@ export interface MandateGrantEvent {
   readonly parentMandateId: MandateId | null
   readonly timestamp: ISO8601
   readonly triggerSource: TriggerSource
+  /** Per-capability limits (DAN-1319). Absent when the grant set none. This is the record enforcement reads. */
+  readonly limits?: CapabilityLimits
 }
 
 /**
@@ -230,6 +338,8 @@ export interface MandateInvocationEvent {
   readonly capability: string
   readonly timestamp: ISO8601
   readonly triggerSource: TriggerSource
+  /** The amount this use spent, when the caller declared one (DAN-1319). Summed by later limit checks. */
+  readonly amount?: number
 }
 
 /**
@@ -276,11 +386,28 @@ export interface MandateHumanContextEvent {
   readonly triggerSource: "external"
 }
 
+/**
+ * MandateResumeEvent — a process picked an issued mandate back up from the
+ * log with `trust.resume`. It changes no authority: the grant is the
+ * authority, and the chain walk at resume is the same one `useCapability`
+ * runs. It is recorded so forensics can see every process that held the
+ * mandate, and it never counts toward a limit (DAN-1320).
+ */
+export interface MandateResumeEvent {
+  readonly type: "resume"
+  readonly mandateId: MandateId
+  /** Who picked it up, as the host names them; the kernel never resolves it. */
+  readonly resumedBy: GrantorId
+  readonly timestamp: ISO8601
+  readonly triggerSource: TriggerSource
+}
+
 export type MandateAuditEvent =
   | MandateGrantEvent
   | MandateInvocationEvent
   | MandateRevokeEvent
   | MandateHumanContextEvent
+  | MandateResumeEvent
 
 /**
  * Signed<P> — the cryptographically-signed wrapper around a record;

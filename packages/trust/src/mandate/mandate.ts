@@ -11,14 +11,18 @@ import { constitutionalPreCheck } from "./security.ts"
 import { MandateFailure } from "./errors.ts"
 import type {
   Capability,
+  CapabilityLimit,
+  CapabilityLimits,
   GrantorId,
   ISO8601,
+  MandateAuditEvent,
   MandateAuditService,
   MandateError,
   MandateGrantEvent,
   MandateId,
   MandateScope,
   MandateTier,
+  ResumedScope,
   TriggerSource,
 } from "./types.ts"
 
@@ -46,6 +50,20 @@ export const defineCapability = <const Id extends string>(key: Id): Capability<I
   // string or any object with a `key`.
   assertCapabilityIdentifierClean(key)
   return { key }
+}
+
+/**
+ * grantorId — brand a string as a `GrantorId` (DAN-1320, asked for by the
+ * README: `"ARTHUR" as GrantorId` was the only cast left in the examples).
+ * A grantor is a name the host chooses and the log prints; the kernel never
+ * resolves it. Empty is refused because an empty name in a grant event is a
+ * record that says nobody granted it.
+ */
+export const grantorId = (id: string): GrantorId => {
+  if (typeof id !== "string" || id.length === 0) {
+    throw new TypeError("grantorId: expected a non-empty string")
+  }
+  return id as GrantorId
 }
 
 /**
@@ -285,6 +303,188 @@ const captureCapabilities = <Caps extends ReadonlyArray<Capability>>(caps: Caps)
 const resolveCapabilityIds = (caps: ReadonlyArray<Capability>): ReadonlyArray<string> =>
   Object.freeze(caps.map((c) => capabilityKey(c)))
 
+// ============================================================================
+// Capability limits (DAN-1319)
+// ============================================================================
+//
+// A grant may cap a capability by amount, count and rolling window. The cap is
+// written into the grant event, which is the only record enforcement reads;
+// the spend is summed from the invoke events of the same log. No counter is
+// kept in memory, so a restart changes nothing and nothing the holder can
+// reach can lower what was spent. The scope carries a frozen mirror of the
+// limits for the host's convenience; it is not consulted for the verdict.
+//
+// A bad limit at ISSUE is a programmer error (a `TypeError`, as `createTrust`
+// throws for a bad store): no authority decision has been made yet. A bad
+// AMOUNT at use is a refusal (`MandateAmountInvalid`): a use is an authority
+// decision, and a value the kernel cannot add is not allowed through.
+
+const isFiniteNonNegative = (x: unknown): x is number =>
+  typeof x === "number" && Number.isFinite(x) && x >= 0
+
+const EMPTY_LIMITS: CapabilityLimits = Object.freeze({})
+
+/** A frozen copy of a RECORDED limits map (a JSONL read hands back a fresh, writable object). */
+const freezeLimits = (raw: CapabilityLimits | undefined): CapabilityLimits => {
+  if (raw === undefined) return EMPTY_LIMITS
+  const out: Record<string, CapabilityLimit> = Object.create(null)
+  for (const key of Object.keys(raw)) out[key] = Object.freeze({ ...raw[key] })
+  return Object.freeze(out)
+}
+
+/**
+ * Snapshot and validate the caller's `limits` once (the intake rule). Every
+ * key must name a capability in this grant; every field must be usable: a
+ * finite non-negative `amount`, a non-negative integer `count`, a positive
+ * finite `windowMs`, a string `unit`, and at least one of `amount` / `count`
+ * (a window alone caps nothing). Returns a frozen copy with frozen entries.
+ */
+const captureLimits = (raw: unknown, capabilityIds: ReadonlyArray<string>): CapabilityLimits => {
+  if (raw === undefined) return EMPTY_LIMITS
+  if (typeof raw !== "object" || raw === null) {
+    throw new TypeError("limits must be an object keyed by capability key")
+  }
+  const granted = new Set(capabilityIds)
+  // Null prototype: a capability named `__proto__` must be as visible to
+  // enforcement as one named `amount` (ARCHITECTURE.md invariant; the
+  // 2026-11-01 land review showed `out["__proto__"] = …` set the prototype
+  // and recorded a grant with no limits at all).
+  const out: Record<string, CapabilityLimit> = Object.create(null)
+  for (const key of Object.keys(raw)) {
+    if (!granted.has(key)) {
+      throw new TypeError(`limits names "${key}", which is not a capability of this grant`)
+    }
+    const l: unknown = (raw as Record<string, unknown>)[key]
+    if (typeof l !== "object" || l === null) throw new TypeError(`limits["${key}"] must be an object`)
+    const { amount, count, windowMs, unit } = l as Record<string, unknown>
+    if (amount !== undefined && !isFiniteNonNegative(amount)) {
+      throw new TypeError(`limits["${key}"].amount must be a finite non-negative number`)
+    }
+    if (count !== undefined && !(isFiniteNonNegative(count) && Number.isInteger(count))) {
+      throw new TypeError(`limits["${key}"].count must be a non-negative integer`)
+    }
+    if (windowMs !== undefined && !(isFiniteNonNegative(windowMs) && windowMs > 0)) {
+      throw new TypeError(`limits["${key}"].windowMs must be a positive finite number of milliseconds`)
+    }
+    if (unit !== undefined && typeof unit !== "string") {
+      throw new TypeError(`limits["${key}"].unit must be a string`)
+    }
+    if (amount === undefined && count === undefined) {
+      throw new TypeError(`limits["${key}"] caps nothing: set amount and/or count`)
+    }
+    out[key] = Object.freeze({
+      ...(amount === undefined ? {} : { amount }),
+      ...(count === undefined ? {} : { count }),
+      ...(windowMs === undefined ? {} : { windowMs }),
+      ...(unit === undefined ? {} : { unit }),
+    })
+  }
+  return Object.freeze(out)
+}
+
+/**
+ * A child may only tighten. For every capability the child carries that the
+ * grantor's RECORDED grant caps, the child must carry a cap of its own that is
+ * at least as tight in every field the grantor set: no larger `amount` or
+ * `count`, the same `unit`, and a window that cannot out-spend the parent's.
+ *
+ * The window direction is the one that is easy to get backwards, and the
+ * first draft of this function did (caught by a blind review, 2026-11-01):
+ * for a fixed amount, a SHORTER window is LOOSER (100 per hour is 2,400 per
+ * day), and no window at all is a lifetime cap, the tightest there is. So:
+ * a parent with no window (lifetime) needs a child with no window; a parent
+ * with a window accepts a child with no window or with a window at least as
+ * LONG. (The exact rule, `child.amount × ceil(parent.window / child.window)
+ * ≤ parent.amount`, admits a few more children; this one is a sound subset.)
+ * Read from the grantor's grant event, never from the in-memory scope.
+ */
+const assertLimitsWithinGrantor = (
+  audit: MandateAuditService,
+  grantorMandateId: MandateId,
+  capabilityIds: ReadonlyArray<string>,
+  childLimits: CapabilityLimits,
+): void => {
+  const grantEvent = audit.query(grantorMandateId).find((e) => e.type === "grant") as
+    | MandateGrantEvent
+    | undefined
+  assertLimitsTighterThan(grantorMandateId, grantEvent?.limits, capabilityIds, childLimits)
+}
+
+/** The comparison itself, over two RECORDED limit maps; `resume` re-runs it on every link of a chain it rebuilds. */
+const assertLimitsTighterThan = (
+  grantorMandateId: MandateId,
+  parentLimits: CapabilityLimits | undefined,
+  capabilityIds: ReadonlyArray<string>,
+  childLimits: CapabilityLimits,
+): void => {
+  if (parentLimits === undefined) return
+  for (const capId of capabilityIds) {
+    // Own keys only: a recorded map is a plain object off JSONL, so a
+    // capability named `constructor` must not read Object.prototype.
+    const parent = Object.hasOwn(parentLimits, capId) ? parentLimits[capId] : undefined
+    if (parent === undefined) continue
+    const child = Object.hasOwn(childLimits, capId) ? childLimits[capId] : undefined
+    const refuse = (field: "amount" | "count" | "windowMs" | "unit"): never =>
+      failMandate({ _tag: "LimitNotWithinGrantor", grantorMandateId, capability: capId, field })
+    if (parent.amount !== undefined && (child?.amount === undefined || child.amount > parent.amount)) refuse("amount")
+    if (parent.count !== undefined && (child?.count === undefined || child.count > parent.count)) refuse("count")
+    if (parent.windowMs === undefined) {
+      if (child?.windowMs !== undefined) refuse("windowMs")
+    } else if (child?.windowMs !== undefined && child.windowMs < parent.windowMs) {
+      refuse("windowMs")
+    }
+    if (parent.unit !== undefined && child?.unit !== parent.unit) refuse("unit")
+  }
+}
+
+/**
+ * The limit verdict at use. `events` is the one snapshot of the mandate's log
+ * this call already took; `amountRaw` is the caller's `amount`, read once.
+ * Returns the validated amount to record (or undefined when none was given).
+ */
+const assertWithinLimit = (
+  events: ReadonlyArray<MandateAuditEvent>,
+  grantEvent: MandateGrantEvent,
+  mandateId: MandateId,
+  capId: string,
+  amountRaw: unknown,
+  now: number,
+): number | undefined => {
+  if (amountRaw !== undefined && !isFiniteNonNegative(amountRaw)) {
+    failMandate({ _tag: "MandateAmountInvalid", mandateId, capability: capId, received: amountRaw })
+  }
+  const amount = amountRaw as number | undefined
+  const limits = grantEvent.limits
+  const limit = limits !== undefined && Object.hasOwn(limits, capId) ? limits[capId] : undefined
+  if (limit === undefined) return amount
+  if (limit.amount !== undefined && amount === undefined) {
+    failMandate({ _tag: "MandateAmountRequired", mandateId, capability: capId })
+  }
+  const since = limit.windowMs === undefined ? Number.NEGATIVE_INFINITY : now - limit.windowMs
+  let usedAmount = 0
+  let usedCount = 0
+  for (const e of events) {
+    if (e.type !== "invoke" || e.capability !== capId) continue
+    if (Date.parse(e.timestamp) < since) continue
+    usedCount += 1
+    usedAmount += e.amount ?? 0
+  }
+  const requested = amount ?? 0
+  const overCount = limit.count !== undefined && usedCount + 1 > limit.count
+  const overAmount = limit.amount !== undefined && usedAmount + requested > limit.amount
+  if (overCount || overAmount) {
+    failMandate({
+      _tag: "MandateLimitExceeded",
+      mandateId,
+      capability: capId,
+      limit,
+      used: { amount: usedAmount, count: usedCount },
+      requested,
+    })
+  }
+  return amount
+}
+
 /**
  * checkGrantorNotRevoked — issue-time guard against the revoke-vs-issue race.
  *
@@ -359,63 +559,24 @@ const assertRequestedCapsBackedByGrantorGrant = (
   }
 }
 
-/**
- * useCapability — invoke a capability under a mandate.
- *
- * The type system enforces this at the call site via the
- * `Cap extends Caps[number]` constraint — passing a capability not in the
- * mandate's scope is a TYPE ERROR at the call site, not a runtime error.
- * At runtime, this helper also checks that the mandate is not revoked AND
- * records the invocation; runtime gates handle the any-cast escape hatch.
- *
- * Generic-parameter ordering note: `Caps` is declared FIRST so the inference
- * pass settles `Caps` from `mandate.capabilities` before `Cap` is constrained
- * against `Caps[number]`. Reversing the order breaks subset enforcement.
- */
-export const useCapability = <
-  Caps extends ReadonlyArray<Capability>,
-  Cap extends Caps[number],
-  Tier extends MandateTier = "organization",
-  ParentScope extends MandateScope<any, any, any> | null = null,
->(args: {
-  readonly mandate: MandateScope<Caps, Tier, ParentScope>
-  readonly capability: Cap
-  readonly triggerSource?: TriggerSource
-}, audit: MandateAuditService): void => {
-  // Every caller-supplied field is read exactly once, here, and only these
-  // locals are used below (the 2026-10-13 mandate audit; the note above
-  // `ISSUED` has the shape of the hole). `mandate` is the one object the
-  // walk, the log checks, the possession check and the record all name.
-  const { mandate, capability } = args
-  const triggerSource: TriggerSource = args.triggerSource ?? "code"
-  const mandateId: MandateId = mandate.id
 
-  // A mandate is invocable iff the leaf AND every
-  // ancestor in the delegation chain is unrevoked. Revoking the org-tier
-  // mandate must structurally disable every descendant; otherwise the
-  // org-tier "kill switch" is silently inert (the substrate's load-bearing
-  // termination-protocol claim).
-  //
-  // The chain is reconstructed from the AUDIT LOG via each grant event's
-  // parentMandateId — NOT from the in-memory `parentScope` pointer — exactly
-  // as revokeMandate does below. The pointer is not load-bearing for this
-  // decision: the v0.0 `issueMandate` (removed 2026-10-13) recorded the real
-  // parentMandateId while setting parentScope: null, deserialized mandates
-  // (JSONL, cross-process handoff) lose the object graph entirely, and a
-  // forged {...realScope, parentScope: null} severs the pointer on purpose.
-  // All three defeat a pointer walk; none
-  // defeats the audit log, which is the only unforgeable record of who granted
-  // what. (LESSONS 2026-07-22: audit-log-is-truth must hold at EVERY security
-  // decision, not just most.)
-  // `seen` guards against a cyclic or self-referential parentMandateId in the
-  // audit log. A legitimate chain is always a DAG (fresh crypto-random IDs;
-  // parents are issued strictly before children), so a cycle only arises from a
-  // corrupted/attacker-tampered log — but because DAN-637 made this walk the
-  // load-bearing revocation decision, an unguarded walk on such a log is an
-  // unkillable synchronous hang. Revisiting a node is safe to stop on: every
-  // reachable ancestor has already had isRevoked checked at the top of its
-  // iteration before we could return to it, so revocation is still fully
-  // enforced across the reachable set. (Battle-test follow-up 2026-07-22.)
+/**
+ * walkChain — the one revocation walk, shared by `useCapability` and
+ * `resume` (DAN-1320) so the two can never disagree. From `mandateId` up
+ * through each grant event's `parentMandateId`, refusing on the first revoked
+ * node (`MandateRevoked` for the leaf, `AncestorMandateRevoked` above it) and
+ * on a non-leaf whose grant is missing from the log (`DelegationChainBroken`,
+ * fail closed). Returns the grant events leaf-first; empty when the leaf
+ * itself has no grant, which the caller reports as `MandateNotIssued`.
+ * `fallbackGrantor` fills `revokedBy` only when a revoke event is somehow
+ * absent for a mandate the store says is revoked.
+ */
+const walkChain = (
+  audit: MandateAuditService,
+  mandateId: MandateId,
+  fallbackGrantor: GrantorId,
+): { readonly chain: ReadonlyArray<MandateGrantEvent>; readonly cyclic: boolean } => {
+  const chain: MandateGrantEvent[] = []
   const seen = new Set<MandateId>()
   let cursorId: MandateId | null = mandateId
   while (cursorId !== null && !seen.has(cursorId)) {
@@ -429,7 +590,7 @@ export const useCapability = <
           mandateId,
           revokedAt: (revokeEvent?.timestamp ?? nowISO()),
           revokedBy:
-            revokeEvent?.type === "revoke" ? revokeEvent.revokedBy : mandate.grantor,
+            revokeEvent?.type === "revoke" ? revokeEvent.revokedBy : fallbackGrantor,
           rationale:
             revokeEvent?.type === "revoke" ? revokeEvent.rationale : "unknown",
         })
@@ -463,8 +624,53 @@ export const useCapability = <
       // MandateNotIssued. (An unissued leaf, not a broken chain.)
       break
     }
+    chain.push(grantEvent)
     cursorId = grantEvent.parentMandateId
   }
+  // A non-null cursor here means `seen` stopped the walk: the log holds a
+  // cycle. Use tolerates it (every reachable node was checked for revocation);
+  // resume must not mint a scope from a chain that has no root.
+  return { chain, cyclic: cursorId !== null }
+}
+
+/**
+ * useCapability — invoke a capability under a mandate.
+ *
+ * The type system enforces this at the call site via the
+ * `Cap extends Caps[number]` constraint — passing a capability not in the
+ * mandate's scope is a TYPE ERROR at the call site, not a runtime error.
+ * At runtime, this helper also checks that the mandate is not revoked AND
+ * records the invocation; runtime gates handle the any-cast escape hatch.
+ *
+ * Generic-parameter ordering note: `Caps` is declared FIRST so the inference
+ * pass settles `Caps` from `mandate.capabilities` before `Cap` is constrained
+ * against `Caps[number]`. Reversing the order breaks subset enforcement.
+ */
+export const useCapability = <
+  Caps extends ReadonlyArray<Capability>,
+  Cap extends Caps[number],
+  Tier extends MandateTier = "organization",
+  ParentScope extends MandateScope<any, any, any> | null = null,
+>(args: {
+  readonly mandate: MandateScope<Caps, Tier, ParentScope>
+  readonly capability: Cap
+  readonly triggerSource?: TriggerSource
+  /** What this use spends, in the grant's `unit`. Required when the grant caps the capability by amount (DAN-1319). */
+  readonly amount?: number
+}, audit: MandateAuditService): void => {
+  // Every caller-supplied field is read exactly once, here, and only these
+  // locals are used below (the 2026-10-13 mandate audit; the note above
+  // `ISSUED` has the shape of the hole). `mandate` is the one object the
+  // walk, the log checks, the possession check and the record all name.
+  const { mandate, capability } = args
+  const triggerSource: TriggerSource = args.triggerSource ?? "code"
+  const amountRaw: unknown = args.amount
+  const mandateId: MandateId = mandate.id
+
+  // The revocation walk, shared with `resume`: see `walkChain` above for why
+  // it reads the audit log and never the in-memory parent pointer (DAN-637,
+  // DAN-640) and how a cyclic log is handled.
+  void walkChain(audit, mandateId, mandate.grantor)
 
   // Defense-in-depth against forged-scope literals: verify a grant event
   // exists in the audit log AND that the mandate's claimed capabilities
@@ -518,12 +724,18 @@ export const useCapability = <
     })
   }
 
+  // The limit, if the grant set one, judged against the same `events`
+  // snapshot the forged-scope check read: the log is the counter (DAN-1319).
+  const timestamp = nowISO()
+  const amount = assertWithinLimit(events, grantEvent, mandateId, capId, amountRaw, Date.parse(timestamp))
+
   audit.record(Object.freeze({
     type: "invoke",
     mandateId,
     capability: capId,
-    timestamp: nowISO(),
+    timestamp,
     triggerSource,
+    ...(amount === undefined ? {} : { amount }),
   }))
 }
 
@@ -658,11 +870,14 @@ export const issueOrgMandate = <Caps extends ReadonlyArray<Capability>>(args: {
   readonly capabilities: Caps
   readonly rationale: string
   readonly triggerSource?: TriggerSource
+  /** Per-capability caps, keyed by capability key (DAN-1319). */
+  readonly limits?: CapabilityLimits
 }, audit: MandateAuditService): MandateScope<Caps, "organization", null> => {
   // Every caller-supplied field is read exactly once (the 2026-10-13 mandate audit).
   const { grantor, rationale } = args
   const capabilities = captureCapabilities(args.capabilities)
   const capabilityIds = resolveCapabilityIds(capabilities)
+  const limits = captureLimits(args.limits, capabilityIds)
   capabilityIds.forEach(assertCapabilityIdentifierClean)
   const triggerSource: TriggerSource = args.triggerSource ?? "code"
 
@@ -684,6 +899,7 @@ export const issueOrgMandate = <Caps extends ReadonlyArray<Capability>>(args: {
     tier: "organization",
     id: newId,
     capabilities,
+    limits,
     grantor,
     grantTimestamp,
     grantRationale: rationale,
@@ -702,6 +918,7 @@ export const issueOrgMandate = <Caps extends ReadonlyArray<Capability>>(args: {
     parentMandateId: null,
     timestamp: grantTimestamp,
     triggerSource,
+    ...(Object.keys(limits).length === 0 ? {} : { limits }),
   }))
 
   return scope
@@ -724,6 +941,8 @@ export const issueProjectMandate = <
   readonly capabilities: ProjectCaps
   readonly rationale: string
   readonly triggerSource?: TriggerSource
+  /** Per-capability caps; at least as tight as the grantor's on every capped capability carried (DAN-1319). */
+  readonly limits?: CapabilityLimits
 }, audit: MandateAuditService): MandateScope<
   ProjectCaps,
   "project",
@@ -733,6 +952,7 @@ export const issueProjectMandate = <
   const { grantor, grantorScope, rationale } = args
   const capabilities = captureCapabilities(args.capabilities)
   const capabilityIds = resolveCapabilityIds(capabilities)
+  const limits = captureLimits(args.limits, capabilityIds)
   capabilityIds.forEach(assertCapabilityIdentifierClean)
   const triggerSource: TriggerSource = args.triggerSource ?? "code"
 
@@ -767,6 +987,7 @@ export const issueProjectMandate = <
   // RECORDED grant event so a forged scope cannot mint a capability the
   // grantor was never actually granted (audit-log-is-truth at issue time).
   assertRequestedCapsBackedByGrantorGrant(audit, grantorScope.id, capabilityIds)
+  assertLimitsWithinGrantor(audit, grantorScope.id, capabilityIds, limits)
 
   // DAN-1157: an issued grantor, and the runtime half of the tier ladder.
   assertIssued(grantorScope, grantorScope.id, capabilityIds[0] ?? "")
@@ -785,6 +1006,7 @@ export const issueProjectMandate = <
     tier: "project",
     id: newId,
     capabilities,
+    limits,
     grantor,
     grantTimestamp,
     grantRationale: rationale,
@@ -803,6 +1025,7 @@ export const issueProjectMandate = <
     parentMandateId: grantorScope.id,
     timestamp: grantTimestamp,
     triggerSource,
+    ...(Object.keys(limits).length === 0 ? {} : { limits }),
   }))
 
   return scope
@@ -829,6 +1052,8 @@ export const issueAgentMandate = <
   readonly capabilities: AgentCaps
   readonly rationale: string
   readonly triggerSource?: TriggerSource
+  /** Per-capability caps; at least as tight as the grantor's on every capped capability carried (DAN-1319). */
+  readonly limits?: CapabilityLimits
 }, audit: MandateAuditService): MandateScope<
   AgentCaps,
   "agent",
@@ -838,6 +1063,7 @@ export const issueAgentMandate = <
   const { grantor, grantorScope, rationale } = args
   const capabilities = captureCapabilities(args.capabilities)
   const capabilityIds = resolveCapabilityIds(capabilities)
+  const limits = captureLimits(args.limits, capabilityIds)
   capabilityIds.forEach(assertCapabilityIdentifierClean)
   const triggerSource: TriggerSource = args.triggerSource ?? "code"
 
@@ -872,6 +1098,7 @@ export const issueAgentMandate = <
   // RECORDED grant event so a forged scope cannot mint a capability the
   // grantor was never actually granted (audit-log-is-truth at issue time).
   assertRequestedCapsBackedByGrantorGrant(audit, grantorScope.id, capabilityIds)
+  assertLimitsWithinGrantor(audit, grantorScope.id, capabilityIds, limits)
 
   // DAN-1157: an issued grantor, and the runtime half of the tier ladder. This
   // is what makes agents leaves for a JavaScript caller too: an agent-tier
@@ -892,6 +1119,7 @@ export const issueAgentMandate = <
     tier: "agent",
     id: newId,
     capabilities,
+    limits,
     grantor,
     grantTimestamp,
     grantRationale: rationale,
@@ -910,7 +1138,144 @@ export const issueAgentMandate = <
     parentMandateId: grantorScope.id,
     timestamp: grantTimestamp,
     triggerSource,
+    ...(Object.keys(limits).length === 0 ? {} : { limits }),
   }))
 
   return scope
+}
+
+/**
+ * resumeMandate — pick an issued mandate back up from the log (DAN-1320).
+ *
+ * Until now a restart re-minted: a fresh id, a fresh grant line and, with
+ * limits counted per id, a fresh budget. Resume returns a genuine scope for
+ * the mandate the log already holds, if and only if the same walk
+ * `useCapability` runs says it is live. The caller declares the capability
+ * set it expects (so the returned scope is typed) and may declare the tier;
+ * both are checked against the record and refused on mismatch. Tier is not
+ * recorded on the grant event; it is the depth of the chain.
+ *
+ * Who may call this: whoever holds the client, and so the store, which ADR
+ * 0004 names as the root credential of the domain. Say the consequence
+ * plainly: a client holder can resume ANY mandate in the log, so it can act
+ * as any holder and revoke any subtree, which a fresh org mandate of its own
+ * could not do inside an existing tree. Before resume the client was root
+ * over new trees; now it is root over this one too. Hand an agent its scope,
+ * never the client (SECURITY.md). A `resume` event naming `resumedBy` is
+ * recorded. Resuming twice yields two genuine objects over one recorded
+ * authority; possession is per object, the log is the truth.
+ */
+export const resumeMandate = <
+  Caps extends ReadonlyArray<Capability>,
+  Tier extends MandateTier = MandateTier,
+>(args: {
+  readonly mandateId: MandateId
+  readonly capabilities: Caps
+  /** Who is picking the mandate up; recorded on the resume event. */
+  readonly resumedBy: GrantorId
+  readonly tier?: Tier
+  readonly triggerSource?: TriggerSource
+}, audit: MandateAuditService): ResumedScope<Caps, Tier> => {
+  // Every caller-supplied field is read exactly once (the intake rule).
+  const { mandateId } = args
+  const resumedBy: GrantorId = grantorId(args.resumedBy as string)
+  const capabilities = captureCapabilities(args.capabilities)
+  const declaredIds = resolveCapabilityIds(capabilities)
+  const declaredTier: unknown = args.tier
+  const triggerSource: TriggerSource = args.triggerSource ?? "code"
+
+  // The leaf's grant first, so the walk's fallback `revokedBy` is the real
+  // grantor, as it is on the use path (blind review 2026-11-01, finding 4).
+  const leafGrant = audit.query(mandateId).find((e) => e.type === "grant") as MandateGrantEvent | undefined
+  if (leafGrant === undefined) {
+    return failMandate({ _tag: "MandateNotIssued", mandateId })
+  }
+  const { chain, cyclic } = walkChain(audit, mandateId, leafGrant.grantor)
+  const leaf = chain[0]
+  if (leaf === undefined) {
+    return failMandate({ _tag: "MandateNotIssued", mandateId })
+  }
+  if (cyclic) {
+    failMandate({ _tag: "DelegationChainBroken", mandateId, brokenAncestorId: chain[chain.length - 1]!.mandateId })
+  }
+
+  // A grant line is a claim until the issuers' checks are re-run on it. The
+  // issuers checked subset and tightness once, at issue, and the scope object
+  // carried the result; a line appended to an unsigned log skipped them. So
+  // every link of the rebuilt chain is checked again here, child against
+  // parent, before anything is minted (blind review 2026-11-01, finding 2).
+  for (let k = 0; k + 1 < chain.length; k++) {
+    const child = chain[k]!
+    const parent = chain[k + 1]!
+    const parentCaps = new Set(parent.capabilities)
+    for (const capId of child.capabilities) {
+      if (!parentCaps.has(capId)) {
+        failMandate({ _tag: "MandateScopeForged", mandateId: child.mandateId, capability: capId })
+      }
+    }
+    assertLimitsTighterThan(parent.mandateId, parent.limits, child.capabilities, child.limits ?? EMPTY_LIMITS)
+  }
+
+  const recorded = Object.freeze([...leaf.capabilities].sort())
+  const declared = Object.freeze([...declaredIds].sort())
+  if (recorded.length !== declared.length || recorded.some((k, i) => k !== declared[i])) {
+    failMandate({ _tag: "ResumeMismatch", mandateId, field: "capabilities", declared, recorded })
+  }
+
+  const TIERS: ReadonlyArray<MandateTier> = ["organization", "project", "agent"]
+  if (chain.length > TIERS.length) {
+    // Deeper than the ladder allows: no issuer can have written this, so the
+    // log is not a record this module can stand on.
+    failMandate({ _tag: "DelegationChainBroken", mandateId, brokenAncestorId: chain[TIERS.length]!.mandateId })
+  }
+  const tierAt = (depthFromLeaf: number): MandateTier => TIERS[chain.length - 1 - depthFromLeaf]!
+  const tier = tierAt(0)
+  if (declaredTier !== undefined && declaredTier !== tier) {
+    failMandate({ _tag: "ResumeMismatch", mandateId, field: "tier", declared: [String(declaredTier)], recorded: [tier] })
+  }
+
+  // Detached, frozen copies of the ancestors, root first, carrying no
+  // authority of their own (they are not minted; `detach` on an issuer does
+  // the same). The capability objects are rebuilt from the recorded keys.
+  let parent: MandateScope<any, any, any> | null = null
+  for (let k = chain.length - 1; k >= 1; k--) {
+    const g = chain[k]!
+    parent = Object.freeze({
+      _tag: "MandateScope",
+      tier: tierAt(k),
+      id: g.mandateId,
+      capabilities: Object.freeze(g.capabilities.map((key) => Object.freeze({ key }))),
+      limits: freezeLimits(g.limits),
+      grantor: g.grantor,
+      grantTimestamp: g.timestamp,
+      grantRationale: g.rationale,
+      parentMandateId: g.parentMandateId,
+      parentScope: parent,
+    }) as MandateScope<any, any, any>
+  }
+
+  const scope = mint<MandateScope<Caps, MandateTier, MandateScope<any, any, any> | null>>({
+    _tag: "MandateScope",
+    tier,
+    id: mandateId,
+    capabilities,
+    limits: freezeLimits(leaf.limits),
+    grantor: leaf.grantor,
+    grantTimestamp: leaf.timestamp,
+    grantRationale: leaf.rationale,
+    parentMandateId: leaf.parentMandateId,
+    parentScope: parent,
+  })
+
+  bindTo(audit, scope)
+
+  audit.record(Object.freeze({
+    type: "resume",
+    mandateId,
+    resumedBy,
+    timestamp: nowISO(),
+    triggerSource,
+  }))
+
+  return scope as unknown as ResumedScope<Caps, Tier>
 }

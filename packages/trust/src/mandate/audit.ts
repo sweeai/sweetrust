@@ -91,7 +91,9 @@ export const makeInMemoryAuditLive = (): MandateAuditService => {
     // The kernel freezes what it records already; this covers a host's own
     // events too. The JSONL stores re-parse per read and need no freeze.
     record: (event) => {
-      events = [...events, Object.freeze(event)]
+      // A frozen COPY: the reader cannot edit a kept record, and the host's
+      // own object is left as it was handed in (2026-11-01 land review).
+      events = [...events, Object.freeze({ ...event })]
     },
     query: (mandateId: MandateId) => events.filter((e) => e.mandateId === mandateId),
     isRevoked: (mandateId: MandateId) =>
@@ -142,7 +144,7 @@ export const makeInMemorySignedAuditLive = (
     // `query` returns `e.payload`, the stored event object; frozen for the
     // same reason as the unsigned store (a reader must not be able to edit a
     // revoke). The envelope is frozen too, since `listAllSigned` hands it out.
-    const signed = Object.freeze(signer.sign({ payload: Object.freeze(event), previousHash, domain: MANDATE_AUDIT_DOMAIN }))
+    const signed = Object.freeze(signer.sign({ payload: Object.freeze({ ...event }), previousHash, domain: MANDATE_AUDIT_DOMAIN }))
     events = [...events, signed]
     return signed
   }

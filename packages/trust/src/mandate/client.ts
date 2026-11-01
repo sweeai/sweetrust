@@ -35,17 +35,20 @@ import {
   issueAgentMandate as issueAgentMandateImpl,
   issueOrgMandate as issueOrgMandateImpl,
   issueProjectMandate as issueProjectMandateImpl,
+  resumeMandate as resumeMandateImpl,
   revokeMandate as revokeMandateImpl,
   useCapability as useCapabilityImpl,
 } from "./mandate.ts"
 import type {
   Capability,
+  CapabilityLimits,
   GrantorId,
   MandateAuditEvent,
   MandateAuditService,
   MandateId,
   MandateScope,
   MandateTier,
+  ResumedScope,
   TriggerSource,
 } from "./types.ts"
 
@@ -72,6 +75,8 @@ export interface TrustClient {
     readonly capabilities: Caps
     readonly rationale: string
     readonly triggerSource?: TriggerSource
+    /** Per-capability caps, keyed by capability key (DAN-1319). */
+    readonly limits?: CapabilityLimits
   }) => MandateScope<Caps, "organization", null>
 
   /** Derive a project tier from an org scope this client issued; a compile-time subset. */
@@ -84,6 +89,8 @@ export interface TrustClient {
     readonly capabilities: ProjectCaps
     readonly rationale: string
     readonly triggerSource?: TriggerSource
+    /** Per-capability caps; at least as tight as the grantor's on every capped capability carried (DAN-1319). */
+    readonly limits?: CapabilityLimits
   }) => MandateScope<ProjectCaps, "project", MandateScope<OrgCaps, "organization", null>>
 
   /** Derive an agent tier, a leaf, from a project scope this client issued. */
@@ -97,6 +104,8 @@ export interface TrustClient {
     readonly capabilities: AgentCaps
     readonly rationale: string
     readonly triggerSource?: TriggerSource
+    /** Per-capability caps; at least as tight as the grantor's on every capped capability carried (DAN-1319). */
+    readonly limits?: CapabilityLimits
   }) => MandateScope<
     AgentCaps,
     "agent",
@@ -117,6 +126,8 @@ export interface TrustClient {
     readonly mandate: MandateScope<Caps, Tier, ParentScope>
     readonly capability: Cap
     readonly triggerSource?: TriggerSource
+    /** What this use spends; required when the grant caps the capability by amount (DAN-1319). */
+    readonly amount?: number
   }) => void
 
   /** Revoke a mandate; the revoker proves position by possessing the target or an ancestor. */
@@ -126,6 +137,25 @@ export interface TrustClient {
     readonly rationale: string
     readonly triggerSource?: TriggerSource
   }) => void
+
+  /**
+   * Pick an issued, unrevoked mandate back up from this store's log, as the
+   * same mandate with the same budget (DAN-1320). Declare the capability set
+   * you expect, and the tier if you want it typed; both are checked against
+   * the record, and every link of the rebuilt chain is re-checked for subset
+   * and tightness. Refused as use would refuse: revoked, ancestor revoked,
+   * never issued, chain broken. A client holder can resume ANY mandate in
+   * this store's log, so it can act as any holder: hand an agent its scope,
+   * never the client.
+   */
+  readonly resume: <Caps extends ReadonlyArray<Capability>, Tier extends MandateTier = MandateTier>(args: {
+    readonly mandateId: MandateId
+    readonly capabilities: Caps
+    /** Who is picking the mandate up; recorded on the resume event. */
+    readonly resumedBy: GrantorId
+    readonly tier?: Tier
+    readonly triggerSource?: TriggerSource
+  }) => ResumedScope<Caps, Tier>
 
   readonly audit: AuditView
 }
@@ -166,6 +196,7 @@ export const createTrust = (config: TrustConfig): TrustClient => {
     issueAgentMandate: (args) => issueAgentMandateImpl(args, store),
     useCapability: (args) => useCapabilityImpl(args, store),
     revokeMandate: (args) => revokeMandateImpl(args, store),
+    resume: (args) => resumeMandateImpl(args, store),
     audit,
   }
   return Object.freeze(client)
