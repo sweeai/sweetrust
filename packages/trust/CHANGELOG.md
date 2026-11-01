@@ -16,6 +16,19 @@ release that makes it. A patch version changes none of these.
 
 ## [Unreleased]
 
+**Upgrading from 0.4.0.** These call shapes change; each is a *Breaking* bullet below.
+
+```ts
+// 0.4.0: useCapability(args, store), and likewise the three issuers and revokeMandate
+const trust = createTrust({ store })   // once, where you build the store
+trust.useCapability(args)              // the same args, no store
+```
+
+```ts
+// 0.4.0: const r = humanConfirm(value, render)
+const r = await humanConfirm(value, render) // render may now answer with a Promise<boolean>
+```
+
 ### Security
 
 - **The audit store is bound at construction, never passed per call** (ADR 0004). In 0.4.0 every
@@ -44,6 +57,30 @@ release that makes it. A patch version changes none of these.
   revoke can no longer un-revoke a mandate (found in the 2026-10-31 pre-review, before release).
 - `MandateError` gains the variant `MandateScopeForeign { mandateId }` (0.x: the union may change
   in a minor, per § Versioning).
+- **Breaking:** `humanConfirm` is async. Its `render` may return `boolean | Promise<boolean>`, and
+  it always returns `Promise<DeclassifyResult<T>>`, so you can ask a human who answers over a
+  network: a phone, a voice call, a chat approval. Migration: add `await`; a synchronous renderer
+  needs no other change. The question is still built at the call, before anything is awaited:
+  provenance first, the value cut to 256 characters with its full length stated, and a bigint
+  rendered rather than thrown. The value the human is asked about is the value that ascends.
+- An `async` renderer that resolves `true` now confirms. In 0.4.0 its Promise was refused unread,
+  because only the literal `true` confirmed, which was safe and made a remote human impossible to
+  ask. The settled answer must still be exactly `true`; `"yes"`, `1` and a resolved `"true"` are
+  refusals. A call you forget to `await` hands you a Promise whose `.ok` is `undefined`, so it
+  reads as a refusal rather than a confirmation. The return is a Promise even for a synchronous
+  renderer for exactly that reason.
+
+### Fixed
+
+- `humanConfirm` returns a refusal when `render` throws or rejects, naming the error. In 0.4.0 a
+  renderer that threw escaped as an exception, so a dropped call or a missing terminal surfaced
+  as an outage instead of a "no". A renderer that never settles still never confirms: reject it
+  from your own timeout to turn silence into a refusal.
+- The README's mandate quickstart now does what it says. It was marked "run, expect true" and was
+  only ever compiled. It now shows a use, a refused out-of-grant capability, a revocation and the
+  refusal after it, and the README gate runs it against the built package and checks the three
+  lines it prints. A README directive the gate does not recognize now fails the gate instead of
+  passing unread.
 
 ## [0.4.0] — 2026-10-14
 
