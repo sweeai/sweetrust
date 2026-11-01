@@ -128,8 +128,9 @@ A host that re-issued mandates at every boot should store the mandate ids and ca
   copy is what ascends, so the value the human is asked about is the value that ascends even if
   the caller edits its own object while the human decides (a synchronous renderer left no time
   for that; a remote human leaves minutes). Two consequences: a value that cannot be cloned (a
-  function, a class with private state) is refused, and a class instance ascends as a plain
-  object of its own fields. Regression: `test/gate/human-confirm-async.test.ts`, watched red
+  function, a symbol, a proxy) is refused, and a class instance is NOT refused: it ascends as a
+  plain object of its own enumerable fields, its methods and `#private` fields dropped silently,
+  so confirm a class whose meaning lives in private state as an explicit data object. Regression: `test/gate/human-confirm-async.test.ts`, watched red
   before the fix.
 - An `async` renderer that resolves `true` now confirms. In 0.4.0 its Promise was refused unread,
   because only the literal `true` confirmed, which was safe and made a remote human impossible to

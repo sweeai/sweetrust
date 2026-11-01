@@ -123,7 +123,9 @@ while ((m = fence.exec(md)) !== null) {
   // Any other `readme-check:` word directly above a fence is a directive this
   // script does not implement. It used to be ignored, which is how an
   // unexecuted "run - expect true" passed for a checked claim. Refuse it.
-  const anyDirective = /<!--\s*readme-check:\s*([a-z]+)[^>]*-->\s*$/.exec(tail)
+  // `[^\s>]+`, not `[a-z]+`: a capitalised or punctuated word ("Run - expect")
+  // used to match none of the three and slip past this guard unrun.
+  const anyDirective = /<!--\s*readme-check:\s*([^\s>]+)[^>]*-->\s*$/.exec(tail)
   if (anyDirective !== null && skipMatch === null && preludeMatch === null && runMatch === null) {
     die(
       `❌ readme-typecheck: unknown directive "readme-check: ${anyDirective[1]}" above the block at README.md:${before.split("\n").length}.`,

@@ -602,8 +602,9 @@ const HUMAN_CONFIRM_VALUE_CHARS = 256
  *   The copy is what ascends, so the value the human is asked about is the
  *   value that ascends, however long the human takes and whatever the caller
  *   does to its own object meanwhile. A value that cannot be cloned (a
- *   function, a class with private state) is refused; a class instance
- *   ascends as a plain object of its own fields.
+ *   function, a symbol, a proxy) is refused. A class instance does NOT
+ *   throw: it ascends as a plain object of its own enumerable fields, and
+ *   its methods and `#private` fields are dropped silently.
  * - The return is a Promise even for a synchronous `render`. A caller who
  *   forgets `await` holds a Promise, whose `.ok` is `undefined`, so the
  *   forgotten await reads as a refusal. Overloads that hand a sync renderer a
@@ -639,10 +640,12 @@ export async function humanConfirm<T>(
   // (found in the 0.5.0 review, test/gate/human-confirm-async.test.ts). The
   // question and the ascent both read this private copy, so the value the
   // human is asked about is the value that ascends. A value structuredClone
-  // cannot copy (a function, a class with private state) cannot be pinned,
-  // so it cannot be confirmed: refuse, naming why. A class instance clones to
-  // a plain object of its own fields; the verified value carries data, not
-  // behaviour.
+  // cannot copy (a function, a symbol, a proxy) cannot be pinned, so it
+  // cannot be confirmed: refuse, naming why. A class instance is not refused:
+  // structuredClone copies its own enumerable fields into a plain object and
+  // drops its methods and `#private` fields silently. The question is built
+  // from that same copy, so the human sees what ascends; a class whose meaning
+  // lives in private state should be confirmed as an explicit data object.
   let candidateValue: T
   try {
     candidateValue = structuredClone(liveValue)
