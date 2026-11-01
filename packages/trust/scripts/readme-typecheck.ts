@@ -245,7 +245,7 @@ for (const b of blocks) {
  * scope knob is a scope knob for whoever runs the gate LAST (see `pack-audit`'s
  * `PKGS` and `typecheck-honest`'s argv).
  */
-const BLOCK_FLOOR = 6
+const BLOCK_FLOOR = 7
 
 if (checked.length < BLOCK_FLOOR) {
   die(
@@ -319,7 +319,7 @@ console.log("✅ readme-typecheck: README compiles against the shipped declarati
  * Same direction as the compile floor above: this gate gets greener the fewer
  * blocks it runs, so the count is pinned. RUN_FLOOR is data, not a dial.
  */
-const RUN_FLOOR = 2
+const RUN_FLOOR = 3
 const runs = checked.filter((b) => b.expect !== null)
 if (runs.length < RUN_FLOOR) {
   die(
