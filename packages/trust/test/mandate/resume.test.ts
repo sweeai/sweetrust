@@ -287,3 +287,11 @@ describe("resume re-runs the issuers' checks on the chain it rebuilds (blind rev
     expect(who?.type === "resume" ? who.resumedBy : null).toBe("intruder")
   })
 })
+
+describe("resumedBy is validated on intake", () => {
+  test("an empty name is a programmer error, never a blank record", () => {
+    const { trust, agent } = chain()
+    expect(() => trust.resume({ resumedBy: "" as GrantorId, mandateId: agent.id, capabilities: [Buy] as const })).toThrow(TypeError)
+    expect(trust.audit.query(agent.id).some((e) => e.type === "resume")).toBe(false)
+  })
+})

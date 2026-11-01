@@ -327,7 +327,7 @@ const EMPTY_LIMITS: CapabilityLimits = Object.freeze({})
 /** A frozen copy of a RECORDED limits map (a JSONL read hands back a fresh, writable object). */
 const freezeLimits = (raw: CapabilityLimits | undefined): CapabilityLimits => {
   if (raw === undefined) return EMPTY_LIMITS
-  const out: Record<string, CapabilityLimit> = {}
+  const out: Record<string, CapabilityLimit> = Object.create(null)
   for (const key of Object.keys(raw)) out[key] = Object.freeze({ ...raw[key] })
   return Object.freeze(out)
 }
@@ -345,7 +345,11 @@ const captureLimits = (raw: unknown, capabilityIds: ReadonlyArray<string>): Capa
     throw new TypeError("limits must be an object keyed by capability key")
   }
   const granted = new Set(capabilityIds)
-  const out: Record<string, CapabilityLimit> = {}
+  // Null prototype: a capability named `__proto__` must be as visible to
+  // enforcement as one named `amount` (ARCHITECTURE.md invariant; the
+  // 2026-11-01 land review showed `out["__proto__"] = …` set the prototype
+  // and recorded a grant with no limits at all).
+  const out: Record<string, CapabilityLimit> = Object.create(null)
   for (const key of Object.keys(raw)) {
     if (!granted.has(key)) {
       throw new TypeError(`limits names "${key}", which is not a capability of this grant`)
@@ -415,9 +419,11 @@ const assertLimitsTighterThan = (
 ): void => {
   if (parentLimits === undefined) return
   for (const capId of capabilityIds) {
-    const parent = parentLimits[capId]
+    // Own keys only: a recorded map is a plain object off JSONL, so a
+    // capability named `constructor` must not read Object.prototype.
+    const parent = Object.hasOwn(parentLimits, capId) ? parentLimits[capId] : undefined
     if (parent === undefined) continue
-    const child = childLimits[capId]
+    const child = Object.hasOwn(childLimits, capId) ? childLimits[capId] : undefined
     const refuse = (field: "amount" | "count" | "windowMs" | "unit"): never =>
       failMandate({ _tag: "LimitNotWithinGrantor", grantorMandateId, capability: capId, field })
     if (parent.amount !== undefined && (child?.amount === undefined || child.amount > parent.amount)) refuse("amount")
@@ -448,7 +454,8 @@ const assertWithinLimit = (
     failMandate({ _tag: "MandateAmountInvalid", mandateId, capability: capId, received: amountRaw })
   }
   const amount = amountRaw as number | undefined
-  const limit = grantEvent.limits?.[capId]
+  const limits = grantEvent.limits
+  const limit = limits !== undefined && Object.hasOwn(limits, capId) ? limits[capId] : undefined
   if (limit === undefined) return amount
   if (limit.amount !== undefined && amount === undefined) {
     failMandate({ _tag: "MandateAmountRequired", mandateId, capability: capId })
@@ -660,32 +667,9 @@ export const useCapability = <
   const amountRaw: unknown = args.amount
   const mandateId: MandateId = mandate.id
 
-  // A mandate is invocable iff the leaf AND every
-  // ancestor in the delegation chain is unrevoked. Revoking the org-tier
-  // mandate must structurally disable every descendant; otherwise the
-  // org-tier "kill switch" is silently inert (the substrate's load-bearing
-  // termination-protocol claim).
-  //
-  // The chain is reconstructed from the AUDIT LOG via each grant event's
-  // parentMandateId — NOT from the in-memory `parentScope` pointer — exactly
-  // as revokeMandate does below. The pointer is not load-bearing for this
-  // decision: the v0.0 `issueMandate` (removed 2026-10-13) recorded the real
-  // parentMandateId while setting parentScope: null, deserialized mandates
-  // (JSONL, cross-process handoff) lose the object graph entirely, and a
-  // forged {...realScope, parentScope: null} severs the pointer on purpose.
-  // All three defeat a pointer walk; none
-  // defeats the audit log, which is the only unforgeable record of who granted
-  // what. (LESSONS 2026-07-22: audit-log-is-truth must hold at EVERY security
-  // decision, not just most.)
-  // `seen` guards against a cyclic or self-referential parentMandateId in the
-  // audit log. A legitimate chain is always a DAG (fresh crypto-random IDs;
-  // parents are issued strictly before children), so a cycle only arises from a
-  // corrupted/attacker-tampered log — but because DAN-637 made this walk the
-  // load-bearing revocation decision, an unguarded walk on such a log is an
-  // unkillable synchronous hang. Revisiting a node is safe to stop on: every
-  // reachable ancestor has already had isRevoked checked at the top of its
-  // iteration before we could return to it, so revocation is still fully
-  // enforced across the reachable set. (Battle-test follow-up 2026-07-22.)
+  // The revocation walk, shared with `resume`: see `walkChain` above for why
+  // it reads the audit log and never the in-memory parent pointer (DAN-637,
+  // DAN-640) and how a cyclic log is handled.
   void walkChain(audit, mandateId, mandate.grantor)
 
   // Defense-in-depth against forged-scope literals: verify a grant event
@@ -1193,7 +1177,8 @@ export const resumeMandate = <
   readonly triggerSource?: TriggerSource
 }, audit: MandateAuditService): ResumedScope<Caps, Tier> => {
   // Every caller-supplied field is read exactly once (the intake rule).
-  const { mandateId, resumedBy } = args
+  const { mandateId } = args
+  const resumedBy: GrantorId = grantorId(args.resumedBy as string)
   const capabilities = captureCapabilities(args.capabilities)
   const declaredIds = resolveCapabilityIds(capabilities)
   const declaredTier: unknown = args.tier

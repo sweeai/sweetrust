@@ -355,3 +355,39 @@ describe("delegation: a child may only tighten", () => {
     ).toThrow(TypeError)
   })
 })
+
+describe("a capability name that is also an Object.prototype key (land review 2026-11-01)", () => {
+  test("`__proto__` can be capped and the cap is enforced", () => {
+    const Proto = defineCapability("__proto__")
+    const trust = createTrust({ store: makeInMemoryAuditLive() })
+    const org = trust.issueOrgMandate({
+      grantor: ARTHUR,
+      capabilities: [Proto] as const,
+      rationale: "x",
+      limits: { [Proto.key]: { amount: 30 } },
+    })
+    const grant = trust.audit.query(org.id).find((e) => e.type === "grant")
+    expect(grant?.type === "grant" ? Object.hasOwn(grant.limits ?? {}, "__proto__") : false).toBe(true)
+    expect(tagOf(() => trust.useCapability({ mandate: org, capability: Proto, amount: 100 }))).toBe("MandateLimitExceeded")
+    expect(tagOf(() => trust.useCapability({ mandate: org, capability: Proto }))).toBe("MandateAmountRequired")
+  })
+
+  test("`constructor` under a parent with limits on other capabilities is not spuriously refused", () => {
+    const Ctor = defineCapability("constructor")
+    const trust = createTrust({ store: makeInMemoryAuditLive() })
+    const org = trust.issueOrgMandate({
+      grantor: ARTHUR,
+      capabilities: [Buy, Ctor] as const,
+      rationale: "x",
+      limits: { [Buy.key]: { amount: 30 } },
+    })
+    const project = trust.issueProjectMandate({
+      grantor: ARTHUR,
+      grantorScope: org,
+      capabilities: [Ctor] as const,
+      rationale: "ctor only",
+      limits: { [Ctor.key]: { count: 1, windowMs: 1000 } },
+    })
+    trust.useCapability({ mandate: project, capability: Ctor })
+  })
+})
