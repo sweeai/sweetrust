@@ -126,9 +126,14 @@ describe("humanConfirm — the shape", () => {
 
   it("a caller who forgets `await` reads no confirmation (the forgotten await fails closed)", async () => {
     // What a JavaScript caller with no compiler sees: `if (r.ok) spend(r.value)`.
-    const r = humanConfirm(candidate(), () => true) as unknown as DeclassifyResult<string>
+    const pending = humanConfirm(candidate(), () => true)
+    const r = pending as unknown as DeclassifyResult<string> // the caller's mistaken belief
+    expect(pending).toBeInstanceOf(Promise)
     expect(r.ok).not.toBe(true)
     expect((r as { value?: unknown }).value).toBeUndefined()
-    await r // settle it, so the test leaves nothing pending
+    // The SAME call, awaited, is a yes: so the unawaited read above hid a real
+    // confirmation, which is the case where failing closed matters.
+    const settled = await pending
+    expect(settled.ok).toBe(true)
   })
 })
