@@ -31,10 +31,24 @@
  *       application context the README does not define. The block's own code is
  *       still compiled exactly as printed.
  *
+ *   <!-- readme-check: run - expect <output> -->
+ *       Compiled like any block, then RUN: written into the package directory
+ *       (so `import "sweetrust/mandate"` resolves by self-reference through the
+ *       `exports` map to `dist/`, exactly what an npm consumer loads) and
+ *       executed with `node --experimental-strip-types`. Its stdout, with
+ *       whitespace collapsed, must equal `<output>`. A run block takes no
+ *       prelude: it is the block a stranger pastes, so it must stand alone.
+ *
+ *       WHY (0.5.0): the mandate quickstart carried `run - expect true` for
+ *       weeks while this script did not recognize the word `run`. The comment
+ *       read as a checked claim to every human and was compiled and never
+ *       executed. A directive this script does not understand now fails the
+ *       gate, so that cannot recur.
+ *
  * Run: node --experimental-strip-types scripts/readme-typecheck.ts
  */
 import { execFileSync } from "node:child_process"
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -78,6 +92,8 @@ type Block = {
   readonly body: string
   readonly skip: string | null
   readonly prelude: string
+  /** The expected stdout of a `run` block, whitespace-collapsed; null if not run. */
+  readonly expect: string | null
 }
 
 const blocks: Array<Block> = []
@@ -103,6 +119,18 @@ while ((m = fence.exec(md)) !== null) {
   const tail = before.slice(-1000)
   const skipMatch = /<!--\s*readme-check:\s*skip\s*[-]\s*([^>]*?)-->\s*$/.exec(tail)
   const preludeMatch = /<!--\s*readme-check:\s*prelude\n([\s\S]*?)-->\s*$/.exec(tail)
+  const runMatch = /<!--\s*readme-check:\s*run\s*-\s*expect\s+([^>]*?)\s*-->\s*$/.exec(tail)
+  // Any other `readme-check:` word directly above a fence is a directive this
+  // script does not implement. It used to be ignored, which is how an
+  // unexecuted "run - expect true" passed for a checked claim. Refuse it.
+  const anyDirective = /<!--\s*readme-check:\s*([a-z]+)[^>]*-->\s*$/.exec(tail)
+  if (anyDirective !== null && skipMatch === null && preludeMatch === null && runMatch === null) {
+    die(
+      `❌ readme-typecheck: unknown directive "readme-check: ${anyDirective[1]}" above the block at README.md:${before.split("\n").length}.`,
+      "   Known: skip - <reason> · prelude · run - expect <output>.",
+      "   An unrecognized directive reads as a check to a human and checks nothing.",
+    )
+  }
   blocks.push({
     index: n,
     line: before.split("\n").length,
@@ -110,6 +138,7 @@ while ((m = fence.exec(md)) !== null) {
     lang: m[1] === "tsx" ? "tsx" : "ts",
     skip: skipMatch === null ? null : skipMatch[1].trim(),
     prelude: preludeMatch === null ? "" : preludeMatch[1],
+    expect: runMatch === null ? null : runMatch[1].replace(/\s+/g, " ").trim(),
   })
 }
 
@@ -216,7 +245,7 @@ for (const b of blocks) {
  * scope knob is a scope knob for whoever runs the gate LAST (see `pack-audit`'s
  * `PKGS` and `typecheck-honest`'s argv).
  */
-const BLOCK_FLOOR = 4
+const BLOCK_FLOOR = 5
 
 if (checked.length < BLOCK_FLOOR) {
   die(
@@ -275,3 +304,67 @@ if (failures !== "") {
 }
 
 console.log("✅ readme-typecheck: README compiles against the shipped declarations.")
+
+/**
+ * ── RUN BLOCKS ──────────────────────────────────────────────────────────────
+ *
+ * Compiling proves the README matches the declarations; it says nothing about
+ * what the code DOES. A quickstart that ends `// true` is a claim about
+ * behaviour, so it is executed against the built package and its output is
+ * compared. The file is written INSIDE the package directory, because Node's
+ * package self-reference (`import "sweetrust/mandate"` from within the package
+ * named `sweetrust`) is what makes the import resolve through `exports` to
+ * `dist/` with no install and no symlink. It is removed afterwards.
+ *
+ * Same direction as the compile floor above: this gate gets greener the fewer
+ * blocks it runs, so the count is pinned. RUN_FLOOR is data, not a dial.
+ */
+const RUN_FLOOR = 1
+const runs = checked.filter((b) => b.expect !== null)
+if (runs.length < RUN_FLOOR) {
+  die(
+    `❌ readme-typecheck: ran ${runs.length} block(s), floor is ${RUN_FLOOR}.`,
+    "   A README whose runnable examples quietly stop being run is the failure",
+    "   this floor exists to report. If one really went away, lower RUN_FLOOR in",
+    "   the same commit that removed it.",
+  )
+}
+
+const runDir = mkdtempSync(join(PKG, ".readme-run-"))
+let runFailures = 0
+try {
+  for (const b of runs) {
+    if (b.prelude !== "") {
+      die(`❌ readme-typecheck: the run block at README.md:${b.line} has a prelude. A run block must stand alone.`)
+    }
+    const file = join(runDir, `block-${b.index}.ts`)
+    writeFileSync(file, `// README.md line ${b.line} — generated, do not edit\n${b.body}`)
+    let stdout = ""
+    try {
+      stdout = execFileSync(process.execPath, ["--experimental-strip-types", "--no-warnings", file], {
+        stdio: ["ignore", "pipe", "pipe"],
+        cwd: PKG,
+      }).toString()
+    } catch (err: unknown) {
+      const e = err as { stdout?: Buffer; stderr?: Buffer }
+      console.log(`  ✘  L${b.line} RUN FAILED — the block threw`)
+      console.error(`${e.stdout?.toString() ?? ""}${e.stderr?.toString() ?? ""}`.trim())
+      runFailures += 1
+      continue
+    }
+    const got = stdout.replace(/\s+/g, " ").trim()
+    if (got !== b.expect) {
+      console.log(`  ✘  L${b.line} RUN OUTPUT MISMATCH`)
+      console.error(`     expected: ${b.expect}\n     got:      ${got}`)
+      runFailures += 1
+      continue
+    }
+    console.log(`  ✔  L${b.line} ran against dist/, printed: ${got}`)
+  }
+} finally {
+  rmSync(runDir, { recursive: true, force: true })
+}
+if (runFailures > 0) {
+  die(`❌ readme-typecheck FAILED — ${runFailures} README block(s) do not do what they say.`)
+}
+console.log(`✅ readme-typecheck: ${runs.length} README block(s) ran against the built package and printed what they claim.`)

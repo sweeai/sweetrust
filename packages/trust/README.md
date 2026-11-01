@@ -91,6 +91,23 @@ pay({ to: payee.value, amount })
 // and the refusal itself is on the receipt chain.
 ```
 
+When the registry has no answer, ask a person. `humanConfirm` is async, so the person can answer later, over a phone call, a voice channel or a chat approval. It builds the question at the call, provenance first and the value cut to 256 characters, and only an answer of exactly `true` confirms. A renderer that throws or rejects is a refusal, never an exception, and a forgotten `await` leaves you holding a Promise whose `.ok` is never `true`.
+
+<!-- readme-check: prelude
+import type { Sourced as S } from "sweetrust/gate"
+declare const account: S<string>
+declare const askOverPhone: (question: string) => Promise<boolean>
+-->
+```ts
+import { humanConfirm } from "sweetrust/gate"
+
+const confirmed = await humanConfirm(account, (question) => askOverPhone(question))
+if (!confirmed.ok) throw new Error(confirmed.reason) // declined, hung up or timed out
+// confirmed.value is the same value, now verified, with the confirmation on its chain
+```
+
+The wait is yours to bound. A renderer that never settles never confirms; reject it from your own timeout and the silence becomes a refusal.
+
 ---
 
 ## `sweetrust/mandate` — authority
@@ -105,10 +122,12 @@ Power of attorney for machines: delegated in bounded tiers, every act on a signe
 - **Ancestor-revocation cascade** — revoking an org-tier mandate disables every descendant, and it cannot be argued away with a different log. The kill switch is structural, not advisory.
 - **Constitutional pre-check** — authored strings (rationales, capability identifiers) are screened for prompt-injection patterns *before* persistence.
 
-<!-- readme-check: run - expect true -->
+This block is self-contained: paste it into a `.ts` file and run it with `node` on Node ≥ 22.18, which runs TypeScript directly (on the `engines` floor, Node 20.19, use any TypeScript runner; the library itself needs nothing newer). The README gate does exactly that against the built package, and fails unless it prints the three lines the comments name.
+
+<!-- readme-check: run - expect CapabilityNotInGrantorScope AncestorMandateRevoked true -->
 ```ts
 import {
-  createTrust, defineCapability,
+  createTrust, defineCapability, MandateFailure,
   makeInMemorySignedAuditLive, makeEd25519SignerLive, verifyAuditChain,
   publicKeyHexFromPem,
   type GrantorId,
@@ -129,18 +148,51 @@ const { mandateAudit, signedAudit } = makeInMemorySignedAuditLive(signer)
 // recorded in it and judged by it; no call names a store again.
 const trust = createTrust({ store: mandateAudit })
 
+// A grantor id is a branded string, so naming one is a cast, made once where
+// you introduce the principal.
+const ARTHUR = "ARTHUR" as GrantorId
+const LEAD   = "PROJECT_LEAD" as GrantorId
+
 const org = trust.issueOrgMandate({
-  grantor: "ARTHUR" as GrantorId,
+  grantor: ARTHUR,
   capabilities: [CapRead, CapWrite] as const,
   rationale: "Workspace charter",
 })
 
 const project = trust.issueProjectMandate({
-  grantor: "PROJECT_LEAD" as GrantorId,
+  grantor: ARTHUR,
   grantorScope: org,
   capabilities: [CapRead] as const,   // a subset — the type system enforces it
   rationale: "Project Cookie: read-only",
 })
+
+const agent = trust.issueAgentMandate({
+  grantor: LEAD,
+  grantorScope: project,
+  capabilities: [CapRead] as const,
+  rationale: "Reader bot",
+})
+
+// Hand the agent its scope, never the store or the client. Using a capability
+// it holds returns, and records an invoke.
+trust.useCapability({ mandate: agent, capability: CapRead })
+
+// Refused twice. The compiler rejects a capability outside the grant, and a
+// plain-JavaScript caller with no compiler is refused at runtime.
+try {
+  // @ts-expect-error CapWrite is not in the agent's grant, so this does not compile
+  trust.useCapability({ mandate: agent, capability: CapWrite })
+} catch (e) {
+  if (MandateFailure.is(e)) console.log(e._tag) // CapabilityNotInGrantorScope
+}
+
+// The kill switch. Revoke the org root and every descendant is refused.
+trust.revokeMandate({ mandateId: org.id, revokerScope: org, rationale: "Charter suspended" })
+try {
+  trust.useCapability({ mandate: agent, capability: CapRead })
+} catch (e) {
+  if (MandateFailure.is(e)) console.log(e._tag) // AncestorMandateRevoked
+}
 
 // `trustedSignerPublicKeyHex` is REQUIRED, and that is the point: verifying a
 // record against the key it CARRIES proves internal consistency, not authorship.
@@ -240,7 +292,7 @@ A free tier without enforcement is an advisory guardrail, which is the exact fai
 
 ## Status
 
-**v0.4.0 is the first npm release.** The package was formed 2026-07-30 by merging three unpublished packages (`@sweetrust/mandate`, `@sweetrust/gate`, `@sweetrust/verify`) into one with subpath exports, then hardened through the adversarial passes `SECURITY.md` lists. Nothing before 0.4.0 was ever published, so no migration is owed to anyone. `CHANGELOG.md` ships in the tarball.
+**v0.4.0 is the first npm release.** The next minor breaks two entry points: the mandate verbs move onto the client `createTrust({ store })` returns, and `humanConfirm` returns a Promise. `CHANGELOG.md` § *Unreleased* has the migration. The package was formed 2026-07-30 by merging three unpublished packages (`@sweetrust/mandate`, `@sweetrust/gate`, `@sweetrust/verify`) into one with subpath exports, then hardened through the adversarial passes `SECURITY.md` lists. Nothing before 0.4.0 was ever published, so no migration is owed to anyone. `CHANGELOG.md` ships in the tarball.
 
 ## Versioning
 

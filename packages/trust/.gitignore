@@ -14,3 +14,7 @@ dist/
 *.tsbuildinfo
 
 .DS_Store
+
+# scripts/readme-typecheck.ts runs README blocks from a temp dir inside the
+# package (for self-reference resolution) and removes it; this catches a crash.
+.readme-run-*/
