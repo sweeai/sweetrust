@@ -26,6 +26,36 @@ export interface Capability<Id extends string = string> {
 }
 
 /**
+ * CapabilityLimit — how much of one capability a grant allows (DAN-1319).
+ *
+ * `amount` caps the SUM of `amount`s passed to `useCapability` for the
+ * capability; `count` caps the number of uses; `windowMs` makes both rolling
+ * (only uses inside the last `windowMs` count), and absent means for the life
+ * of the mandate. `unit` is a label the kernel compares for equality at
+ * delegation and never interprets: "USD", "SUI", "emails" are all fine.
+ *
+ * The limit is recorded in the GRANT EVENT, so it is immutable and, under a
+ * signed store, unforgeable; the spend is summed from the INVOKE EVENTS of the
+ * same log at every use. No counter lives in memory, so the verdict is the
+ * same after a restart as before one, and nothing the holder can edit changes
+ * it. Honest limit: spend counts against the leaf's own cap; a parent's cap is
+ * not a shared budget across its children yet.
+ */
+export interface CapabilityLimit {
+  /** Cap on the sum of invocation `amount`s. A capped capability refuses an invoke that declares none. */
+  readonly amount?: number
+  /** Cap on the number of invocations. */
+  readonly count?: number
+  /** Rolling window in milliseconds; absent = the life of the mandate. */
+  readonly windowMs?: number
+  /** A label for `amount`; compared for equality at delegation, never interpreted. */
+  readonly unit?: string
+}
+
+/** Per-capability limits, keyed by capability key. */
+export type CapabilityLimits = Readonly<Record<string, CapabilityLimit>>
+
+/**
  * Branded ID types for the mandate flow. A `MandateId` is sortable (a base36
  * millisecond prefix), carries 64 bits of `node:crypto` randomness, and is
  * never minted twice into the same log: an issuer refuses an id the log already
@@ -88,6 +118,8 @@ export interface MandateScope<
   readonly tier: Tier
   readonly id: MandateId
   readonly capabilities: Caps
+  /** Mirrors the grant event's limits (`{}` when none). The EVENT is what enforcement reads. */
+  readonly limits: CapabilityLimits
   readonly grantor: GrantorId
   readonly grantTimestamp: ISO8601
   readonly grantRationale: string
@@ -146,6 +178,47 @@ export type MandateError =
       // `MandateScopeForged`; this one names the store mismatch alone.
       readonly _tag: "MandateScopeForeign"
       readonly mandateId: MandateId
+    }
+  | {
+      // Raised at use when the spend or count this invoke would bring the
+      // capability to exceeds the limit recorded in the mandate's grant event
+      // (DAN-1319). `used` is what the audit log already holds inside the
+      // window; `requested` is this invoke's amount (0 when none was given).
+      // Nothing is recorded for a refused invoke.
+      readonly _tag: "MandateLimitExceeded"
+      readonly mandateId: MandateId
+      readonly capability: string
+      readonly limit: CapabilityLimit
+      readonly used: { readonly amount: number; readonly count: number }
+      readonly requested: number
+    }
+  | {
+      // Raised at use when the grant caps the capability by `amount` and the
+      // invoke declares none. Fail closed: an unstated spend against a budget
+      // is a spend the budget cannot count.
+      readonly _tag: "MandateAmountRequired"
+      readonly mandateId: MandateId
+      readonly capability: string
+    }
+  | {
+      // Raised at use when `amount` is not a finite, non-negative number
+      // (NaN, ±Infinity, negative, a string). Refused whether or not the
+      // capability is capped: a value the kernel cannot add is not recorded.
+      readonly _tag: "MandateAmountInvalid"
+      readonly mandateId: MandateId
+      readonly capability: string
+      readonly received: unknown
+    }
+  | {
+      // Raised at delegation when the child's limit on a capability is looser
+      // than the grantor's RECORDED limit, or absent where the grantor has
+      // one: a larger `amount` or `count`, a longer or missing `windowMs`, a
+      // different `unit`. A child may only tighten. `field` names the first
+      // field that failed.
+      readonly _tag: "LimitNotWithinGrantor"
+      readonly grantorMandateId: MandateId
+      readonly capability: string
+      readonly field: "amount" | "count" | "windowMs" | "unit"
     }
   | {
       // Raised at enforcement time (useCapability) when the delegation chain
@@ -219,6 +292,8 @@ export interface MandateGrantEvent {
   readonly parentMandateId: MandateId | null
   readonly timestamp: ISO8601
   readonly triggerSource: TriggerSource
+  /** Per-capability limits (DAN-1319). Absent when the grant set none. This is the record enforcement reads. */
+  readonly limits?: CapabilityLimits
 }
 
 /**
@@ -230,6 +305,8 @@ export interface MandateInvocationEvent {
   readonly capability: string
   readonly timestamp: ISO8601
   readonly triggerSource: TriggerSource
+  /** The amount this use spent, when the caller declared one (DAN-1319). Summed by later limit checks. */
+  readonly amount?: number
 }
 
 /**

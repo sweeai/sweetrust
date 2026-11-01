@@ -7,6 +7,8 @@
 
 export type {
   Capability,
+  CapabilityLimit,
+  CapabilityLimits,
   ExternalRef,
   GrantorId,
   ISO8601,

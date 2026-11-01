@@ -40,6 +40,7 @@ import {
 } from "./mandate.ts"
 import type {
   Capability,
+  CapabilityLimits,
   GrantorId,
   MandateAuditEvent,
   MandateAuditService,
@@ -72,6 +73,8 @@ export interface TrustClient {
     readonly capabilities: Caps
     readonly rationale: string
     readonly triggerSource?: TriggerSource
+    /** Per-capability caps, keyed by capability key (DAN-1319). */
+    readonly limits?: CapabilityLimits
   }) => MandateScope<Caps, "organization", null>
 
   /** Derive a project tier from an org scope this client issued; a compile-time subset. */
@@ -84,6 +87,8 @@ export interface TrustClient {
     readonly capabilities: ProjectCaps
     readonly rationale: string
     readonly triggerSource?: TriggerSource
+    /** Per-capability caps; at least as tight as the grantor's on every capped capability carried (DAN-1319). */
+    readonly limits?: CapabilityLimits
   }) => MandateScope<ProjectCaps, "project", MandateScope<OrgCaps, "organization", null>>
 
   /** Derive an agent tier, a leaf, from a project scope this client issued. */
@@ -97,6 +102,8 @@ export interface TrustClient {
     readonly capabilities: AgentCaps
     readonly rationale: string
     readonly triggerSource?: TriggerSource
+    /** Per-capability caps; at least as tight as the grantor's on every capped capability carried (DAN-1319). */
+    readonly limits?: CapabilityLimits
   }) => MandateScope<
     AgentCaps,
     "agent",
@@ -117,6 +124,8 @@ export interface TrustClient {
     readonly mandate: MandateScope<Caps, Tier, ParentScope>
     readonly capability: Cap
     readonly triggerSource?: TriggerSource
+    /** What this use spends; required when the grant caps the capability by amount (DAN-1319). */
+    readonly amount?: number
   }) => void
 
   /** Revoke a mandate; the revoker proves position by possessing the target or an ancestor. */

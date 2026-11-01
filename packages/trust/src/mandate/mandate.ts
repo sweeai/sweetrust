@@ -11,8 +11,11 @@ import { constitutionalPreCheck } from "./security.ts"
 import { MandateFailure } from "./errors.ts"
 import type {
   Capability,
+  CapabilityLimit,
+  CapabilityLimits,
   GrantorId,
   ISO8601,
+  MandateAuditEvent,
   MandateAuditService,
   MandateError,
   MandateGrantEvent,
@@ -285,6 +288,153 @@ const captureCapabilities = <Caps extends ReadonlyArray<Capability>>(caps: Caps)
 const resolveCapabilityIds = (caps: ReadonlyArray<Capability>): ReadonlyArray<string> =>
   Object.freeze(caps.map((c) => capabilityKey(c)))
 
+// ============================================================================
+// Capability limits (DAN-1319)
+// ============================================================================
+//
+// A grant may cap a capability by amount, count and rolling window. The cap is
+// written into the grant event, which is the only record enforcement reads;
+// the spend is summed from the invoke events of the same log. No counter is
+// kept in memory, so a restart changes nothing and nothing the holder can
+// reach can lower what was spent. The scope carries a frozen mirror of the
+// limits for the host's convenience; it is not consulted for the verdict.
+//
+// A bad limit at ISSUE is a programmer error (a `TypeError`, as `createTrust`
+// throws for a bad store): no authority decision has been made yet. A bad
+// AMOUNT at use is a refusal (`MandateAmountInvalid`): a use is an authority
+// decision, and a value the kernel cannot add is not allowed through.
+
+const isFiniteNonNegative = (x: unknown): x is number =>
+  typeof x === "number" && Number.isFinite(x) && x >= 0
+
+const EMPTY_LIMITS: CapabilityLimits = Object.freeze({})
+
+/**
+ * Snapshot and validate the caller's `limits` once (the intake rule). Every
+ * key must name a capability in this grant; every field must be usable: a
+ * finite non-negative `amount`, a non-negative integer `count`, a positive
+ * finite `windowMs`, a string `unit`, and at least one of `amount` / `count`
+ * (a window alone caps nothing). Returns a frozen copy with frozen entries.
+ */
+const captureLimits = (raw: unknown, capabilityIds: ReadonlyArray<string>): CapabilityLimits => {
+  if (raw === undefined) return EMPTY_LIMITS
+  if (typeof raw !== "object" || raw === null) {
+    throw new TypeError("limits must be an object keyed by capability key")
+  }
+  const granted = new Set(capabilityIds)
+  const out: Record<string, CapabilityLimit> = {}
+  for (const key of Object.keys(raw)) {
+    if (!granted.has(key)) {
+      throw new TypeError(`limits names "${key}", which is not a capability of this grant`)
+    }
+    const l: unknown = (raw as Record<string, unknown>)[key]
+    if (typeof l !== "object" || l === null) throw new TypeError(`limits["${key}"] must be an object`)
+    const { amount, count, windowMs, unit } = l as Record<string, unknown>
+    if (amount !== undefined && !isFiniteNonNegative(amount)) {
+      throw new TypeError(`limits["${key}"].amount must be a finite non-negative number`)
+    }
+    if (count !== undefined && !(isFiniteNonNegative(count) && Number.isInteger(count))) {
+      throw new TypeError(`limits["${key}"].count must be a non-negative integer`)
+    }
+    if (windowMs !== undefined && !(isFiniteNonNegative(windowMs) && windowMs > 0)) {
+      throw new TypeError(`limits["${key}"].windowMs must be a positive finite number of milliseconds`)
+    }
+    if (unit !== undefined && typeof unit !== "string") {
+      throw new TypeError(`limits["${key}"].unit must be a string`)
+    }
+    if (amount === undefined && count === undefined) {
+      throw new TypeError(`limits["${key}"] caps nothing: set amount and/or count`)
+    }
+    out[key] = Object.freeze({
+      ...(amount === undefined ? {} : { amount }),
+      ...(count === undefined ? {} : { count }),
+      ...(windowMs === undefined ? {} : { windowMs }),
+      ...(unit === undefined ? {} : { unit }),
+    })
+  }
+  return Object.freeze(out)
+}
+
+/**
+ * A child may only tighten. For every capability the child carries that the
+ * grantor's RECORDED grant caps, the child must carry a cap of its own that is
+ * at least as tight in every field the grantor set: no larger `amount` or
+ * `count`, no longer or missing `windowMs`, the same `unit`. Read from the
+ * grantor's grant event, never from the in-memory scope (audit-log-is-truth).
+ */
+const assertLimitsWithinGrantor = (
+  audit: MandateAuditService,
+  grantorMandateId: MandateId,
+  capabilityIds: ReadonlyArray<string>,
+  childLimits: CapabilityLimits,
+): void => {
+  const grantEvent = audit.query(grantorMandateId).find((e) => e.type === "grant") as
+    | MandateGrantEvent
+    | undefined
+  const parentLimits = grantEvent?.limits
+  if (parentLimits === undefined) return
+  for (const capId of capabilityIds) {
+    const parent = parentLimits[capId]
+    if (parent === undefined) continue
+    const child = childLimits[capId]
+    const refuse = (field: "amount" | "count" | "windowMs" | "unit"): never =>
+      failMandate({ _tag: "LimitNotWithinGrantor", grantorMandateId, capability: capId, field })
+    if (parent.amount !== undefined && (child?.amount === undefined || child.amount > parent.amount)) refuse("amount")
+    if (parent.count !== undefined && (child?.count === undefined || child.count > parent.count)) refuse("count")
+    if (parent.windowMs !== undefined && (child?.windowMs === undefined || child.windowMs > parent.windowMs)) {
+      refuse("windowMs")
+    }
+    if (parent.unit !== undefined && child?.unit !== parent.unit) refuse("unit")
+  }
+}
+
+/**
+ * The limit verdict at use. `events` is the one snapshot of the mandate's log
+ * this call already took; `amountRaw` is the caller's `amount`, read once.
+ * Returns the validated amount to record (or undefined when none was given).
+ */
+const assertWithinLimit = (
+  events: ReadonlyArray<MandateAuditEvent>,
+  grantEvent: MandateGrantEvent,
+  mandateId: MandateId,
+  capId: string,
+  amountRaw: unknown,
+  now: number,
+): number | undefined => {
+  if (amountRaw !== undefined && !isFiniteNonNegative(amountRaw)) {
+    failMandate({ _tag: "MandateAmountInvalid", mandateId, capability: capId, received: amountRaw })
+  }
+  const amount = amountRaw as number | undefined
+  const limit = grantEvent.limits?.[capId]
+  if (limit === undefined) return amount
+  if (limit.amount !== undefined && amount === undefined) {
+    failMandate({ _tag: "MandateAmountRequired", mandateId, capability: capId })
+  }
+  const since = limit.windowMs === undefined ? Number.NEGATIVE_INFINITY : now - limit.windowMs
+  let usedAmount = 0
+  let usedCount = 0
+  for (const e of events) {
+    if (e.type !== "invoke" || e.capability !== capId) continue
+    if (Date.parse(e.timestamp) < since) continue
+    usedCount += 1
+    usedAmount += e.amount ?? 0
+  }
+  const requested = amount ?? 0
+  const overCount = limit.count !== undefined && usedCount + 1 > limit.count
+  const overAmount = limit.amount !== undefined && usedAmount + requested > limit.amount
+  if (overCount || overAmount) {
+    failMandate({
+      _tag: "MandateLimitExceeded",
+      mandateId,
+      capability: capId,
+      limit,
+      used: { amount: usedAmount, count: usedCount },
+      requested,
+    })
+  }
+  return amount
+}
+
 /**
  * checkGrantorNotRevoked — issue-time guard against the revoke-vs-issue race.
  *
@@ -381,6 +531,8 @@ export const useCapability = <
   readonly mandate: MandateScope<Caps, Tier, ParentScope>
   readonly capability: Cap
   readonly triggerSource?: TriggerSource
+  /** What this use spends, in the grant's `unit`. Required when the grant caps the capability by amount (DAN-1319). */
+  readonly amount?: number
 }, audit: MandateAuditService): void => {
   // Every caller-supplied field is read exactly once, here, and only these
   // locals are used below (the 2026-10-13 mandate audit; the note above
@@ -388,6 +540,7 @@ export const useCapability = <
   // walk, the log checks, the possession check and the record all name.
   const { mandate, capability } = args
   const triggerSource: TriggerSource = args.triggerSource ?? "code"
+  const amountRaw: unknown = args.amount
   const mandateId: MandateId = mandate.id
 
   // A mandate is invocable iff the leaf AND every
@@ -518,12 +671,18 @@ export const useCapability = <
     })
   }
 
+  // The limit, if the grant set one, judged against the same `events`
+  // snapshot the forged-scope check read: the log is the counter (DAN-1319).
+  const timestamp = nowISO()
+  const amount = assertWithinLimit(events, grantEvent, mandateId, capId, amountRaw, Date.parse(timestamp))
+
   audit.record(Object.freeze({
     type: "invoke",
     mandateId,
     capability: capId,
-    timestamp: nowISO(),
+    timestamp,
     triggerSource,
+    ...(amount === undefined ? {} : { amount }),
   }))
 }
 
@@ -658,11 +817,14 @@ export const issueOrgMandate = <Caps extends ReadonlyArray<Capability>>(args: {
   readonly capabilities: Caps
   readonly rationale: string
   readonly triggerSource?: TriggerSource
+  /** Per-capability caps, keyed by capability key (DAN-1319). */
+  readonly limits?: CapabilityLimits
 }, audit: MandateAuditService): MandateScope<Caps, "organization", null> => {
   // Every caller-supplied field is read exactly once (the 2026-10-13 mandate audit).
   const { grantor, rationale } = args
   const capabilities = captureCapabilities(args.capabilities)
   const capabilityIds = resolveCapabilityIds(capabilities)
+  const limits = captureLimits(args.limits, capabilityIds)
   capabilityIds.forEach(assertCapabilityIdentifierClean)
   const triggerSource: TriggerSource = args.triggerSource ?? "code"
 
@@ -684,6 +846,7 @@ export const issueOrgMandate = <Caps extends ReadonlyArray<Capability>>(args: {
     tier: "organization",
     id: newId,
     capabilities,
+    limits,
     grantor,
     grantTimestamp,
     grantRationale: rationale,
@@ -702,6 +865,7 @@ export const issueOrgMandate = <Caps extends ReadonlyArray<Capability>>(args: {
     parentMandateId: null,
     timestamp: grantTimestamp,
     triggerSource,
+    ...(Object.keys(limits).length === 0 ? {} : { limits }),
   }))
 
   return scope
@@ -724,6 +888,8 @@ export const issueProjectMandate = <
   readonly capabilities: ProjectCaps
   readonly rationale: string
   readonly triggerSource?: TriggerSource
+  /** Per-capability caps; at least as tight as the grantor's on every capped capability carried (DAN-1319). */
+  readonly limits?: CapabilityLimits
 }, audit: MandateAuditService): MandateScope<
   ProjectCaps,
   "project",
@@ -733,6 +899,7 @@ export const issueProjectMandate = <
   const { grantor, grantorScope, rationale } = args
   const capabilities = captureCapabilities(args.capabilities)
   const capabilityIds = resolveCapabilityIds(capabilities)
+  const limits = captureLimits(args.limits, capabilityIds)
   capabilityIds.forEach(assertCapabilityIdentifierClean)
   const triggerSource: TriggerSource = args.triggerSource ?? "code"
 
@@ -767,6 +934,7 @@ export const issueProjectMandate = <
   // RECORDED grant event so a forged scope cannot mint a capability the
   // grantor was never actually granted (audit-log-is-truth at issue time).
   assertRequestedCapsBackedByGrantorGrant(audit, grantorScope.id, capabilityIds)
+  assertLimitsWithinGrantor(audit, grantorScope.id, capabilityIds, limits)
 
   // DAN-1157: an issued grantor, and the runtime half of the tier ladder.
   assertIssued(grantorScope, grantorScope.id, capabilityIds[0] ?? "")
@@ -785,6 +953,7 @@ export const issueProjectMandate = <
     tier: "project",
     id: newId,
     capabilities,
+    limits,
     grantor,
     grantTimestamp,
     grantRationale: rationale,
@@ -803,6 +972,7 @@ export const issueProjectMandate = <
     parentMandateId: grantorScope.id,
     timestamp: grantTimestamp,
     triggerSource,
+    ...(Object.keys(limits).length === 0 ? {} : { limits }),
   }))
 
   return scope
@@ -829,6 +999,8 @@ export const issueAgentMandate = <
   readonly capabilities: AgentCaps
   readonly rationale: string
   readonly triggerSource?: TriggerSource
+  /** Per-capability caps; at least as tight as the grantor's on every capped capability carried (DAN-1319). */
+  readonly limits?: CapabilityLimits
 }, audit: MandateAuditService): MandateScope<
   AgentCaps,
   "agent",
@@ -838,6 +1010,7 @@ export const issueAgentMandate = <
   const { grantor, grantorScope, rationale } = args
   const capabilities = captureCapabilities(args.capabilities)
   const capabilityIds = resolveCapabilityIds(capabilities)
+  const limits = captureLimits(args.limits, capabilityIds)
   capabilityIds.forEach(assertCapabilityIdentifierClean)
   const triggerSource: TriggerSource = args.triggerSource ?? "code"
 
@@ -872,6 +1045,7 @@ export const issueAgentMandate = <
   // RECORDED grant event so a forged scope cannot mint a capability the
   // grantor was never actually granted (audit-log-is-truth at issue time).
   assertRequestedCapsBackedByGrantorGrant(audit, grantorScope.id, capabilityIds)
+  assertLimitsWithinGrantor(audit, grantorScope.id, capabilityIds, limits)
 
   // DAN-1157: an issued grantor, and the runtime half of the tier ladder. This
   // is what makes agents leaves for a JavaScript caller too: an agent-tier
@@ -892,6 +1066,7 @@ export const issueAgentMandate = <
     tier: "agent",
     id: newId,
     capabilities,
+    limits,
     grantor,
     grantTimestamp,
     grantRationale: rationale,
@@ -910,6 +1085,7 @@ export const issueAgentMandate = <
     parentMandateId: grantorScope.id,
     timestamp: grantTimestamp,
     triggerSource,
+    ...(Object.keys(limits).length === 0 ? {} : { limits }),
   }))
 
   return scope
