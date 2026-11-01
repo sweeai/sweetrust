@@ -24,7 +24,7 @@ import {
   issueOrgMandate,
   revokeMandate,
   useCapability,
-} from "../../src/mandate/mandate.ts"
+} from "../helpers/via-client.ts"
 import {
   canonicalJSON,
   makeEd25519SignerLive,

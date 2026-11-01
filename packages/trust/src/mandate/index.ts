@@ -34,15 +34,14 @@ export {
   type SignedMandateAuditService,
 } from "./audit.ts"
 
-export {
-  issueOrgMandate,
-  issueProjectMandate,
-  issueAgentMandate,
-  revokeMandate,
-  useCapability,
-  capabilityKey,
-  defineCapability,
-} from "./mandate.ts"
+// Issue, use and revoke live on the client. The free functions in mandate.ts
+// are the implementation and stay out of the public surface on purpose: each
+// took the audit store as a trailing argument, and that argument was the
+// 2026-10-31 audit-swap bypass (client.ts, top comment). Exporting them again
+// would reopen it.
+export { createTrust, type AuditView, type TrustClient, type TrustConfig } from "./client.ts"
+
+export { capabilityKey, defineCapability } from "./mandate.ts"
 
 export {
   makeInMemorySignerLive,

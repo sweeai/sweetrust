@@ -15,13 +15,15 @@
 import { describe, expect, test } from "vitest"
 import {
   defineCapability,
-  issueOrgMandate,
-  issueProjectMandate,
   makeInMemoryAuditLive,
-  revokeMandate,
-  useCapability,
   type GrantorId,
 } from "../../src/mandate/index.ts"
+import {
+  issueOrgMandate,
+  issueProjectMandate,
+  revokeMandate,
+  useCapability,
+} from "../helpers/via-client.ts"
 
 const CapA = defineCapability("test/CapA")
 const CapB = defineCapability("test/CapB")

@@ -34,7 +34,7 @@ This package makes three questions answerable at runtime, by the code that actua
 ## Install one thing, import what you need
 
 ```ts
-import { issueOrgMandate }  from "sweetrust/mandate"   // authority
+import { createTrust }      from "sweetrust/mandate"   // authority
 import { Sourced, makeSink } from "sweetrust/gate"     // enforcement
 import { verifySignedChain } from "sweetrust/verify"   // evidence
 
@@ -100,14 +100,15 @@ Power of attorney for machines: delegated in bounded tiers, every act on a signe
 - **Multi-tier hierarchy** — organization → project → agent. Each tier's capabilities are a structurally enforced subset of its parent's, checked by the **compiler** at the call site. Out-of-tier grants do not typecheck.
 - **Refused twice** — the same grant is refused again at runtime, so the gate holds for JavaScript callers with no compiler in the loop.
 - **Ed25519-signed, hash-chained audit log** — the signature covers the whole envelope (domain + payload + `previousHash` + `signedAt`), so tampering, interior record removal, reordering, and retiming are all detectable *even against an adversary who recomputes the public hash links*. Relinking breaks a signature they cannot forge.
+- **One store, bound once** — `createTrust({ store })` is the only door to issue, use and revoke. The audit store is never a per-call argument, so a caller cannot judge a scope against a log it wrote itself; a scope minted against another store is refused (`MandateScopeForeign`).
 - **Forged-scope rejection** — `useCapability` requires a matching grant in the audit log and re-checks the subset claim. Deserialized payloads and `as any` escapes do not get through.
-- **Ancestor-revocation cascade** — revoking an org-tier mandate disables every descendant. The kill switch is structural, not advisory.
+- **Ancestor-revocation cascade** — revoking an org-tier mandate disables every descendant, and it cannot be argued away with a different log. The kill switch is structural, not advisory.
 - **Constitutional pre-check** — authored strings (rationales, capability identifiers) are screened for prompt-injection patterns *before* persistence.
 
 <!-- readme-check: run - expect true -->
 ```ts
 import {
-  defineCapability, issueOrgMandate, issueProjectMandate,
+  createTrust, defineCapability,
   makeInMemorySignedAuditLive, makeEd25519SignerLive, verifyAuditChain,
   publicKeyHexFromPem,
   type GrantorId,
@@ -124,18 +125,22 @@ const signer = makeEd25519SignerLive({
 })
 const { mandateAudit, signedAudit } = makeInMemorySignedAuditLive(signer)
 
-const org = issueOrgMandate({
+// The store is bound once. Every grant, invoke and revoke this client makes is
+// recorded in it and judged by it; no call names a store again.
+const trust = createTrust({ store: mandateAudit })
+
+const org = trust.issueOrgMandate({
   grantor: "ARTHUR" as GrantorId,
   capabilities: [CapRead, CapWrite] as const,
   rationale: "Workspace charter",
-}, mandateAudit)
+})
 
-const project = issueProjectMandate({
+const project = trust.issueProjectMandate({
   grantor: "PROJECT_LEAD" as GrantorId,
   grantorScope: org,
   capabilities: [CapRead] as const,   // a subset — the type system enforces it
   rationale: "Project Cookie: read-only",
-}, mandateAudit)
+})
 
 // `trustedSignerPublicKeyHex` is REQUIRED, and that is the point: verifying a
 // record against the key it CARRIES proves internal consistency, not authorship.

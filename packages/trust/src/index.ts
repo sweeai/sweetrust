@@ -8,7 +8,7 @@
  * of the other two (only the shared `canon` leaf); `sweetrust/verify` pulls
  * both, by design — it signs through mandate's signer and wraps gate's log:
  *
- *   import { issueOrgMandate } from "sweetrust/mandate"
+ *   import { createTrust } from "sweetrust/mandate"
  *   import { Sourced, makeSink } from "sweetrust/gate"
  *   import { verifySignedChain } from "sweetrust/verify"
  *

@@ -85,8 +85,13 @@ const readJsonl = (storePath: string): ReadonlyArray<unknown> => {
 export const makeInMemoryAuditLive = (): MandateAuditService => {
   let events: ReadonlyArray<MandateAuditEvent> = []
   return {
+    // Frozen in place: `query` hands back the stored objects, and a stored
+    // revoke that a reader could edit is a revoke that a reader could undo
+    // (the 2026-10-31 pre-review: one property write flipped `isRevoked`).
+    // The kernel freezes what it records already; this covers a host's own
+    // events too. The JSONL stores re-parse per read and need no freeze.
     record: (event) => {
-      events = [...events, event]
+      events = [...events, Object.freeze(event)]
     },
     query: (mandateId: MandateId) => events.filter((e) => e.mandateId === mandateId),
     isRevoked: (mandateId: MandateId) =>
@@ -134,7 +139,10 @@ export const makeInMemorySignedAuditLive = (
   const signAndRecord = (event: MandateAuditEvent): SignedMandateAuditEvent => {
     const previousHash =
       events.length > 0 ? sha256Hex(canonicalJSON(events[events.length - 1]!)) : null
-    const signed = signer.sign({ payload: event, previousHash, domain: MANDATE_AUDIT_DOMAIN })
+    // `query` returns `e.payload`, the stored event object; frozen for the
+    // same reason as the unsigned store (a reader must not be able to edit a
+    // revoke). The envelope is frozen too, since `listAllSigned` hands it out.
+    const signed = Object.freeze(signer.sign({ payload: Object.freeze(event), previousHash, domain: MANDATE_AUDIT_DOMAIN }))
     events = [...events, signed]
     return signed
   }

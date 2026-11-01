@@ -38,7 +38,7 @@ The lesson worth keeping: **all five of these were true when written.** An `AGEN
 src/
   index.ts        the whole-rail barrel (curated — see below)
   canon.ts        the one canonicalization (canonicalJSON, sha256Hex) — a leaf, node:crypto only
-  mandate/        authority   → subpath "sweetrust/mandate"  (types, mandate, audit, signer, security, errors, two demos)
+  mandate/        authority   → subpath "sweetrust/mandate"  (types, client, mandate, audit, signer, security, errors, two demos)
   gate/           enforcement → subpath "sweetrust/gate"     (trust.ts — one file, on purpose)
   verify/         evidence    → subpath "sweetrust/verify"
 scripts/
@@ -46,6 +46,7 @@ scripts/
   forgery-typecheck.ts   proves an object literal cannot satisfy Sourced in the shipped declarations (same)
 docs/adr/         decisions with force — 0001 authority is possession · 0002 the interior hash is canonical
 test/
+  helpers/via-client.ts  the pre-0.5.0 call shape routed through createTrust, so the older suites exercise the shipped door
   index-barrel.test.ts   guards the barrel against silent export loss
   canon.test.ts          one canonicalization across the rail; the leaf imports only node:crypto
   intake-poison.test.ts  every object-taking export under the second-read Proxy in helpers/poison.ts
@@ -56,7 +57,8 @@ test/
 |---|---|
 | `src/canon.ts` | `canonicalJSON` + `sha256Hex`, the bytes every signature and hash in the rail is computed over. Imports only `node:crypto`, so gate, mandate and verify can all import it without importing each other. `signer.ts` re-exports both names |
 | `src/mandate/types.ts` | exported types: `MandateScope<Caps, Tier, ParentScope>`, the `MandateAuditEvent` union, `MandateError`, `MandateTier` |
-| `src/mandate/mandate.ts` | issue / use / revoke across all three tiers |
+| `src/mandate/client.ts` | `createTrust({ store })`, the only public door to issue / use / revoke: binds one store, returns a frozen client with the verbs and a read-only `audit` view (ADR 0004) |
+| `src/mandate/mandate.ts` | issue / use / revoke across all three tiers: the implementation the client calls; not exported from the package since 0.5.0 (the per-call store argument was the 2026-10-31 bypass) |
 | `src/mandate/audit.ts` | audit-log factories, signed and unsigned |
 | `src/mandate/signer.ts` | Ed25519 signer + verifier, `verifyAuditChain`, `signedPreimage`; re-exports `canonicalJSON` and `sha256Hex` from `src/canon.ts` |
 | `src/mandate/security.ts` | `constitutionalPreCheck` + the MIP-1..MIP-6 catalog |

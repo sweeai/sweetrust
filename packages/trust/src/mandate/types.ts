@@ -136,6 +136,18 @@ export type MandateError =
       readonly capability: string
     }
   | {
+      // Raised when a scope this module DID issue is presented to a client
+      // bound to a different audit store than the one that recorded its grant:
+      // at use (`mandate`), at revoke (`revokerScope`) and at delegation
+      // (`grantorScope`). Before the store was bound at construction, a caller
+      // could present a genuine, revoked scope together with a log of its own
+      // holding one forged grant line, and be allowed (the 2026-10-31 review).
+      // A scope the module never issued keeps its more specific verdict,
+      // `MandateScopeForged`; this one names the store mismatch alone.
+      readonly _tag: "MandateScopeForeign"
+      readonly mandateId: MandateId
+    }
+  | {
       // Raised at enforcement time (useCapability) when the delegation chain
       // cannot be fully reconstructed from the audit log because a non-leaf
       // ancestor's grant event is missing (a tampered / truncated log). The

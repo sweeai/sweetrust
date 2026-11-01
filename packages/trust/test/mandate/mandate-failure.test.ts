@@ -19,11 +19,13 @@ import { describe, expect, test } from "vitest"
 import { makeJsonlAuditLive, makeJsonlSignedAuditLive } from "../../src/mandate/audit.ts"
 import {
   defineCapability,
-  issueOrgMandate,
   makeEd25519SignerLive,
   makeInMemoryAuditLive,
   MandateFailure,
 } from "../../src/mandate/index.ts"
+import {
+  issueOrgMandate,
+} from "../helpers/via-client.ts"
 import { generateKeyPairSync } from "node:crypto"
 import type { GrantorId, MandateError } from "../../src/mandate/types.ts"
 
