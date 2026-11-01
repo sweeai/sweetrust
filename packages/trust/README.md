@@ -91,7 +91,7 @@ pay({ to: payee.value, amount })
 // and the refusal itself is on the receipt chain.
 ```
 
-When the registry has no answer, ask a person. `humanConfirm` is async, so the person can answer later, over a phone call, a voice channel or a chat approval. It builds the question at the call, provenance first and the value cut to 256 characters, and only an answer of exactly `true` confirms. A renderer that throws or rejects is a refusal, never an exception, and a forgotten `await` leaves you holding a Promise whose `.ok` is never `true`.
+When the registry has no answer, ask a person. `humanConfirm` is async, so the person can answer later, over a phone call, a voice channel or a chat approval. It copies the value and builds the question at the call, provenance first and the value cut to 256 characters, so editing your object while the person decides changes nothing that ascends. Only an answer of exactly `true` confirms. A renderer that throws or rejects is a refusal, never an exception, and a forgotten `await` leaves you holding a Promise whose `.ok` is never `true`.
 
 <!-- readme-check: prelude
 import type { Sourced as S } from "sweetrust/gate"
@@ -103,7 +103,8 @@ import { humanConfirm } from "sweetrust/gate"
 
 const confirmed = await humanConfirm(account, (question) => askOverPhone(question))
 if (!confirmed.ok) throw new Error(confirmed.reason) // declined, hung up or timed out
-// confirmed.value is the same value, now verified, with the confirmation on its chain
+// confirmed.value is a copy pinned at the call: what the person was asked about,
+// now verified, with the confirmation on its chain
 ```
 
 The wait is yours to bound. A renderer that never settles never confirms; reject it from your own timeout and the silence becomes a refusal.

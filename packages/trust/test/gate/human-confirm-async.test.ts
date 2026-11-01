@@ -137,3 +137,45 @@ describe("humanConfirm — the shape", () => {
     expect(settled.ok).toBe(true)
   })
 })
+
+describe("humanConfirm pins the value the human was asked about (0.5.0 review)", () => {
+  it("a caller that rewrites its object while the human decides cannot change what ascends", async () => {
+    const payee = { name: "Alice", iban: "GB00-ALICE" }
+    let asked = ""
+    const pending = humanConfirm(Sourced.fromChannel(payee, "email-inbound"), async (q) => {
+      asked = q
+      await new Promise((r) => setTimeout(r, 10))
+      return true
+    })
+    payee.iban = "DE99-EVIL" // after the question, before the answer
+    const r = await pending
+    expect(asked).toContain("GB00-ALICE")
+    expect(r.ok).toBe(true)
+    if (r.ok) {
+      expect(r.value.value.iban).toBe("GB00-ALICE")
+      expect(r.value.value).not.toBe(payee)
+    }
+  })
+
+  it("a nested object is pinned too, not only the top level", async () => {
+    const order = { item: "book", ship: { to: "Torrance" } }
+    const pending = humanConfirm(Sourced.fromChannel(order, "email-inbound"), async () => {
+      await new Promise((r) => setTimeout(r, 10))
+      return true
+    })
+    order.ship.to = "Attacker St"
+    const r = await pending
+    expect(r.ok && r.value.value.ship.to).toBe("Torrance")
+  })
+
+  it("a value that cannot be copied is refused, and the human is never asked", async () => {
+    let asked = false
+    const r = await humanConfirm(Sourced.fromChannel({ run: () => 1 }, "email-inbound"), () => {
+      asked = true
+      return true
+    })
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.reason).toContain("could not be copied")
+    expect(asked).toBe(false)
+  })
+})

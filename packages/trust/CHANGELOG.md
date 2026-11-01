@@ -91,7 +91,13 @@ const r = await humanConfirm(value, render) // render may now answer with a Prom
   network: a phone, a voice call, a chat approval. Migration: add `await`; a synchronous renderer
   needs no other change. The question is still built at the call, before anything is awaited:
   provenance first, the value cut to 256 characters with its full length stated, and a bigint
-  rendered rather than thrown. The value the human is asked about is the value that ascends.
+  rendered rather than thrown. The value is **copied** at the call (`structuredClone`), and the
+  copy is what ascends, so the value the human is asked about is the value that ascends even if
+  the caller edits its own object while the human decides (a synchronous renderer left no time
+  for that; a remote human leaves minutes). Two consequences: a value that cannot be cloned (a
+  function, a class with private state) is refused, and a class instance ascends as a plain
+  object of its own fields. Regression: `test/gate/human-confirm-async.test.ts`, watched red
+  before the fix.
 - An `async` renderer that resolves `true` now confirms. In 0.4.0 its Promise was refused unread,
   because only the literal `true` confirmed, which was safe and made a remote human impossible to
   ask. The settled answer must still be exactly `true`; `"yes"`, `1` and a resolved `"true"` are

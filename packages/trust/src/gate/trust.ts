@@ -597,9 +597,13 @@ const HUMAN_CONFIRM_VALUE_CHARS = 256
  * Promise of one, and the verdict is always a Promise. Three properties ride
  * on that shape; do not trade them for convenience:
  *
- * - The candidate is snapshotted and the question is built SYNCHRONOUSLY, at
- *   the call, before the first `await`. The value the human is asked about is
- *   the value that ascends, however long the human takes to answer.
+ * - The candidate's value is COPIED (`structuredClone`) and the question is
+ *   built from the copy SYNCHRONOUSLY, at the call, before the first `await`.
+ *   The copy is what ascends, so the value the human is asked about is the
+ *   value that ascends, however long the human takes and whatever the caller
+ *   does to its own object meanwhile. A value that cannot be cloned (a
+ *   function, a class with private state) is refused; a class instance
+ *   ascends as a plain object of its own fields.
  * - The return is a Promise even for a synchronous `render`. A caller who
  *   forgets `await` holds a Promise, whose `.ok` is `undefined`, so the
  *   forgotten await reads as a refusal. Overloads that hand a sync renderer a
@@ -626,7 +630,28 @@ export async function humanConfirm<T>(
   // that cannot be rendered cannot be confirmed — refuse, naming why.
   // The candidate is read once, here (AGENTS.md, "Intake"): the question and
   // the ascent both use these locals.
-  const { value: candidateValue, tier: candidateTier, provenance: candidateProvenance } = candidate
+  const { value: liveValue, tier: candidateTier, provenance: candidateProvenance } = candidate
+  // SNAPSHOT, not a reference. A Sourced is frozen, but the object it carries
+  // is not (only `fromAuthority` freezes its value), and whoever handed it in
+  // still holds that object. Once a human answers over a network, the await
+  // below can last minutes, and a reference would let the holder rewrite the
+  // value after the human saw it: shown "GB00-ALICE", promoted "DE99-EVIL"
+  // (found in the 0.5.0 review, test/gate/human-confirm-async.test.ts). The
+  // question and the ascent both read this private copy, so the value the
+  // human is asked about is the value that ascends. A value structuredClone
+  // cannot copy (a function, a class with private state) cannot be pinned,
+  // so it cannot be confirmed: refuse, naming why. A class instance clones to
+  // a plain object of its own fields; the verified value carries data, not
+  // behaviour.
+  let candidateValue: T
+  try {
+    candidateValue = structuredClone(liveValue)
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `human confirmation refused: the candidate (${candidate.describe()}) could not be copied for confirmation (${firstLine(err)})`,
+    }
+  }
   let json: string
   try {
     json = receiptJSON(candidateValue) ?? "undefined"
