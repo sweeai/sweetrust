@@ -91,6 +91,24 @@ pay({ to: payee.value, amount })
 // and the refusal itself is on the receipt chain.
 ```
 
+When the registry has no answer, ask a person. `humanConfirm` is async, so the person can answer later, over a phone call, a voice channel or a chat approval. It copies the value and builds the question at the call, provenance first and the value cut to 256 characters, so editing your object while the person decides changes nothing that ascends. Only an answer of exactly `true` confirms. A renderer that throws or rejects is a refusal, never an exception, and a forgotten `await` leaves you holding a Promise whose `.ok` is never `true`.
+
+<!-- readme-check: prelude
+import type { Sourced as S } from "sweetrust/gate"
+declare const account: S<string>
+declare const askOverPhone: (question: string) => Promise<boolean>
+-->
+```ts
+import { humanConfirm } from "sweetrust/gate"
+
+const confirmed = await humanConfirm(account, (question) => askOverPhone(question))
+if (!confirmed.ok) throw new Error(confirmed.reason) // declined, hung up or timed out
+// confirmed.value is a copy pinned at the call: what the person was asked about,
+// now verified, with the confirmation on its chain
+```
+
+The wait is yours to bound. A renderer that never settles never confirms; reject it from your own timeout and the silence becomes a refusal.
+
 ---
 
 ## `sweetrust/mandate` — authority
@@ -103,15 +121,19 @@ Power of attorney for machines: delegated in bounded tiers, every act on a signe
 - **One store, bound once** — `createTrust({ store })` is the only door to issue, use and revoke. The audit store is never a per-call argument, so a caller cannot judge a scope against a log it wrote itself; a scope minted against another store is refused (`MandateScopeForeign`).
 - **Forged-scope rejection** — `useCapability` requires a matching grant in the audit log and re-checks the subset claim. Deserialized payloads and `as any` escapes do not get through.
 - **Ancestor-revocation cascade** — revoking an org-tier mandate disables every descendant, and it cannot be argued away with a different log. The kill switch is structural, not advisory.
+- **Capability limits** — a grant can cap a capability by `amount`, by `count`, or both, optionally over a rolling `windowMs`. The cap is recorded in the grant event, and the spend is summed from the same audit log at every use, so no counter lives next to the agent and a restart refunds nothing. A child may only tighten its grantor's limits (`LimitNotWithinGrantor`).
+- **Resume, never re-mint** — `trust.resume({ resumedBy, mandateId, capabilities })` picks an issued, unrevoked mandate back up from the log after a restart: the same id, so the same budget. A re-mint at boot would be a fresh id with a fresh budget.
 - **Constitutional pre-check** — authored strings (rationales, capability identifiers) are screened for prompt-injection patterns *before* persistence.
 
-<!-- readme-check: run - expect true -->
+This block is self-contained: paste it into a `.ts` file and run it with `node` on Node ≥ 22.18, which runs TypeScript directly (on the `engines` floor, Node 20.19, use any TypeScript runner; the library itself needs nothing newer). The README gate does exactly that against the built package, and fails unless it prints the three lines the comments name.
+
+<!-- readme-check: run - expect CapabilityNotInGrantorScope AncestorMandateRevoked true -->
 ```ts
 import {
-  createTrust, defineCapability,
+  createTrust, defineCapability, MandateFailure,
   makeInMemorySignedAuditLive, makeEd25519SignerLive, verifyAuditChain,
   publicKeyHexFromPem,
-  type GrantorId,
+  grantorId,
 } from "sweetrust/mandate"
 import { generateKeyPairSync } from "node:crypto"
 
@@ -129,18 +151,49 @@ const { mandateAudit, signedAudit } = makeInMemorySignedAuditLive(signer)
 // recorded in it and judged by it; no call names a store again.
 const trust = createTrust({ store: mandateAudit })
 
+const ARTHUR = grantorId("ARTHUR")
+const LEAD   = grantorId("PROJECT_LEAD")
+
 const org = trust.issueOrgMandate({
-  grantor: "ARTHUR" as GrantorId,
+  grantor: ARTHUR,
   capabilities: [CapRead, CapWrite] as const,
   rationale: "Workspace charter",
 })
 
 const project = trust.issueProjectMandate({
-  grantor: "PROJECT_LEAD" as GrantorId,
+  grantor: ARTHUR,
   grantorScope: org,
   capabilities: [CapRead] as const,   // a subset — the type system enforces it
   rationale: "Project Cookie: read-only",
 })
+
+const agent = trust.issueAgentMandate({
+  grantor: LEAD,
+  grantorScope: project,
+  capabilities: [CapRead] as const,
+  rationale: "Reader bot",
+})
+
+// Hand the agent its scope, never the store or the client. Using a capability
+// it holds returns, and records an invoke.
+trust.useCapability({ mandate: agent, capability: CapRead })
+
+// Refused twice. The compiler rejects a capability outside the grant, and a
+// plain-JavaScript caller with no compiler is refused at runtime.
+try {
+  // @ts-expect-error CapWrite is not in the agent's grant, so this does not compile
+  trust.useCapability({ mandate: agent, capability: CapWrite })
+} catch (e) {
+  if (MandateFailure.is(e)) console.log(e._tag) // CapabilityNotInGrantorScope
+}
+
+// The kill switch. Revoke the org root and every descendant is refused.
+trust.revokeMandate({ mandateId: org.id, revokerScope: org, rationale: "Charter suspended" })
+try {
+  trust.useCapability({ mandate: agent, capability: CapRead })
+} catch (e) {
+  if (MandateFailure.is(e)) console.log(e._tag) // AncestorMandateRevoked
+}
 
 // `trustedSignerPublicKeyHex` is REQUIRED, and that is the point: verifying a
 // record against the key it CARRIES proves internal consistency, not authorship.
@@ -154,7 +207,103 @@ console.log(verifyAuditChain(signedAudit.listAllSigned(), signer, {
 }).valid) // true; tampering flips it
 ```
 
-**Honest boundary:** this is in-process authority. Its subset gates are compile-time plus audit-log-backed, and a fully compromised host could bypass them. In-process TypeScript cannot be unforgeable. Money limits belong to the chain's own primitives (on Sui, native `sui::allowance`); this package's `revokeMandate` writes only to this log.
+### Limits: "under $30, I just trust you"
+
+A limit turns that sentence into a grant. The agent can spend up to $30 a day without asking, and the kernel refuses the purchase that would cross the line. The cap goes on the **agent-tier scope you hand the agent**: a cap binds the scope it is written on, and a holder that can still delegate could mint children with caps of their own.
+
+<!-- readme-check: run - expect allowed allowed MandateLimitExceeded MandateAmountRequired -->
+```ts
+import { createTrust, defineCapability, grantorId, makeInMemoryAuditLive, MandateFailure } from "sweetrust/mandate"
+
+const Buy = defineCapability("amazon.buy")
+const trust = createTrust({ store: makeInMemoryAuditLive() })
+
+const DANNY = grantorId("DANNY")
+const org = trust.issueOrgMandate({ grantor: DANNY, capabilities: [Buy] as const, rationale: "Household" })
+const errands = trust.issueProjectMandate({ grantor: DANNY, grantorScope: org, capabilities: [Buy] as const, rationale: "Errands" })
+const shopper = trust.issueAgentMandate({
+  grantor: DANNY,
+  grantorScope: errands,
+  capabilities: [Buy] as const,
+  rationale: "Shopping agent",
+  limits: { "amazon.buy": { amount: 30, unit: "USD", windowMs: 86_400_000 } },
+})
+
+// The HOST calls this with the real order total, never the agent's own figure.
+const buy = (amount?: number): string => {
+  try {
+    trust.useCapability({ mandate: shopper, capability: Buy, amount })
+    return "allowed"
+  } catch (e) {
+    return MandateFailure.is(e) ? e._tag : "threw"
+  }
+}
+
+console.log(buy(12), buy(15), buy(5), buy())
+// allowed · allowed (27 of 30) · MandateLimitExceeded · MandateAmountRequired
+```
+
+The last call is refused because a capped capability will not count a spend it was not told. An amount that is not a finite, non-negative number is refused too (`MandateAmountInvalid`). The kernel records `unit` and compares it at delegation, but never converts it, so "USD", "SUI" and "emails" are all labels.
+
+A child may only tighten. Its `amount` and `count` may not be larger, its `unit` must match, and on windows, no window means the life of the mandate, which is the tightest of all. So a child of a lifetime cap must be lifetime too, and a child of a windowed cap may have no window or a window at least as long; a shorter window is looser, because spend falls out of it sooner.
+
+**Honest limits of a cap**, stated in ADR 0005:
+
+- **A cap binds a leaf.** Spend counts against the capped scope's own budget, and a parent's cap is not yet a shared budget across its children: two agents capped at $20 under a project capped at $30 can spend $40 between them. Cap the agent-tier scope you hand each agent, to the share you mean it to have.
+- **`amount` is the host's declaration.** The kernel enforces the spend it is told, so the host, never the agent, must make the `useCapability` call with the true figure.
+- **Amounts are JavaScript numbers.** The kernel accepts any finite, non-negative number and sums them as floats, so for money use integers in minor units (cents): a cap of 0.3 refuses 0.1 + 0.2. Whole dollars, as above, are integers too.
+
+### Resume after a restart
+
+A scope is an object and does not survive the process. Store the mandate **id**, and in the next process resume it from the same log: the id is the same, so the budget carries on. The resume is recorded in the log, and it never counts toward a limit.
+
+<!-- readme-check: run - expect MandateLimitExceeded allowed -->
+```ts
+import { createTrust, defineCapability, grantorId, makeJsonlAuditLive, MandateFailure } from "sweetrust/mandate"
+import { mkdtempSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+
+const Buy = defineCapability("amazon.buy")
+const file = join(mkdtempSync(join(tmpdir(), "sweetrust-")), "audit.jsonl")
+const DANNY = grantorId("DANNY")
+
+// Process 1: issue the chain, spend $25 of the $30, keep only the id.
+const first = createTrust({ store: makeJsonlAuditLive(file) })
+const org = first.issueOrgMandate({ grantor: DANNY, capabilities: [Buy] as const, rationale: "Household" })
+const errands = first.issueProjectMandate({ grantor: DANNY, grantorScope: org, capabilities: [Buy] as const, rationale: "Errands" })
+const shopper = first.issueAgentMandate({
+  grantor: DANNY, grantorScope: errands, capabilities: [Buy] as const, rationale: "Shopping agent",
+  limits: { "amazon.buy": { amount: 30, unit: "USD", windowMs: 86_400_000 } },
+})
+first.useCapability({ mandate: shopper, capability: Buy, amount: 25 })
+const savedId = shopper.id
+
+// Process 2: a new store over the same file. Resume declares what you expect,
+// and the log confirms it (ResumeMismatch if not).
+const second = createTrust({ store: makeJsonlAuditLive(file) })
+const resumed = second.resume({
+  resumedBy: grantorId("sidecar"), // who resumed, recorded on the resume event
+  mandateId: savedId,
+  capabilities: [Buy] as const,
+  tier: "agent",
+})
+
+const buy = (amount: number): string => {
+  try {
+    second.useCapability({ mandate: resumed, capability: Buy, amount })
+    return "allowed"
+  } catch (e) {
+    return MandateFailure.is(e) ? e._tag : "threw"
+  }
+}
+
+console.log(buy(10), buy(5)) // MandateLimitExceeded (25 + 10 > 30) · allowed (30 of 30)
+```
+
+Resume runs the same revocation walk a use runs, so a revoked mandate, or one under a revoked ancestor, is refused here too. It then re-checks every link of the chain (each child's capabilities within its parent's, each child's limits at least as tight), because a line appended to the log never passed the issuers' checks, and it refuses a cyclic chain as broken. `resumedBy` is the host's word: the kernel records it and never verifies it. Resuming twice gives two genuine objects over one recorded authority, and revoking the id revokes both. Only the id crosses the process boundary; no scope is persisted.
+
+**Honest boundary:** this is in-process authority. Its subset gates are compile-time plus audit-log-backed, and a fully compromised host could bypass them. In-process TypeScript cannot be unforgeable. The same holds for limits: they are counted by this kernel from its own log, so they hold exactly as far as the process boundary does. A cap that must stop money even when the host is compromised belongs to the payment rail itself (on Sui, native `sui::allowance`; for a card, the issuer's limit). This package's `revokeMandate` writes only to this log.
 
 ---
 
@@ -240,7 +389,7 @@ A free tier without enforcement is an advisory guardrail, which is the exact fai
 
 ## Status
 
-**v0.4.0 is the first npm release.** The package was formed 2026-07-30 by merging three unpublished packages (`@sweetrust/mandate`, `@sweetrust/gate`, `@sweetrust/verify`) into one with subpath exports, then hardened through the adversarial passes `SECURITY.md` lists. Nothing before 0.4.0 was ever published, so no migration is owed to anyone. `CHANGELOG.md` ships in the tarball.
+**v0.4.0 is the first npm release.** The next minor breaks two entry points: the mandate verbs move onto the client `createTrust({ store })` returns, and `humanConfirm` returns a Promise. It also adds capability limits and `trust.resume`. `CHANGELOG.md` § *Unreleased* has the migration. The package was formed 2026-07-30 by merging three unpublished packages (`@sweetrust/mandate`, `@sweetrust/gate`, `@sweetrust/verify`) into one with subpath exports, then hardened through the adversarial passes `SECURITY.md` lists. Nothing before 0.4.0 was ever published, so no migration is owed to anyone. `CHANGELOG.md` ships in the tarball.
 
 ## Versioning
 

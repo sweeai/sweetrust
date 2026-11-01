@@ -278,10 +278,10 @@ describe("declassifiers", () => {
     if (!r.ok) expect(r.reason).toContain("disagree")
   })
 
-  test("humanConfirm renders the provenance INTO the question (anti-fatigue, §5)", () => {
+  test("humanConfirm renders the provenance INTO the question (anti-fatigue, §5)", async () => {
     const claim = Sourced.fromLLM("ACME-8817", "ExtractInvoice", [])
     let asked = ""
-    const r = humanConfirm(claim, (q) => {
+    const r = await humanConfirm(claim, (q) => {
       asked = q
       return true
     })
@@ -290,9 +290,9 @@ describe("declassifiers", () => {
     if (r.ok) expect(r.value.tier).toBe("verified")
   })
 
-  test("humanConfirm: declined → refusal, no ascent", () => {
+  test("humanConfirm: declined → refusal, no ascent", async () => {
     const claim = Sourced.fromLLM("x", "Fn", [])
-    const r = humanConfirm(claim, () => false)
+    const r = await humanConfirm(claim, () => false)
     expect(r.ok).toBe(false)
   })
 })

@@ -48,6 +48,10 @@ own and be allowed. It does not change what the store IS. Whoever holds the stor
 `record` into it, and whoever holds the client can issue an org mandate on it. Hand an agent its
 scope. Never hand it the store, the client, or a store factory pointed at the same file.
 
+With resume, a client holder can resume ANY mandate in the log, act as that holder and revoke its
+subtree; before resume a leaked client was root over new trees only. Hand an agent its scope,
+never the client (ADR 0006).
+
 ### A mandate scope is a capability: whoever holds the object holds the authority
 
 Authority in `sweetrust/mandate` is **possession of a scope object this module issued**. A
@@ -189,7 +193,12 @@ artifact rather than the source, and the findings are recorded rather than quiet
   regression was watched red before the fix. The same review's HIGH findings are open and named:
   the three subpaths do not compose (no amount, count, rate or time anywhere in mandate; the ask
   tier's `humanConfirm` is synchronous); authority does not survive a restart; `fromAuthority`
-  mints `verified` on any string. They are the next tickets, not this release.
+  mints `verified` on any string. They were filed as the next tickets. Closed since, in 0.5.0:
+  `humanConfirm` is async, so it awaits a human who answers over a network, and a renderer that
+  throws or rejects is a refusal; and a grant can cap a capability by amount, count and rolling
+  window, counted from the audit log (ADR 0005); and authority survives a restart, because
+  `trust.resume` picks a mandate back up from the log by id, with its budget (ADR 0006). Still
+  open: a parent's cap is not a shared budget across its children.
 - **2026-10-13** — the same day, a pass over the **mandate** kernel. One CRITICAL: a getter on the
   `args` object split the scope the possession check saw from the scope every later read acted on,
   so a caller holding only its own leaf could invoke an unheld capability under another id, mint a

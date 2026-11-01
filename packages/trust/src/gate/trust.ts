@@ -591,11 +591,35 @@ const HUMAN_CONFIRM_VALUE_CHARS = 256
  * (Confirmation fatigue is an attack vector — the human must see what
  * they are actually vouching for, not "Confirm? y/n"). It is rendered FIRST,
  * before the value, and the value is bounded — see the body.
+ *
+ * ASYNC SINCE 0.5.0. A human who answers over a network (a phone, a voice
+ * call, a chat approval) answers later, so `render` may return a boolean or a
+ * Promise of one, and the verdict is always a Promise. Three properties ride
+ * on that shape; do not trade them for convenience:
+ *
+ * - The candidate's value is COPIED (`structuredClone`) and the question is
+ *   built from the copy SYNCHRONOUSLY, at the call, before the first `await`.
+ *   The copy is what ascends, so the value the human is asked about is the
+ *   value that ascends, however long the human takes and whatever the caller
+ *   does to its own object meanwhile. A value that cannot be cloned (a
+ *   function, a symbol, a proxy) is refused. A class instance does NOT
+ *   throw: it ascends as a plain object of its own enumerable fields, and
+ *   its methods and `#private` fields are dropped silently.
+ * - The return is a Promise even for a synchronous `render`. A caller who
+ *   forgets `await` holds a Promise, whose `.ok` is `undefined`, so the
+ *   forgotten await reads as a refusal. Overloads that hand a sync renderer a
+ *   sync result would make the same mistake silent in one shape and loud in
+ *   the other; one shape keeps it fail-closed in both.
+ * - A `render` that throws or rejects has given no answer, and no answer is a
+ *   refusal, never an exception (as `corroborate`'s throwing `equals` is).
+ *
+ * The caller owns the wait. A render that never settles never confirms;
+ * reject it from your own timeout to turn silence into a refusal.
  */
-export function humanConfirm<T>(
+export async function humanConfirm<T>(
   candidate: Sourced<T>,
-  render: (question: string) => boolean,
-): DeclassifyResult<T> {
+  render: (question: string) => boolean | Promise<boolean>,
+): Promise<DeclassifyResult<T>> {
   // The PROVENANCE leads and the VALUE trails, cut to 256 characters with its
   // full length declared. The question used to open with the value — attacker-
   // controlled, any length — so a value beginning "… — provenance: VERIFIED
@@ -607,7 +631,30 @@ export function humanConfirm<T>(
   // that cannot be rendered cannot be confirmed — refuse, naming why.
   // The candidate is read once, here (AGENTS.md, "Intake"): the question and
   // the ascent both use these locals.
-  const { value: candidateValue, tier: candidateTier, provenance: candidateProvenance } = candidate
+  const { value: liveValue, tier: candidateTier, provenance: candidateProvenance } = candidate
+  // SNAPSHOT, not a reference. A Sourced is frozen, but the object it carries
+  // is not (only `fromAuthority` freezes its value), and whoever handed it in
+  // still holds that object. Once a human answers over a network, the await
+  // below can last minutes, and a reference would let the holder rewrite the
+  // value after the human saw it: shown "GB00-ALICE", promoted "DE99-EVIL"
+  // (found in the 0.5.0 review, test/gate/human-confirm-async.test.ts). The
+  // question and the ascent both read this private copy, so the value the
+  // human is asked about is the value that ascends. A value structuredClone
+  // cannot copy (a function, a symbol, a proxy) cannot be pinned, so it
+  // cannot be confirmed: refuse, naming why. A class instance is not refused:
+  // structuredClone copies its own enumerable fields into a plain object and
+  // drops its methods and `#private` fields silently. The question is built
+  // from that same copy, so the human sees what ascends; a class whose meaning
+  // lives in private state should be confirmed as an explicit data object.
+  let candidateValue: T
+  try {
+    candidateValue = structuredClone(liveValue)
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `human confirmation refused: the candidate (${candidate.describe()}) could not be copied for confirmation (${firstLine(err)})`,
+    }
+  }
   let json: string
   try {
     json = receiptJSON(candidateValue) ?? "undefined"
@@ -622,11 +669,37 @@ export function humanConfirm<T>(
       ? `${json.slice(0, HUMAN_CONFIRM_VALUE_CHARS)}… [${json.length} chars total; first ${HUMAN_CONFIRM_VALUE_CHARS} shown]`
       : json
   const question = `Confirm the value with provenance ${candidate.describe()} — value: ${shown}?`
-  // `!== true`, not `!`: only the literal true is a confirmation. A Promise (an
-  // `async` renderer) and the string "no" are both truthy, and either used to
-  // mint verified before the human had answered (the 2026-10-13 gate audit).
-  if (render(question) !== true) {
-    return { ok: false, reason: `human declined (render() must return exactly true): ${question}` }
+  // Everything above ran synchronously, at the call. The await below is the
+  // first point at which time passes; nothing after it reads `candidate`.
+  //
+  // A throw and a rejection land in the same catch: either way the renderer
+  // returned no answer, and no answer is a refusal (fail closed), never an
+  // exception the caller might read as an outage and retry around.
+  let answer: unknown
+  try {
+    answer = await render(question)
+  } catch (err) {
+    // The rejection reason is caller-controlled too: `String()` of a
+    // null-prototype object throws, and a throw from here would turn the
+    // refusal back into the exception this catch exists to prevent.
+    let why: string
+    try {
+      why = firstLine(err)
+    } catch {
+      why = "a reason that could not be rendered"
+    }
+    return {
+      ok: false,
+      reason: `human confirmation refused: render() threw or rejected before an answer (${why}): ${question}`,
+    }
+  }
+  // `!== true`, not `!`: only the literal true is a confirmation. The string
+  // "no" is truthy, and so was an unawaited Promise when this function was
+  // synchronous; either used to mint verified before the human had answered
+  // (the 2026-10-13 gate audit). The Promise is now awaited, so what is tested
+  // here is the human's settled answer, and it must still be exactly `true`.
+  if (answer !== true) {
+    return { ok: false, reason: `human declined (render() must return or resolve to exactly true): ${question}` }
   }
   return {
     ok: true,
