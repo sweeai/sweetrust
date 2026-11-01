@@ -120,6 +120,7 @@ Power of attorney for machines: delegated in bounded tiers, every act on a signe
 - **One store, bound once** — `createTrust({ store })` is the only door to issue, use and revoke. The audit store is never a per-call argument, so a caller cannot judge a scope against a log it wrote itself; a scope minted against another store is refused (`MandateScopeForeign`).
 - **Forged-scope rejection** — `useCapability` requires a matching grant in the audit log and re-checks the subset claim. Deserialized payloads and `as any` escapes do not get through.
 - **Ancestor-revocation cascade** — revoking an org-tier mandate disables every descendant, and it cannot be argued away with a different log. The kill switch is structural, not advisory.
+- **Capability limits** — a grant can cap a capability by `amount`, by `count`, or both, optionally over a rolling `windowMs`. The cap is recorded in the grant event, and the spend is summed from the same audit log at every use, so no counter lives next to the agent and a restart refunds nothing. A child may only tighten its grantor's limits (`LimitNotWithinGrantor`).
 - **Constitutional pre-check** — authored strings (rationales, capability identifiers) are screened for prompt-injection patterns *before* persistence.
 
 This block is self-contained: paste it into a `.ts` file and run it with `node` on Node ≥ 22.18, which runs TypeScript directly (on the `engines` floor, Node 20.19, use any TypeScript runner; the library itself needs nothing newer). The README gate does exactly that against the built package, and fails unless it prints the three lines the comments name.
@@ -206,7 +207,42 @@ console.log(verifyAuditChain(signedAudit.listAllSigned(), signer, {
 }).valid) // true; tampering flips it
 ```
 
-**Honest boundary:** this is in-process authority. Its subset gates are compile-time plus audit-log-backed, and a fully compromised host could bypass them. In-process TypeScript cannot be unforgeable. Money limits belong to the chain's own primitives (on Sui, native `sui::allowance`); this package's `revokeMandate` writes only to this log.
+### Limits: "under $30, I just trust you"
+
+A limit turns that sentence into a grant. The agent can spend up to $30 a day without asking, and the kernel refuses the purchase that would cross the line.
+
+<!-- readme-check: run - expect allowed allowed MandateLimitExceeded MandateAmountRequired -->
+```ts
+import { createTrust, defineCapability, makeInMemoryAuditLive, MandateFailure, type GrantorId } from "sweetrust/mandate"
+
+const Buy = defineCapability("amazon.buy")
+const trust = createTrust({ store: makeInMemoryAuditLive() })
+
+const household = trust.issueOrgMandate({
+  grantor: "DANNY" as GrantorId,
+  capabilities: [Buy] as const,
+  rationale: "Household errands",
+  limits: { "amazon.buy": { amount: 30, unit: "USD", windowMs: 86_400_000 } },
+})
+
+const buy = (amount?: number): string => {
+  try {
+    trust.useCapability({ mandate: household, capability: Buy, amount })
+    return "allowed"
+  } catch (e) {
+    return MandateFailure.is(e) ? e._tag : "threw"
+  }
+}
+
+console.log(buy(12), buy(15), buy(5), buy())
+// allowed · allowed (27 of 30) · MandateLimitExceeded · MandateAmountRequired
+```
+
+The last call is refused because a capped capability will not count a spend it was not told. An amount that is not a finite, non-negative number is refused too (`MandateAmountInvalid`). The kernel records `unit` and compares it at delegation, but never converts it, so "USD", "SUI" and "emails" are all labels.
+
+**Honest limit:** a parent's cap is not yet a shared budget across its children. Spend counts against each leaf's own cap, so two agents capped at $20 under a project capped at $30 can spend $40 between them. Cap each leaf to the share you mean it to have. `docs/adr/0005-limits-live-in-the-grant-and-are-counted-from-the-log.md` records the decision and this gap.
+
+**Honest boundary:** this is in-process authority. Its subset gates are compile-time plus audit-log-backed, and a fully compromised host could bypass them. In-process TypeScript cannot be unforgeable. The same holds for limits: they are counted by this kernel from its own log, so they hold exactly as far as the process boundary does. A cap that must stop money even when the host is compromised belongs to the payment rail itself (on Sui, native `sui::allowance`; for a card, the issuer's limit). This package's `revokeMandate` writes only to this log.
 
 ---
 
@@ -292,7 +328,7 @@ A free tier without enforcement is an advisory guardrail, which is the exact fai
 
 ## Status
 
-**v0.4.0 is the first npm release.** The next minor breaks two entry points: the mandate verbs move onto the client `createTrust({ store })` returns, and `humanConfirm` returns a Promise. `CHANGELOG.md` § *Unreleased* has the migration. The package was formed 2026-07-30 by merging three unpublished packages (`@sweetrust/mandate`, `@sweetrust/gate`, `@sweetrust/verify`) into one with subpath exports, then hardened through the adversarial passes `SECURITY.md` lists. Nothing before 0.4.0 was ever published, so no migration is owed to anyone. `CHANGELOG.md` ships in the tarball.
+**v0.4.0 is the first npm release.** The next minor breaks two entry points: the mandate verbs move onto the client `createTrust({ store })` returns, and `humanConfirm` returns a Promise. It also adds capability limits. `CHANGELOG.md` § *Unreleased* has the migration. The package was formed 2026-07-30 by merging three unpublished packages (`@sweetrust/mandate`, `@sweetrust/gate`, `@sweetrust/verify`) into one with subpath exports, then hardened through the adversarial passes `SECURITY.md` lists. Nothing before 0.4.0 was ever published, so no migration is owed to anyone. `CHANGELOG.md` ships in the tarball.
 
 ## Versioning
 
