@@ -27,6 +27,7 @@ import {
 const ARTHUR = "arthur" as GrantorId
 const LEAD = "lead" as GrantorId
 const BOT = "bot" as GrantorId
+const HOST = "sidecar" as GrantorId
 const Buy = defineCapability("amazon.buy")
 const Read = defineCapability("mail.read")
 const Deploy = defineCapability("deploy")
@@ -68,7 +69,7 @@ describe("resume picks the mandate up where the log left it", () => {
 
     // The process restarts. No scope object survives; the id does.
     const second = createTrust({ store: makeJsonlAuditLive(path) })
-    const agent = second.resume({ mandateId: first.agent.id, capabilities: [Buy] as const, tier: "agent" })
+    const agent = second.resume({ resumedBy: HOST, mandateId: first.agent.id, capabilities: [Buy] as const, tier: "agent" })
     expect(agent.id).toBe(first.agent.id)
     expect(agent.tier).toBe("agent")
     expect(agent.limits).toEqual({ [Buy.key]: { amount: 30, unit: "USD", windowMs: 86_400_000 } })
@@ -78,7 +79,7 @@ describe("resume picks the mandate up where the log left it", () => {
 
   test("the resumed scope is genuine for its own store and foreign to another", () => {
     const { store, trust, agent } = chain()
-    const again = createTrust({ store }).resume({ mandateId: agent.id, capabilities: [Buy] as const })
+    const again = createTrust({ store }).resume({ resumedBy: HOST, mandateId: agent.id, capabilities: [Buy] as const })
     expect(again).not.toBe(agent)
     expect(Object.isFrozen(again)).toBe(true)
     trust.useCapability({ mandate: again, capability: Buy, amount: 1 })
@@ -96,7 +97,7 @@ describe("resume picks the mandate up where the log left it", () => {
   test("the chain is rebuilt from the log: a resumed project can still delegate, a resumed agent cannot", () => {
     const { store, trust } = chain()
     const { project, agent } = chain(store)
-    const p = trust.resume({ mandateId: project.id, capabilities: [Buy, Read] as const, tier: "project" })
+    const p = trust.resume({ resumedBy: HOST, mandateId: project.id, capabilities: [Buy, Read] as const, tier: "project" })
     expect(p.tier).toBe("project")
     expect(p.parentMandateId).toBe(project.parentMandateId)
     const child = trust.issueAgentMandate({
@@ -106,7 +107,7 @@ describe("resume picks the mandate up where the log left it", () => {
       rationale: "from a resumed project",
     })
     trust.useCapability({ mandate: child, capability: Read })
-    const a = trust.resume({ mandateId: agent.id, capabilities: [Buy] as const })
+    const a = trust.resume({ resumedBy: HOST, mandateId: agent.id, capabilities: [Buy] as const })
     expect(a.tier).toBe("agent")
     expect(
       tagOf(() =>
@@ -130,10 +131,10 @@ describe("resume picks the mandate up where the log left it", () => {
       limits: { [Read.key]: { count: 2 } },
     })
     trust.useCapability({ mandate: org, capability: Read })
-    const again = trust.resume({ mandateId: org.id, capabilities: [Read] as const, triggerSource: "external" })
+    const again = trust.resume({ resumedBy: HOST, mandateId: org.id, capabilities: [Read] as const, triggerSource: "external" })
     const events = trust.audit.query(org.id)
     const resumeEvent = events.find((e) => e.type === "resume")
-    expect(resumeEvent?.type === "resume" ? resumeEvent.triggerSource : null).toBe("external")
+    expect(resumeEvent?.type === "resume" ? [resumeEvent.triggerSource, resumeEvent.resumedBy] : null).toEqual(["external", HOST])
     trust.useCapability({ mandate: again, capability: Read })
     expect(tagOf(() => trust.useCapability({ mandate: again, capability: Read }))).toBe("MandateLimitExceeded")
   })
@@ -143,18 +144,18 @@ describe("resume refuses what use would refuse", () => {
   test("a revoked mandate", () => {
     const { trust, project, agent } = chain()
     trust.revokeMandate({ mandateId: agent.id, revokerScope: project, rationale: "done" })
-    expect(tagOf(() => trust.resume({ mandateId: agent.id, capabilities: [Buy] as const }))).toBe("MandateRevoked")
+    expect(tagOf(() => trust.resume({ resumedBy: HOST, mandateId: agent.id, capabilities: [Buy] as const }))).toBe("MandateRevoked")
   })
 
   test("a mandate under a revoked ancestor", () => {
     const { trust, org, agent } = chain()
     trust.revokeMandate({ mandateId: org.id, revokerScope: org, rationale: "kill switch" })
-    expect(tagOf(() => trust.resume({ mandateId: agent.id, capabilities: [Buy] as const }))).toBe("AncestorMandateRevoked")
+    expect(tagOf(() => trust.resume({ resumedBy: HOST, mandateId: agent.id, capabilities: [Buy] as const }))).toBe("AncestorMandateRevoked")
   })
 
   test("an id the log never issued", () => {
     const trust = createTrust({ store: makeInMemoryAuditLive() })
-    expect(tagOf(() => trust.resume({ mandateId: "MAN_NOPE" as MandateId, capabilities: [Buy] as const }))).toBe(
+    expect(tagOf(() => trust.resume({ resumedBy: HOST, mandateId: "MAN_NOPE" as MandateId, capabilities: [Buy] as const }))).toBe(
       "MandateNotIssued",
     )
   })
@@ -166,7 +167,7 @@ describe("resume refuses what use would refuse", () => {
     const forged = makeInMemoryAuditLive()
     for (const e of store.query(agent.id)) forged.record(e)
     void project
-    expect(tagOf(() => createTrust({ store: forged }).resume({ mandateId: agent.id, capabilities: [Buy] as const }))).toBe(
+    expect(tagOf(() => createTrust({ store: forged }).resume({ resumedBy: HOST, mandateId: agent.id, capabilities: [Buy] as const }))).toBe(
       "DelegationChainBroken",
     )
   })
@@ -179,7 +180,7 @@ describe("resume refuses a declaration that does not match the record", () => {
     ["a different capability", [Deploy] as const],
   ])("%s", (_label, declared) => {
     const { trust, agent } = chain()
-    const err = errorOf(() => trust.resume({ mandateId: agent.id, capabilities: declared }))
+    const err = errorOf(() => trust.resume({ resumedBy: HOST, mandateId: agent.id, capabilities: declared }))
     expect(err._tag).toBe("ResumeMismatch")
     if (err._tag === "ResumeMismatch") {
       expect(err.field).toBe("capabilities")
@@ -190,18 +191,99 @@ describe("resume refuses a declaration that does not match the record", () => {
 
   test("the same capabilities in another order match", () => {
     const { trust, project } = chain()
-    const p = trust.resume({ mandateId: project.id, capabilities: [Read, Buy] as const })
+    const p = trust.resume({ resumedBy: HOST, mandateId: project.id, capabilities: [Read, Buy] as const })
     expect(p.capabilities.map((c) => c.key)).toEqual(["mail.read", "amazon.buy"])
   })
 
   test("a declared tier that is not the recorded one", () => {
     const { trust, agent } = chain()
-    const err = errorOf(() => trust.resume({ mandateId: agent.id, capabilities: [Buy] as const, tier: "project" }))
+    const err = errorOf(() => trust.resume({ resumedBy: HOST, mandateId: agent.id, capabilities: [Buy] as const, tier: "project" }))
     expect(err._tag).toBe("ResumeMismatch")
     if (err._tag === "ResumeMismatch") {
       expect(err.field).toBe("tier")
       expect(err.declared).toEqual(["project"])
       expect(err.recorded).toEqual(["agent"])
     }
+  })
+})
+
+describe("resume re-runs the issuers' checks on the chain it rebuilds (blind review 2026-11-01)", () => {
+  test("a grant line whose capabilities its parent never held is refused, not laundered into a scope", () => {
+    const store = makeInMemoryAuditLive()
+    const { trust, org } = chain(store)
+    // Appended straight to the (unsigned) log: no issuer ever checked it.
+    store.record({
+      type: "grant",
+      mandateId: "MAN_FORGED_DEPLOYER" as MandateId,
+      grantor: BOT,
+      capabilities: ["launch.nukes"],
+      rationale: "forged",
+      parentMandateId: org.id,
+      timestamp: new Date().toISOString() as never,
+      triggerSource: "code",
+    })
+    const err = errorOf(() =>
+      trust.resume({ resumedBy: HOST, mandateId: "MAN_FORGED_DEPLOYER" as MandateId, capabilities: [defineCapability("launch.nukes")] as const }),
+    )
+    expect(err._tag).toBe("MandateScopeForged")
+    if (err._tag === "MandateScopeForged") expect(err.capability).toBe("launch.nukes")
+  })
+
+  test("a grant line looser than its parent's limit is refused", () => {
+    const store = makeInMemoryAuditLive()
+    const { trust, org } = chain(store)
+    store.record({
+      type: "grant",
+      mandateId: "MAN_FORGED_SPENDER" as MandateId,
+      grantor: BOT,
+      capabilities: [Buy.key],
+      rationale: "forged",
+      parentMandateId: org.id,
+      timestamp: new Date().toISOString() as never,
+      triggerSource: "code",
+      limits: { [Buy.key]: { amount: 1_000_000, unit: "USD", windowMs: 86_400_000 } },
+    })
+    expect(
+      tagOf(() => trust.resume({ resumedBy: HOST, mandateId: "MAN_FORGED_SPENDER" as MandateId, capabilities: [Buy] as const })),
+    ).toBe("LimitNotWithinGrantor")
+  })
+
+  test("a cyclic chain has no root and is refused", () => {
+    const store = makeInMemoryAuditLive()
+    const A = "MAN_CYCLE_A" as MandateId
+    const B = "MAN_CYCLE_B" as MandateId
+    const line = (id: MandateId, parent: MandateId) => ({
+      type: "grant" as const,
+      mandateId: id,
+      grantor: BOT,
+      capabilities: [Read.key],
+      rationale: "cycle",
+      parentMandateId: parent,
+      timestamp: new Date().toISOString() as never,
+      triggerSource: "code" as const,
+    })
+    store.record(line(A, B))
+    store.record(line(B, A))
+    expect(tagOf(() => createTrust({ store }).resume({ resumedBy: HOST, mandateId: A, capabilities: [Read] as const }))).toBe(
+      "DelegationChainBroken",
+    )
+  })
+
+  test("the limits mirror on a JSONL-resumed scope is frozen", () => {
+    const path = join(mkdtempSync(join(tmpdir(), "sweetrust-resume-")), "audit.jsonl")
+    const first = chain(makeJsonlAuditLive(path))
+    const again = createTrust({ store: makeJsonlAuditLive(path) }).resume({ resumedBy: HOST, mandateId: first.agent.id, capabilities: [Buy] as const })
+    expect(Object.isFrozen(again.limits)).toBe(true)
+    expect(Object.isFrozen(again.limits[Buy.key])).toBe(true)
+  })
+
+  test("the honest cost: a client holder can resume any mandate in the log and act as it", () => {
+    const { store, project, agent } = chain()
+    const leaked = createTrust({ store })
+    const asProject = leaked.resume({ resumedBy: "intruder" as GrantorId, mandateId: project.id, capabilities: [Buy, Read] as const, tier: "project" })
+    leaked.revokeMandate({ mandateId: agent.id, revokerScope: asProject, rationale: "not mine to revoke" })
+    expect(store.isRevoked(agent.id)).toBe(true)
+    const who = store.query(project.id).find((e) => e.type === "resume")
+    expect(who?.type === "resume" ? who.resumedBy : null).toBe("intruder")
   })
 })

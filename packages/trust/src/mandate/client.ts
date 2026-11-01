@@ -142,12 +142,17 @@ export interface TrustClient {
    * Pick an issued, unrevoked mandate back up from this store's log, as the
    * same mandate with the same budget (DAN-1320). Declare the capability set
    * you expect, and the tier if you want it typed; both are checked against
-   * the record. Refused as use would refuse: revoked, ancestor revoked, never
-   * issued, chain broken.
+   * the record, and every link of the rebuilt chain is re-checked for subset
+   * and tightness. Refused as use would refuse: revoked, ancestor revoked,
+   * never issued, chain broken. A client holder can resume ANY mandate in
+   * this store's log, so it can act as any holder: hand an agent its scope,
+   * never the client.
    */
   readonly resume: <Caps extends ReadonlyArray<Capability>, Tier extends MandateTier = MandateTier>(args: {
     readonly mandateId: MandateId
     readonly capabilities: Caps
+    /** Who is picking the mandate up; recorded on the resume event. */
+    readonly resumedBy: GrantorId
     readonly tier?: Tier
     readonly triggerSource?: TriggerSource
   }) => ResumedScope<Caps, Tier>

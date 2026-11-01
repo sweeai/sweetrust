@@ -57,7 +57,7 @@ const formatSigned = (e: SignedMandateAuditEvent): string => {
       body = `COMMENT   ${e.payload.mandateId}  ${e.payload.author}: "${e.payload.body.slice(0, 40)}..."`
       break
     case "resume":
-      body = `RESUME    ${e.payload.mandateId}`
+      body = `RESUME    ${e.payload.mandateId}  by ${e.payload.resumedBy}`
       break
   }
   return `${triggerSrc} sig=${sigPrefix}.. prev=${prevPrefix}.. ${body}`

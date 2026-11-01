@@ -27,9 +27,14 @@ that resets on restart is not a rule.
 `trust.resume({ mandateId, capabilities, tier? })` returns a genuine, bound scope for a mandate
 this store recorded.
 
-1. **The same walk decides.** Resume runs the one revocation walk `useCapability` runs
-   (`walkChain`, shared code, not a copy): refused as `MandateRevoked`, `AncestorMandateRevoked`,
-   `DelegationChainBroken` or `MandateNotIssued` exactly where use would be.
+1. **The same walk decides, and the issuers' checks run again.** Resume runs the one revocation
+   walk `useCapability` runs (`walkChain`, shared code, not a copy): refused as `MandateRevoked`,
+   `AncestorMandateRevoked`, `DelegationChainBroken` or `MandateNotIssued` exactly where use would
+   be, and a cyclic chain is refused as broken. Then every link of the rebuilt chain is checked
+   child against parent for capability subset and limit tightness, because a grant *line* is a
+   claim until the issuers' checks have run on it: the issuers ran them once at issue and the
+   scope object carried the result, and a line appended to an unsigned log skipped them. Resume
+   is the door that would make such a line live; so it checks (blind review 2026-11-01).
 2. **The caller declares, the log confirms.** The declared capability set must equal the recorded
    grant's set (order-insensitive); a declared tier must equal the tier the chain's depth gives.
    Either mismatch is `ResumeMismatch`, naming the field and both lists. Tier is not written on
@@ -37,11 +42,15 @@ this store recorded.
 3. **The scope is minted and bound like any issued scope.** It passes `ISSUED` and `BOUND`, so
    every forged-scope and foreign-store check is unchanged. Ancestor copies on it are detached and
    carry no authority, as on an issued scope.
-4. **It is on the record.** A `resume` event is appended (additive type; a 0.4.0 reader ignores
-   it). It never counts toward a limit.
-5. **Who may call it: whoever holds the store.** ADR 0004 names the store as the root credential
-   of a domain; it could already mint a fresh org mandate. Resume grants nothing new and removes
-   the reason to mint at boot. A host must still hand an agent its scope and never the client.
+4. **It is on the record, with a name.** A `resume` event naming `resumedBy` is appended
+   (additive type; a 0.4.0 reader ignores it). It never counts toward a limit.
+5. **Who may call it: whoever holds the client, and so the store.** ADR 0004 names the store as
+   the root credential of a domain. Say the consequence plainly, because the first draft of this
+   decision did not: a client holder can resume *any* mandate in the log, act as that holder, and
+   revoke that holder's subtree. A fresh org mandate of its own could not do that inside an
+   existing tree (ADR 0001). Before resume the client was root over new trees; with it, the
+   client is root over this tree too. Resume removes the reason to re-mint at boot; it does not
+   make the client safer to leak. A host hands an agent its scope and never the client.
 
 ## What this does not do
 
@@ -49,6 +58,13 @@ this store recorded.
   object; the log is the truth. Revoking the id revokes both.
 - **No scope is persisted.** Only the id crosses the process boundary; the host stores it.
 - **Nothing is resumed by name, grantor or capability.** The id is the only key.
+- **A client holder is not scoped.** It can resume any id this store recorded (decision 5). Scoping
+  resume to a per-mandate secret (ADR 0001, alternative 3) is a separate decision.
+- **`resumedBy` is the host's word.** The kernel records it and never verifies it; it is for the
+  forensic reader, like `grantor`.
+- **A signed store refuses a forged line before resume ever sees it.** The chain re-check in
+  decision 1 is for unsigned stores and for defense in depth; it does not make an unsigned log
+  trustworthy.
 
 ## Consequences
 

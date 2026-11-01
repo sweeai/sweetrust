@@ -396,6 +396,8 @@ export interface MandateHumanContextEvent {
 export interface MandateResumeEvent {
   readonly type: "resume"
   readonly mandateId: MandateId
+  /** Who picked it up, as the host names them; the kernel never resolves it. */
+  readonly resumedBy: GrantorId
   readonly timestamp: ISO8601
   readonly triggerSource: TriggerSource
 }
