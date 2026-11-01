@@ -49,24 +49,27 @@ import {
   type Tier,
 } from "../src/gate/index.ts"
 import {
+  createTrust,
   defineCapability,
-  issueAgentMandate,
-  issueOrgMandate,
-  issueProjectMandate,
   makeEd25519SignerLive,
   makeEd25519VerifierLive,
   makeInMemoryAuditLive,
   makeInMemorySignedAuditLive,
   makeInMemorySignerLive,
   MANDATE_AUDIT_DOMAIN,
-  revokeMandate,
   signedPreimage,
-  useCapability,
   verifyAuditChain,
   type GrantorId,
   type MandateAuditEvent,
   type Signed,
 } from "../src/mandate/index.ts"
+import {
+  issueAgentMandate,
+  issueOrgMandate,
+  issueProjectMandate,
+  revokeMandate,
+  useCapability,
+} from "./helpers/via-client.ts"
 import {
   generateSigningKeypair,
   makeEd25519ReceiptSigner,
@@ -188,6 +191,40 @@ describe("the harness itself", () => {
 // ── mandate ──────────────────────────────────────────────────────────────────
 
 describe("mandate: every exported function reads its args bag, and each capability's key, once", () => {
+  test("createTrust — reads config once; the client's verbs forward a poisoned args bag untouched", () => {
+    sameVerdict(
+      "createTrust",
+      () => Object.keys(createTrust({ store: makeInMemoryAuditLive() })).sort(),
+      () => Object.keys(createTrust(poison({ store: makeInMemoryAuditLive() }))).sort(),
+    )
+    sameVerdict(
+      "createTrust (refused: not a store)",
+      () => createTrust({ store: { query: () => [] } } as any),
+      () => createTrust(poison({ store: { query: () => [] } }) as any),
+    )
+    sameVerdict(
+      "createTrust().useCapability through the client",
+      () => {
+        const audit = makeInMemoryAuditLive()
+        const trust = createTrust({ store: audit })
+        const org = trust.issueOrgMandate({ grantor: ARTHUR, capabilities: [Read] as const, rationale: "org" })
+        trust.useCapability({ mandate: org, capability: Read, triggerSource: "code" })
+        return audit.query(org.id).filter((e) => e.type === "invoke").length
+      },
+      () => {
+        const audit = makeInMemoryAuditLive()
+        const trust = createTrust(poison({ store: audit }))
+        // The scope keeps the caller's capability objects by reference, so a
+        // poisoned capability INSIDE the issued scope would trip on the use
+        // call's own legitimate key resolution (see scopeSummary's note).
+        // Poison the bags and the use call's capability, as the other cases do.
+        const org = trust.issueOrgMandate(poison({ grantor: ARTHUR, capabilities: [Read] as const, rationale: "org" }))
+        trust.useCapability(poison({ mandate: org, capability: poison(Read), triggerSource: "code" as const }))
+        return audit.query(org.id).filter((e) => e.type === "invoke").length
+      },
+    )
+  })
+
   test("issueOrgMandate — success, and the injected-rationale refusal", () => {
     sameVerdict(
       "issueOrgMandate",

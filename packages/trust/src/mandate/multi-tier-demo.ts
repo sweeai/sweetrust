@@ -25,13 +25,8 @@
  */
 import { generateKeyPairSync } from "node:crypto"
 import { makeInMemorySignedAuditLive } from "./audit.ts"
-import {
-  defineCapability,
-  issueAgentMandate,
-  issueOrgMandate,
-  issueProjectMandate,
-  revokeMandate,
-} from "./mandate.ts"
+import { createTrust } from "./client.ts"
+import { defineCapability } from "./mandate.ts"
 import { makeEd25519SignerLive, verifyAuditChain } from "./signer.ts"
 import type { GrantorId, SignedMandateAuditEvent } from "./types.ts"
 
@@ -75,45 +70,44 @@ const main = (): void => {
   }
   const signer = makeEd25519SignerLive(signerConfig)
   const { mandateAudit, signedAudit } = makeInMemorySignedAuditLive(signer)
+  // One client, one store: the signed store is the audit log the client judges by.
+  const trust = createTrust({ store: mandateAudit })
 
   console.log("=== sweetrust/mandate v1.0 — multi-tier + signed audit demo ===\n")
 
   // === Step 1: Arthur's organization-tier mandate ===
-  const orgScope = issueOrgMandate(
+  const orgScope = trust.issueOrgMandate(
     {
       grantor: ARTHUR,
       capabilities: [CapRead, CapWrite, CapDeploy] as const,
       rationale: "Workspace charter: org may use file read/write + deploy capabilities",
-    },
-    mandateAudit,
+    }
   )
   console.log(`[1] Arthur issues ORG-TIER mandate (charter)`)
   console.log(`    → ${orgScope.id}`)
   console.log(`    → tier: ${orgScope.tier}, caps: ${orgScope.capabilities.length}, parentScope: ${orgScope.parentScope}`)
 
   // === Step 2: Project-tier mandate "Cookie" — subset of org ===
-  const projectScope = issueProjectMandate(
+  const projectScope = trust.issueProjectMandate(
     {
       grantor: COOKIE_LEAD,
       grantorScope: orgScope,
       capabilities: [CapRead, CapWrite] as const,
       rationale: "Project Cookie: read+write file ops only — no deploy",
-    },
-    mandateAudit,
+    }
   )
   console.log(`\n[2] Project Lead issues PROJECT-TIER mandate "Cookie" (subset of org)`)
   console.log(`    → ${projectScope.id}`)
   console.log(`    → tier: ${projectScope.tier}, caps: ${projectScope.capabilities.length}, parent: ${projectScope.parentMandateId}`)
 
   // === Step 3: Agent-tier mandate "ChefBot" — subset of project ===
-  const agentScope = issueAgentMandate(
+  const agentScope = trust.issueAgentMandate(
     {
       grantor: CHEFBOT,
       grantorScope: projectScope,
       capabilities: [CapRead] as const,
       rationale: "Agent ChefBot: read-only — recipe data access for this task",
-    },
-    mandateAudit,
+    }
   )
   console.log(`\n[3] ChefBot issues AGENT-TIER mandate (subset of project)`)
   console.log(`    → ${agentScope.id}`)
@@ -121,13 +115,12 @@ const main = (): void => {
   console.log(`    → agent-tier mandates are LEAVES — type system refuses upward delegation`)
 
   // === Step 4: Revoke ChefBot's mandate (Arthur, ancestor in chain) ===
-  revokeMandate(
+  trust.revokeMandate(
     {
       mandateId: agentScope.id,
       revokerScope: orgScope,
       rationale: "Demo cleanup: agent task complete",
-    },
-    mandateAudit,
+    }
   )
   console.log(`\n[4] Arthur revokes ChefBot's mandate (ancestor in delegation chain)`)
   console.log(`    → revocation recorded in signed audit log`)

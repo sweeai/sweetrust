@@ -39,6 +39,15 @@ a property of running in the same process, not a defect we intend to fix here. I
 Use the tiers to find and shape your trust boundaries, and to make refusals auditable. Do not use
 them as the only thing standing between an attacker and custody.
 
+### The store is the root credential of a trust domain
+
+Since 0.5.0 the audit store is bound once, in `createTrust({ store })`, and a scope is judged only
+by the store that recorded its grant (ADR 0004). That closed a real hole: through 0.4.0 the store
+was a per-call argument, so a holder of a genuine, revoked scope could present it with a log of its
+own and be allowed. It does not change what the store IS. Whoever holds the store object can
+`record` into it, and whoever holds the client can issue an org mandate on it. Hand an agent its
+scope. Never hand it the store, the client, or a store factory pointed at the same file.
+
 ### A mandate scope is a capability: whoever holds the object holds the authority
 
 Authority in `sweetrust/mandate` is **possession of a scope object this module issued**. A
@@ -171,6 +180,16 @@ artifact rather than the source, and the findings are recorded rather than quiet
   declassifiers threw on a BigInt; a throwing or unscorable judgment provider executed. The rest
   LOW and documentation. All twenty closed, each with a regression watched red against the pre-fix
   source before its fix was accepted.
+- **2026-10-31** — a stranger's review of the **published 0.4.0** and a blind integration review,
+  then a reproduction against `dist/`. One CRITICAL: every mandate entry point took the audit
+  store as a trailing argument, so a caller holding its own genuine, revoked scope built a fresh
+  store, recorded one forged grant line for its own id, passed it in, and was allowed. Closed by
+  binding the store at construction (`createTrust`, ADR 0004) and binding each scope to the store
+  that recorded its grant (`MandateScopeForeign`); the free functions left the public surface. The
+  regression was watched red before the fix. The same review's HIGH findings are open and named:
+  the three subpaths do not compose (no amount, count, rate or time anywhere in mandate; the ask
+  tier's `humanConfirm` is synchronous); authority does not survive a restart; `fromAuthority`
+  mints `verified` on any string. They are the next tickets, not this release.
 - **2026-10-13** — the same day, a pass over the **mandate** kernel. One CRITICAL: a getter on the
   `args` object split the scope the possession check saw from the scope every later read acted on,
   so a caller holding only its own leaf could invoke an unheld capability under another id, mint a

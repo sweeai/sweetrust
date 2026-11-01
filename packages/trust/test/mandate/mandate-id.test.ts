@@ -16,7 +16,7 @@
 import { afterEach, describe, expect, test, vi } from "vitest"
 import { randomBytes } from "node:crypto"
 import { makeInMemoryAuditLive } from "../../src/mandate/audit.ts"
-import { defineCapability, issueOrgMandate, useCapability } from "../../src/mandate/mandate.ts"
+import { defineCapability, issueOrgMandate, useCapability } from "../helpers/via-client.ts"
 import type { GrantorId, ISO8601, MandateId } from "../../src/mandate/types.ts"
 
 vi.mock("node:crypto", async (importOriginal) => {

@@ -17,19 +17,13 @@
  * `issueMandate` pair, which stamped "organization" on everything it minted.
  * Those are gone; the tiered issuers are the API.
  *
- * Run:  node packages/trust/src/mandate/demo.ts
+ * Run:  node --experimental-strip-types packages/trust/src/mandate/demo.ts
  *
  * Output: prints each step's result and the audit log dump at the end.
  */
 import { makeInMemoryAuditLive } from "./audit.ts"
-import {
-  defineCapability,
-  issueAgentMandate,
-  issueOrgMandate,
-  issueProjectMandate,
-  revokeMandate,
-  useCapability,
-} from "./mandate.ts"
+import { createTrust } from "./client.ts"
+import { defineCapability } from "./mandate.ts"
 import type { GrantorId, MandateError } from "./types.ts"
 
 // Example capabilities. In production these would be defined by domain
@@ -45,18 +39,20 @@ const AGENT_A: GrantorId = "AGENT_A" as GrantorId
 
 const main = (): void => {
   const audit = makeInMemoryAuditLive()
+  // The store is bound ONCE. Issue, use and revoke are the client's verbs, and
+  // no call names a store again (0.5.0; client.ts explains the hole this closed).
+  const trust = createTrust({ store: audit })
 
   console.log("=== sweetrust/mandate demo ===\n")
 
   // Step 1+2: Arthur issues the organization root with all three caps.
   console.log("[1] Arthur issues the org mandate with [FileRead, FileWrite, ShellExec]")
-  const arthurScope = issueOrgMandate(
+  const arthurScope = trust.issueOrgMandate(
     {
       grantor: ARTHUR,
       capabilities: [FileRead, FileWrite, ShellExec] as const,
       rationale: "organization root — owns all capabilities at session bootstrap",
-    },
-    audit,
+    }
   )
   console.log(`    → mandate id: ${arthurScope.id}`)
   console.log(`    → caps: ${arthurScope.capabilities.length}`)
@@ -64,14 +60,13 @@ const main = (): void => {
 
   // Step 3: Arthur issues the files project a subset — [FileRead, FileWrite] only.
   console.log("[2] Arthur issues FILES_TEAM a project mandate with [FileRead, FileWrite]")
-  const projectScope = issueProjectMandate(
+  const projectScope = trust.issueProjectMandate(
     {
       grantor: ARTHUR,
       grantorScope: arthurScope,
       capabilities: [FileRead, FileWrite] as const,
       rationale: "project scoped to file operations only — no shell execution",
-    },
-    audit,
+    }
   )
   console.log(`    → mandate id: ${projectScope.id}`)
   console.log(`    → parent: ${projectScope.parentMandateId}`)
@@ -80,14 +75,13 @@ const main = (): void => {
 
   // Step 4: the project lead issues AgentA an agent-tier leaf.
   console.log("[3] FILES_TEAM issues AgentA an agent mandate with [FileRead, FileWrite]")
-  const agentScope = issueAgentMandate(
+  const agentScope = trust.issueAgentMandate(
     {
       grantor: FILES_TEAM,
       grantorScope: projectScope,
       capabilities: [FileRead, FileWrite] as const,
       rationale: "agent scoped to the project's file operations",
-    },
-    audit,
+    }
   )
   console.log(`    → mandate id: ${agentScope.id}`)
   console.log(`    → parent: ${agentScope.parentMandateId}`)
@@ -96,7 +90,7 @@ const main = (): void => {
 
   // Step 5: AgentA uses FileRead — works.
   console.log("[4] AgentA uses FileRead → success (capability in scope)")
-  useCapability({ mandate: agentScope, capability: FileRead }, audit)
+  trust.useCapability({ mandate: agentScope, capability: FileRead })
   console.log("    → invocation recorded in audit log")
   console.log("")
 
@@ -106,7 +100,7 @@ const main = (): void => {
   // Runtime check: even if types are erased via any-cast, the runtime
   // MandateScope check refuses.
   try {
-    useCapability({ mandate: agentScope as any, capability: ShellExec }, audit)
+    trust.useCapability({ mandate: agentScope as any, capability: ShellExec })
   } catch (err) {
     console.log(`    → runtime fallback fired: ${(err as MandateError)._tag}`)
   }
@@ -115,13 +109,12 @@ const main = (): void => {
   // Step 7: Arthur revokes AgentA's mandate. The org scope is an ancestor of
   // the agent's, so possession of it is authority over the whole subtree.
   console.log("[6] Arthur revokes AgentA's mandate from the org root")
-  revokeMandate(
+  trust.revokeMandate(
     {
       mandateId: agentScope.id,
       revokerScope: arthurScope,
       rationale: "demo cleanup; agent task complete",
-    },
-    audit,
+    }
   )
   console.log("    → revocation recorded")
   console.log("")
@@ -129,7 +122,7 @@ const main = (): void => {
   // Step 8: AgentA attempts FileRead post-revocation — runtime fail.
   console.log("[7] AgentA attempts FileRead post-revocation → MandateRevoked error")
   try {
-    useCapability({ mandate: agentScope, capability: FileRead }, audit)
+    trust.useCapability({ mandate: agentScope, capability: FileRead })
   } catch (err) {
     console.log(`    → ${(err as MandateError)._tag}`)
   }

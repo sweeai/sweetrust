@@ -90,7 +90,7 @@ describe("MIP-5 still reads the raw string, so a cluster is still a cluster", ()
 // ---------------------------------------------------------------------------
 
 import { makeInMemoryAuditLive } from "../../src/mandate/audit.ts"
-import { defineCapability, issueOrgMandate } from "../../src/mandate/mandate.ts"
+import { defineCapability, issueOrgMandate } from "../helpers/via-client.ts"
 import type { GrantorId, MandateAuditEvent, MandateAuditService } from "../../src/mandate/types.ts"
 
 const either = <T>(

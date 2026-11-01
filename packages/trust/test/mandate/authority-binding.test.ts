@@ -36,7 +36,7 @@ import {
   issueProjectMandate,
   revokeMandate,
   useCapability,
-} from "../../src/mandate/mandate.ts"
+} from "../helpers/via-client.ts"
 import type {
   GrantorId,
   MandateAuditEvent,

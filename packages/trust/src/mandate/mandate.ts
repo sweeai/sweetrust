@@ -186,6 +186,52 @@ const detach = <S extends MandateScope<any, any, any>>(scope: S): S =>
 const isIssued = (scope: unknown): scope is MandateScope<any, any, any> =>
   typeof scope === "object" && scope !== null && ISSUED.has(scope)
 
+// ============================================================================
+// Binding to the store (2026-10-31)
+// ============================================================================
+//
+// Possession says the scope is genuine. It does not say which LOG the scope
+// belongs to. Until 0.5.0 every entry point took the audit store as a trailing
+// argument, so a caller holding its own genuine, revoked scope could build a
+// fresh in-memory store, record one forged grant line for its own id, pass that
+// store in, and be allowed: every audit-log check ran, against a log the caller
+// wrote. The kill switch was as strong as the second argument.
+//
+// So a scope is bound to the store that recorded its grant, by object identity
+// on both sides: `BOUND` maps a store to the set of scopes minted against it.
+// `createTrust` (client.ts) holds the store and is the only public door, so a
+// caller never names a store per call again; this map is what makes two clients
+// over the SAME store agree, and a client over a DIFFERENT store refuse. The
+// verdict for a genuine scope on the wrong store is `MandateScopeForeign`; an
+// unissued object keeps `MandateScopeForged`, the more specific one.
+//
+// What this does not close, stated here as in ADR 0001: code that can call
+// `createTrust` with a store of its own can still mint a fresh org mandate on
+// it. In-process, the process holds root. The boundary that fixes that is a
+// process boundary, not this map.
+
+const BOUND = new WeakMap<MandateAuditService, WeakSet<object>>()
+
+/** Record that `scope` was minted against `audit`. Called once per issue, after `mint`. */
+const bindTo = (audit: MandateAuditService, scope: object): void => {
+  let set = BOUND.get(audit)
+  if (set === undefined) {
+    set = new WeakSet<object>()
+    BOUND.set(audit, set)
+  }
+  set.add(scope)
+}
+
+/**
+ * Refuse an issued scope that was minted against a different store. Call only
+ * after `assertIssued`, so a forged object has already received its own verdict.
+ */
+const assertBoundTo = (audit: MandateAuditService, scope: object, mandateId: MandateId): void => {
+  if (!(BOUND.get(audit)?.has(scope) ?? false)) {
+    failMandate({ _tag: "MandateScopeForeign", mandateId })
+  }
+}
+
 /**
  * Refuse a scope this module did not issue. Runs AFTER the older audit-log
  * checks, so a scope that is ALSO wrong on data (never issued, capabilities
@@ -458,6 +504,9 @@ export const useCapability = <
   // field in their grant event, names a real mandate and passes each check
   // above. The object itself is what the caller cannot mint.
   assertIssued(mandate, mandateId, capId)
+  // The store this scope was minted against is the only store its invocation
+  // may be judged by (2026-10-31; the binding note above `BOUND`).
+  assertBoundTo(audit, mandate, mandateId)
 
   // Compile-time check: this function's signature requires the mandate to
   // include the capability. The runtime check is for any-cast escape hatches.
@@ -556,6 +605,7 @@ export const revokeMandate = (args: {
     })
   }
   const revoker = (presented as MandateScope<any, any, any>).grantor
+  assertBoundTo(audit, presented as object, mandateId)
 
   // Idempotent: if already revoked, do not double-record.
   const alreadyRevoked = events.some((e) => e.type === "revoke")
@@ -639,6 +689,8 @@ export const issueOrgMandate = <Caps extends ReadonlyArray<Capability>>(args: {
     parentScope: null,
   })
 
+  bindTo(audit, scope)
+
   audit.record({
     type: "grant",
     mandateId: newId,
@@ -716,6 +768,7 @@ export const issueProjectMandate = <
 
   // DAN-1157: an issued grantor, and the runtime half of the tier ladder.
   assertIssued(grantorScope, grantorScope.id, capabilityIds[0] ?? "")
+  assertBoundTo(audit, grantorScope, grantorScope.id)
   assertGrantorTier(grantorScope, "organization", "project")
 
   const newId = freshMandateId(audit)
@@ -736,6 +789,8 @@ export const issueProjectMandate = <
     parentMandateId: grantorScope.id,
     parentScope: detach(grantorScope),
   })
+
+  bindTo(audit, scope)
 
   audit.record({
     type: "grant",
@@ -820,6 +875,7 @@ export const issueAgentMandate = <
   // is what makes agents leaves for a JavaScript caller too: an agent-tier
   // grantor (agent → agent) and an org-tier one (org → agent) both stop here.
   assertIssued(grantorScope, grantorScope.id, capabilityIds[0] ?? "")
+  assertBoundTo(audit, grantorScope, grantorScope.id)
   assertGrantorTier(grantorScope, "project", "agent")
 
   const newId = freshMandateId(audit)
@@ -840,6 +896,8 @@ export const issueAgentMandate = <
     parentMandateId: grantorScope.id,
     parentScope: detach(grantorScope),
   })
+
+  bindTo(audit, scope)
 
   audit.record({
     type: "grant",

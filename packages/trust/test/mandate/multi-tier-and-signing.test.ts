@@ -29,7 +29,7 @@ import {
   issueOrgMandate,
   issueProjectMandate,
   revokeMandate,
-} from "../../src/mandate/mandate.ts"
+} from "../helpers/via-client.ts"
 import {
   canonicalJSON,
   makeEd25519SignerLive,

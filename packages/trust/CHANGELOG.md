@@ -14,6 +14,32 @@ verified by one version is unaffected by an upgrade; a chain that crosses a vers
 re-verified by the newer code, which may refuse it — each such change is a *Breaking* bullet in the
 release that makes it. A patch version changes none of these.
 
+## [Unreleased]
+
+### Security
+
+- **The audit store is bound at construction, never passed per call** (ADR 0004). In 0.4.0 every
+  mandate entry point took the store as a trailing argument, so a caller holding its own genuine,
+  revoked scope could build a fresh in-memory store, record one forged `grant` line for its own
+  id, pass that store in, and be allowed: every log check ran, against a log the caller wrote.
+  Found by a stranger's review of the published package and reproduced against `dist/` on
+  2026-10-31. Now `createTrust({ store })` binds the store once, and a scope is bound to the store
+  that recorded its grant; a genuine scope presented to a client over a different store is refused
+  with the new `MandateScopeForeign`. Regression: `test/mandate/audit-bound-client.test.ts`,
+  watched red before the fix.
+
+### Changed
+
+- **Breaking:** `issueOrgMandate`, `issueProjectMandate`, `issueAgentMandate`, `useCapability`
+  and `revokeMandate` are no longer exported from `sweetrust/mandate` or the root. They are the
+  verbs of the client returned by **`createTrust({ store })`**, with the same `args` and no store
+  parameter. Migration: build your store as before, then
+  `const trust = createTrust({ store })` and call `trust.useCapability(args)` where you called
+  `useCapability(args, store)`. The client also exposes `audit` (`query`, `isRevoked`), a read-only
+  view of the store.
+- `MandateError` gains the variant `MandateScopeForeign { mandateId }` (0.x: the union may change
+  in a minor, per § Versioning).
+
 ## [0.4.0] — 2026-10-14
 
 **0.4.0 is the first npm release of this package.** 0.3.0 and everything before it were never
