@@ -48,6 +48,10 @@ own and be allowed. It does not change what the store IS. Whoever holds the stor
 `record` into it, and whoever holds the client can issue an org mandate on it. Hand an agent its
 scope. Never hand it the store, the client, or a store factory pointed at the same file.
 
+With resume, a client holder can resume ANY mandate in the log, act as that holder and revoke its
+subtree; before resume a leaked client was root over new trees only. Hand an agent its scope,
+never the client (ADR 0006).
+
 ### A mandate scope is a capability: whoever holds the object holds the authority
 
 Authority in `sweetrust/mandate` is **possession of a scope object this module issued**. A

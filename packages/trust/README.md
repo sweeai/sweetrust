@@ -122,7 +122,7 @@ Power of attorney for machines: delegated in bounded tiers, every act on a signe
 - **Forged-scope rejection** — `useCapability` requires a matching grant in the audit log and re-checks the subset claim. Deserialized payloads and `as any` escapes do not get through.
 - **Ancestor-revocation cascade** — revoking an org-tier mandate disables every descendant, and it cannot be argued away with a different log. The kill switch is structural, not advisory.
 - **Capability limits** — a grant can cap a capability by `amount`, by `count`, or both, optionally over a rolling `windowMs`. The cap is recorded in the grant event, and the spend is summed from the same audit log at every use, so no counter lives next to the agent and a restart refunds nothing. A child may only tighten its grantor's limits (`LimitNotWithinGrantor`).
-- **Resume, never re-mint** — `trust.resume({ mandateId, capabilities })` picks an issued, unrevoked mandate back up from the log after a restart: the same id, so the same budget. A re-mint at boot would be a fresh id with a fresh budget.
+- **Resume, never re-mint** — `trust.resume({ resumedBy, mandateId, capabilities })` picks an issued, unrevoked mandate back up from the log after a restart: the same id, so the same budget. A re-mint at boot would be a fresh id with a fresh budget.
 - **Constitutional pre-check** — authored strings (rationales, capability identifiers) are screened for prompt-injection patterns *before* persistence.
 
 This block is self-contained: paste it into a `.ts` file and run it with `node` on Node ≥ 22.18, which runs TypeScript directly (on the `engines` floor, Node 20.19, use any TypeScript runner; the library itself needs nothing newer). The README gate does exactly that against the built package, and fails unless it prints the three lines the comments name.
@@ -282,7 +282,12 @@ const savedId = shopper.id
 // Process 2: a new store over the same file. Resume declares what you expect,
 // and the log confirms it (ResumeMismatch if not).
 const second = createTrust({ store: makeJsonlAuditLive(file) })
-const resumed = second.resume({ mandateId: savedId, capabilities: [Buy] as const, tier: "agent" })
+const resumed = second.resume({
+  resumedBy: grantorId("sidecar"), // who resumed, recorded on the resume event
+  mandateId: savedId,
+  capabilities: [Buy] as const,
+  tier: "agent",
+})
 
 const buy = (amount: number): string => {
   try {
@@ -296,7 +301,7 @@ const buy = (amount: number): string => {
 console.log(buy(10), buy(5)) // MandateLimitExceeded (25 + 10 > 30) · allowed (30 of 30)
 ```
 
-Resume runs the same revocation walk a use runs, so a revoked mandate, or one under a revoked ancestor, is refused here too. Resuming twice gives two genuine objects over one recorded authority, and revoking the id revokes both. Only the id crosses the process boundary; no scope is persisted.
+Resume runs the same revocation walk a use runs, so a revoked mandate, or one under a revoked ancestor, is refused here too. It then re-checks every link of the chain (each child's capabilities within its parent's, each child's limits at least as tight), because a line appended to the log never passed the issuers' checks, and it refuses a cyclic chain as broken. `resumedBy` is the host's word: the kernel records it and never verifies it. Resuming twice gives two genuine objects over one recorded authority, and revoking the id revokes both. Only the id crosses the process boundary; no scope is persisted.
 
 **Honest boundary:** this is in-process authority. Its subset gates are compile-time plus audit-log-backed, and a fully compromised host could bypass them. In-process TypeScript cannot be unforgeable. The same holds for limits: they are counted by this kernel from its own log, so they hold exactly as far as the process boundary does. A cap that must stop money even when the host is compromised belongs to the payment rail itself (on Sui, native `sui::allowance`; for a card, the issuer's limit). This package's `revokeMandate` writes only to this log.
 

@@ -74,11 +74,15 @@ A host that re-issued mandates at every boot should store the mandate ids and ca
   spend it is told, so the host, never the agent, makes that call with the true figure. Amounts
   are any finite, non-negative JavaScript number and are summed as floats, so for money use
   integers in minor units (cents).
-- **`trust.resume({ mandateId, capabilities, tier? })`** (ADR 0006) picks an issued, unrevoked
+- **`trust.resume({ resumedBy, mandateId, capabilities, tier? })`** (ADR 0006) picks an issued, unrevoked
   mandate back up from the store's log after a restart, as the same id with the same budget. You
   declare the capability set (order does not matter) and optionally the tier; the log confirms
   both. It runs the same revocation walk a use runs, so it refuses exactly where `useCapability`
   would (`MandateRevoked`, `AncestorMandateRevoked`, `DelegationChainBroken`, `MandateNotIssued`).
+  It then re-checks every link of the rebuilt chain, child against parent, for capability subset
+  and limit tightness, since a grant line appended to the log never passed the issuers' checks; a
+  cyclic chain is refused as `DelegationChainBroken`. `resumedBy` (a `GrantorId`, required) names
+  who resumed and is recorded on the `resume` event; it is the host's word, never verified.
   The scope it returns is bound to this client's store like any issued scope. Resuming twice gives
   two genuine objects over one recorded authority, and revoking the id revokes both. Only the id
   crosses the process boundary; no scope is persisted.
