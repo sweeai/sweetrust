@@ -22,6 +22,7 @@ import type {
   MandateId,
   MandateScope,
   MandateTier,
+  ResumedScope,
   TriggerSource,
 } from "./types.ts"
 
@@ -49,6 +50,20 @@ export const defineCapability = <const Id extends string>(key: Id): Capability<I
   // string or any object with a `key`.
   assertCapabilityIdentifierClean(key)
   return { key }
+}
+
+/**
+ * grantorId — brand a string as a `GrantorId` (DAN-1320, asked for by the
+ * README: `"ARTHUR" as GrantorId` was the only cast left in the examples).
+ * A grantor is a name the host chooses and the log prints; the kernel never
+ * resolves it. Empty is refused because an empty name in a grant event is a
+ * record that says nobody granted it.
+ */
+export const grantorId = (id: string): GrantorId => {
+  if (typeof id !== "string" || id.length === 0) {
+    throw new TypeError("grantorId: expected a non-empty string")
+  }
+  return id as GrantorId
 }
 
 /**
@@ -520,6 +535,77 @@ const assertRequestedCapsBackedByGrantorGrant = (
   }
 }
 
+
+/**
+ * walkChain — the one revocation walk, shared by `useCapability` and
+ * `resume` (DAN-1320) so the two can never disagree. From `mandateId` up
+ * through each grant event's `parentMandateId`, refusing on the first revoked
+ * node (`MandateRevoked` for the leaf, `AncestorMandateRevoked` above it) and
+ * on a non-leaf whose grant is missing from the log (`DelegationChainBroken`,
+ * fail closed). Returns the grant events leaf-first; empty when the leaf
+ * itself has no grant, which the caller reports as `MandateNotIssued`.
+ * `fallbackGrantor` fills `revokedBy` only when a revoke event is somehow
+ * absent for a mandate the store says is revoked.
+ */
+const walkChain = (
+  audit: MandateAuditService,
+  mandateId: MandateId,
+  fallbackGrantor: GrantorId,
+): ReadonlyArray<MandateGrantEvent> => {
+  const chain: MandateGrantEvent[] = []
+  const seen = new Set<MandateId>()
+  let cursorId: MandateId | null = mandateId
+  while (cursorId !== null && !seen.has(cursorId)) {
+    seen.add(cursorId)
+    if (audit.isRevoked(cursorId)) {
+      const events = audit.query(cursorId)
+      const revokeEvent = events.find((e) => e.type === "revoke")
+      if (cursorId === mandateId) {
+        failMandate({
+          _tag: "MandateRevoked",
+          mandateId,
+          revokedAt: (revokeEvent?.timestamp ?? nowISO()),
+          revokedBy:
+            revokeEvent?.type === "revoke" ? revokeEvent.revokedBy : fallbackGrantor,
+          rationale:
+            revokeEvent?.type === "revoke" ? revokeEvent.rationale : "unknown",
+        })
+      }
+      failMandate({
+        _tag: "AncestorMandateRevoked",
+        mandateId,
+        revokedAncestorId: cursorId,
+        revokedAt: revokeEvent?.timestamp ?? nowISO(),
+      })
+    }
+    const grantEvent = audit.query(cursorId).find((e) => e.type === "grant") as
+      | MandateGrantEvent
+      | undefined
+    if (!grantEvent) {
+      // A NON-leaf cursor with no grant event means the chain references a
+      // parent whose grant is ABSENT from the log (tampering / truncation /
+      // corruption). We can no longer certify that this ancestor — or anything
+      // above it — is unrevoked, so a revoked grandparent above the break would
+      // be silently missed. Fail CLOSED with an integrity error rather than
+      // fail OPEN (DAN-640: the DAN-637 walk stopped here, hiding the ancestor).
+      if (cursorId !== mandateId) {
+        failMandate({
+          _tag: "DelegationChainBroken",
+          mandateId,
+          brokenAncestorId: cursorId,
+        })
+      }
+      // The LEAF with no grant event is the legitimate forged-fake-id case:
+      // stop here and let the forged-scope defense below report the precise
+      // MandateNotIssued. (An unissued leaf, not a broken chain.)
+      break
+    }
+    chain.push(grantEvent)
+    cursorId = grantEvent.parentMandateId
+  }
+  return chain
+}
+
 /**
  * useCapability — invoke a capability under a mandate.
  *
@@ -580,55 +666,7 @@ export const useCapability = <
   // reachable ancestor has already had isRevoked checked at the top of its
   // iteration before we could return to it, so revocation is still fully
   // enforced across the reachable set. (Battle-test follow-up 2026-07-22.)
-  const seen = new Set<MandateId>()
-  let cursorId: MandateId | null = mandateId
-  while (cursorId !== null && !seen.has(cursorId)) {
-    seen.add(cursorId)
-    if (audit.isRevoked(cursorId)) {
-      const events = audit.query(cursorId)
-      const revokeEvent = events.find((e) => e.type === "revoke")
-      if (cursorId === mandateId) {
-        failMandate({
-          _tag: "MandateRevoked",
-          mandateId,
-          revokedAt: (revokeEvent?.timestamp ?? nowISO()),
-          revokedBy:
-            revokeEvent?.type === "revoke" ? revokeEvent.revokedBy : mandate.grantor,
-          rationale:
-            revokeEvent?.type === "revoke" ? revokeEvent.rationale : "unknown",
-        })
-      }
-      failMandate({
-        _tag: "AncestorMandateRevoked",
-        mandateId,
-        revokedAncestorId: cursorId,
-        revokedAt: revokeEvent?.timestamp ?? nowISO(),
-      })
-    }
-    const grantEvent = audit.query(cursorId).find((e) => e.type === "grant") as
-      | MandateGrantEvent
-      | undefined
-    if (!grantEvent) {
-      // A NON-leaf cursor with no grant event means the chain references a
-      // parent whose grant is ABSENT from the log (tampering / truncation /
-      // corruption). We can no longer certify that this ancestor — or anything
-      // above it — is unrevoked, so a revoked grandparent above the break would
-      // be silently missed. Fail CLOSED with an integrity error rather than
-      // fail OPEN (DAN-640: the DAN-637 walk stopped here, hiding the ancestor).
-      if (cursorId !== mandateId) {
-        failMandate({
-          _tag: "DelegationChainBroken",
-          mandateId,
-          brokenAncestorId: cursorId,
-        })
-      }
-      // The LEAF with no grant event is the legitimate forged-fake-id case:
-      // stop here and let the forged-scope defense below report the precise
-      // MandateNotIssued. (An unissued leaf, not a broken chain.)
-      break
-    }
-    cursorId = grantEvent.parentMandateId
-  }
+  walkChain(audit, mandateId, mandate.grantor)
 
   // Defense-in-depth against forged-scope literals: verify a grant event
   // exists in the audit log AND that the mandate's claimed capabilities
@@ -1100,4 +1138,107 @@ export const issueAgentMandate = <
   }))
 
   return scope
+}
+
+/**
+ * resumeMandate — pick an issued mandate back up from the log (DAN-1320).
+ *
+ * Until now a restart re-minted: a fresh id, a fresh grant line and, with
+ * limits counted per id, a fresh budget. Resume returns a genuine scope for
+ * the mandate the log already holds, if and only if the same walk
+ * `useCapability` runs says it is live. The caller declares the capability
+ * set it expects (so the returned scope is typed) and may declare the tier;
+ * both are checked against the record and refused on mismatch. Tier is not
+ * recorded on the grant event; it is the depth of the chain.
+ *
+ * Who may call this: whoever holds the store, which ADR 0004 names as the
+ * root credential of the domain. It could mint a fresh org mandate; resume
+ * removes the reason to. A `resume` event is recorded so every process that
+ * held the mandate is on the record. Resuming twice yields two genuine
+ * objects over one recorded authority; possession is per object, the log is
+ * the truth.
+ */
+export const resumeMandate = <
+  Caps extends ReadonlyArray<Capability>,
+  Tier extends MandateTier = MandateTier,
+>(args: {
+  readonly mandateId: MandateId
+  readonly capabilities: Caps
+  readonly tier?: Tier
+  readonly triggerSource?: TriggerSource
+}, audit: MandateAuditService): ResumedScope<Caps, Tier> => {
+  // Every caller-supplied field is read exactly once (the intake rule).
+  const { mandateId } = args
+  const capabilities = captureCapabilities(args.capabilities)
+  const declaredIds = resolveCapabilityIds(capabilities)
+  const declaredTier: unknown = args.tier
+  const triggerSource: TriggerSource = args.triggerSource ?? "code"
+
+  const chain = walkChain(audit, mandateId, "" as GrantorId)
+  const leaf = chain[0]
+  if (leaf === undefined) {
+    return failMandate({ _tag: "MandateNotIssued", mandateId })
+  }
+
+  const recorded = Object.freeze([...leaf.capabilities].sort())
+  const declared = Object.freeze([...declaredIds].sort())
+  if (recorded.length !== declared.length || recorded.some((k, i) => k !== declared[i])) {
+    failMandate({ _tag: "ResumeMismatch", mandateId, field: "capabilities", declared, recorded })
+  }
+
+  const TIERS: ReadonlyArray<MandateTier> = ["organization", "project", "agent"]
+  if (chain.length > TIERS.length) {
+    // Deeper than the ladder allows: no issuer can have written this, so the
+    // log is not a record this module can stand on.
+    failMandate({ _tag: "DelegationChainBroken", mandateId, brokenAncestorId: chain[TIERS.length]!.mandateId })
+  }
+  const tierAt = (depthFromLeaf: number): MandateTier => TIERS[chain.length - 1 - depthFromLeaf]!
+  const tier = tierAt(0)
+  if (declaredTier !== undefined && declaredTier !== tier) {
+    failMandate({ _tag: "ResumeMismatch", mandateId, field: "tier", declared: [String(declaredTier)], recorded: [tier] })
+  }
+
+  // Detached, frozen copies of the ancestors, root first, carrying no
+  // authority of their own (they are not minted; `detach` on an issuer does
+  // the same). The capability objects are rebuilt from the recorded keys.
+  let parent: MandateScope<any, any, any> | null = null
+  for (let k = chain.length - 1; k >= 1; k--) {
+    const g = chain[k]!
+    parent = Object.freeze({
+      _tag: "MandateScope",
+      tier: tierAt(k),
+      id: g.mandateId,
+      capabilities: Object.freeze(g.capabilities.map((key) => Object.freeze({ key }))),
+      limits: g.limits ?? EMPTY_LIMITS,
+      grantor: g.grantor,
+      grantTimestamp: g.timestamp,
+      grantRationale: g.rationale,
+      parentMandateId: g.parentMandateId,
+      parentScope: parent,
+    }) as MandateScope<any, any, any>
+  }
+
+  const scope = mint<MandateScope<Caps, MandateTier, MandateScope<any, any, any> | null>>({
+    _tag: "MandateScope",
+    tier,
+    id: mandateId,
+    capabilities,
+    limits: leaf.limits ?? EMPTY_LIMITS,
+    grantor: leaf.grantor,
+    grantTimestamp: leaf.timestamp,
+    grantRationale: leaf.rationale,
+    parentMandateId: leaf.parentMandateId,
+    parentScope: parent,
+  })
+
+  bindTo(audit, scope)
+
+  audit.record(Object.freeze({
+    type: "resume",
+    mandateId,
+    timestamp: nowISO(),
+    triggerSource,
+  }))
+
+  return scope as unknown as ResumedScope<Caps, Tier>
 }

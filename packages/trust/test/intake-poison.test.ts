@@ -273,6 +273,52 @@ describe("mandate: every exported function reads its args bag, and each capabili
       () => limitsRun((x) => x),
       () => limitsRun(poison),
     )
+    // DAN-1320: `resume`'s bag and its capability objects are caller data read
+    // once; the verdicts to pin are a live resume that spends against the
+    // recorded budget, a mismatch refusal, and a revoked refusal.
+    const resumeRun = (wrap: <T extends object>(x: T) => T) => {
+      const audit = makeInMemoryAuditLive()
+      const trust = createTrust(wrap({ store: audit }))
+      const org = trust.issueOrgMandate(wrap({
+        grantor: ARTHUR,
+        capabilities: [Read, Wire] as const,
+        rationale: "org",
+        limits: wrap({ [Wire.key]: wrap({ count: 2 }) }),
+      }))
+      trust.useCapability(wrap({ mandate: org, capability: wrap(Wire) }))
+      // The capability objects stay plain: the scope keeps them by reference,
+      // and the later use call's own key resolution would be the second read.
+      const again = trust.resume(wrap({ mandateId: org.id, capabilities: [Wire, Read] as const, tier: "organization" as const }))
+      trust.useCapability(wrap({ mandate: again, capability: wrap(Wire) }))
+      let capped = "none"
+      try {
+        trust.useCapability(wrap({ mandate: again, capability: wrap(Wire) }))
+      } catch (e) {
+        if (MandateFailure.is(e)) capped = e._tag
+        else throw e
+      }
+      let mismatch = "none"
+      try {
+        trust.resume(wrap({ mandateId: org.id, capabilities: [Read] as const }))
+      } catch (e) {
+        if (MandateFailure.is(e)) mismatch = e._tag
+        else throw e
+      }
+      trust.revokeMandate(wrap({ mandateId: org.id, revokerScope: again, rationale: "done" }))
+      let revoked = "none"
+      try {
+        trust.resume(wrap({ mandateId: org.id, capabilities: [Read, Wire] as const }))
+      } catch (e) {
+        if (MandateFailure.is(e)) revoked = e._tag
+        else throw e
+      }
+      return { tier: again.tier, capped, mismatch, revoked, resumes: audit.query(org.id).filter((e) => e.type === "resume").length }
+    }
+    sameVerdict(
+      "createTrust().resume: live resume, spend against the record, mismatch, revoked",
+      () => resumeRun((x) => x),
+      () => resumeRun(poison),
+    )
   })
 
   test("issueOrgMandate — success, and the injected-rationale refusal", () => {

@@ -19,9 +19,11 @@ export type {
   MandateHumanContextEvent,
   MandateId,
   MandateInvocationEvent,
+  MandateResumeEvent,
   MandateRevokeEvent,
   MandateScope,
   MandateTier,
+  ResumedScope,
   Signed,
   SignedMandateAuditEvent,
   TriggerSource,
@@ -43,7 +45,7 @@ export {
 // would reopen it.
 export { createTrust, type AuditView, type TrustClient, type TrustConfig } from "./client.ts"
 
-export { capabilityKey, defineCapability } from "./mandate.ts"
+export { capabilityKey, defineCapability, grantorId } from "./mandate.ts"
 
 export {
   makeInMemorySignerLive,

@@ -136,6 +136,19 @@ export interface MandateScope<
 }
 
 /**
+ * ResumedScope — the scope `resume` returns for a declared tier (DAN-1320).
+ * The parent chain is typed by tier so a resumed project can be handed to
+ * `issueAgentMandate` without a cast; with no tier declared the scope is
+ * typed loosely (any tier, any parent) and the host narrows on `tier`.
+ */
+export type ResumedScope<Caps extends ReadonlyArray<Capability>, Tier extends MandateTier> =
+  MandateTier extends Tier ? MandateScope<Caps, MandateTier, MandateScope<any, any, any> | null>
+  : Tier extends "organization" ? MandateScope<Caps, "organization", null>
+  : Tier extends "project" ? MandateScope<Caps, "project", MandateScope<any, "organization", null>>
+  : Tier extends "agent" ? MandateScope<Caps, "agent", MandateScope<any, "project", MandateScope<any, "organization", null>>>
+  : never
+
+/**
  * MandateError — typed union covering every failure mode of the mandate
  * flow. No untyped errors leak: every failure has a discriminated _tag the
  * caller can pattern-match on, and is thrown as `MandateFailure`.
@@ -228,6 +241,17 @@ export type MandateError =
       readonly grantorMandateId: MandateId
       readonly capability: string
       readonly field: "amount" | "count" | "windowMs" | "unit"
+    }
+  | {
+      // Raised by `resume` when what the caller declares about the mandate
+      // (its capability set, its tier) is not what the log recorded
+      // (DAN-1320). Both lists are sorted. A host that resumes with the wrong
+      // shape is a host that would type-check the wrong calls.
+      readonly _tag: "ResumeMismatch"
+      readonly mandateId: MandateId
+      readonly field: "capabilities" | "tier"
+      readonly declared: ReadonlyArray<string>
+      readonly recorded: ReadonlyArray<string>
     }
   | {
       // Raised at enforcement time (useCapability) when the delegation chain
@@ -362,11 +386,26 @@ export interface MandateHumanContextEvent {
   readonly triggerSource: "external"
 }
 
+/**
+ * MandateResumeEvent — a process picked an issued mandate back up from the
+ * log with `trust.resume`. It changes no authority: the grant is the
+ * authority, and the chain walk at resume is the same one `useCapability`
+ * runs. It is recorded so forensics can see every process that held the
+ * mandate, and it never counts toward a limit (DAN-1320).
+ */
+export interface MandateResumeEvent {
+  readonly type: "resume"
+  readonly mandateId: MandateId
+  readonly timestamp: ISO8601
+  readonly triggerSource: TriggerSource
+}
+
 export type MandateAuditEvent =
   | MandateGrantEvent
   | MandateInvocationEvent
   | MandateRevokeEvent
   | MandateHumanContextEvent
+  | MandateResumeEvent
 
 /**
  * Signed<P> — the cryptographically-signed wrapper around a record;

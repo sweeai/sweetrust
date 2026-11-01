@@ -85,6 +85,7 @@ describe("MandateHumanContextEvent — a host-produced record with no vendor in 
         case "invoke": return "invoke"
         case "revoke": return "revoke"
         case "human-context": return `context from ${e.externalRef.system}`
+        case "resume": return "resume"
       }
     })(event)
     expect(kind).toBe("context from chat")

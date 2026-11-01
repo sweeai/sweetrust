@@ -44,7 +44,7 @@ src/
 scripts/
   readme-typecheck.ts    compiles the README's ts blocks against dist/*.d.mts (a `pnpm typecheck` gate)
   forgery-typecheck.ts   proves an object literal cannot satisfy Sourced in the shipped declarations (same)
-docs/adr/         decisions with force — 0001 authority is possession · 0002 the interior hash is canonical · 0005 a limit lives in the grant and is counted from the log
+docs/adr/         decisions with force — 0001 authority is possession · 0002 the interior hash is canonical · 0005 a limit lives in the grant and is counted from the log · 0006 a mandate is resumed from the log, never re-minted at boot
 test/
   helpers/via-client.ts  the pre-0.5.0 call shape routed through createTrust, so the older suites exercise the shipped door
   index-barrel.test.ts   guards the barrel against silent export loss

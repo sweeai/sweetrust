@@ -35,6 +35,7 @@ import {
   issueAgentMandate as issueAgentMandateImpl,
   issueOrgMandate as issueOrgMandateImpl,
   issueProjectMandate as issueProjectMandateImpl,
+  resumeMandate as resumeMandateImpl,
   revokeMandate as revokeMandateImpl,
   useCapability as useCapabilityImpl,
 } from "./mandate.ts"
@@ -47,6 +48,7 @@ import type {
   MandateId,
   MandateScope,
   MandateTier,
+  ResumedScope,
   TriggerSource,
 } from "./types.ts"
 
@@ -136,6 +138,20 @@ export interface TrustClient {
     readonly triggerSource?: TriggerSource
   }) => void
 
+  /**
+   * Pick an issued, unrevoked mandate back up from this store's log, as the
+   * same mandate with the same budget (DAN-1320). Declare the capability set
+   * you expect, and the tier if you want it typed; both are checked against
+   * the record. Refused as use would refuse: revoked, ancestor revoked, never
+   * issued, chain broken.
+   */
+  readonly resume: <Caps extends ReadonlyArray<Capability>, Tier extends MandateTier = MandateTier>(args: {
+    readonly mandateId: MandateId
+    readonly capabilities: Caps
+    readonly tier?: Tier
+    readonly triggerSource?: TriggerSource
+  }) => ResumedScope<Caps, Tier>
+
   readonly audit: AuditView
 }
 
@@ -175,6 +191,7 @@ export const createTrust = (config: TrustConfig): TrustClient => {
     issueAgentMandate: (args) => issueAgentMandateImpl(args, store),
     useCapability: (args) => useCapabilityImpl(args, store),
     revokeMandate: (args) => revokeMandateImpl(args, store),
+    resume: (args) => resumeMandateImpl(args, store),
     audit,
   }
   return Object.freeze(client)
