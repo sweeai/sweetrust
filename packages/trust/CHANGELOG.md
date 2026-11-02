@@ -14,7 +14,7 @@ verified by one version is unaffected by an upgrade; a chain that crosses a vers
 re-verified by the newer code, which may refuse it — each such change is a *Breaking* bullet in the
 release that makes it. A patch version changes none of these.
 
-## [Unreleased]
+## [0.5.0] — 2026-11-02
 
 **Upgrading from 0.4.0.** These call shapes change; each is a *Breaking* bullet below.
 
@@ -471,3 +471,6 @@ this repository and is not carried forward.
 - Read `SECURITY.md` § *Honest limits* before adopting. It names what this package does **not**
   protect — in particular that `revokeMandate` writes only to this package's log and stops no
   money a chain already holds.
+
+[0.5.0]: https://github.com/sweeai/sweetrust/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/sweeai/sweetrust/releases/tag/v0.4.0
