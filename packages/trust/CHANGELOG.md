@@ -14,7 +14,7 @@ verified by one version is unaffected by an upgrade; a chain that crosses a vers
 re-verified by the newer code, which may refuse it — each such change is a *Breaking* bullet in the
 release that makes it. A patch version changes none of these.
 
-## [Unreleased]
+## [0.5.0] — 2026-11-02
 
 **Upgrading from 0.4.0.** These call shapes change; each is a *Breaking* bullet below.
 
