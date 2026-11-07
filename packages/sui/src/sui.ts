@@ -35,7 +35,7 @@ import {
   periodPhrase, presentLimits, shortAddress, type SpendFacts,
 } from "./explain.ts"
 import type {
-  AllowanceAdapter, AllowanceLimits, AllowanceReceipt, Caip2, DelegatedAllowance, Enforcement, HeldBy,
+  AllowanceAdapter, AllowanceLimits, AllowanceReceipt, Caip2, Enforcement, HeldBy,
   LimitLine, LimitName, NativeAbort, Refusal, RefusalCode, Remaining, Verb,
 } from "./interface.ts"
 import { SUI, baseUnitsOf, type Scale } from "./scale.ts"
@@ -140,10 +140,18 @@ const minBig = (a: bigint, b: bigint): bigint => (a < b ? a : b)
 const normAddr = (a: string): string => normalizeSuiAddress(a)
 const validAddr = (a: string): boolean => typeof a === "string" && isValidSuiAddress(normAddr(a))
 
+/** The six limit names, as a set: anything else on a limits object is a typo, and a typo is refused, never dropped. */
+const LIMIT_KEYS: ReadonlySet<string> = new Set(["lifetimeCap", "rate", "start", "expiry", "recipients", "perSpendMax"])
+
 // ── Intake: every argument is read once, here, and never again ───────────────
 
 function snapshotLimits(where: string, l: AllowanceLimits): AllowanceLimits {
   if (typeof l !== "object" || l === null) throw typeErr(where, "limits must be an object")
+  // A key outside the six is refused, never ignored: `recipient` or `maxPerSpend`
+  // would otherwise open with no recipient check and no per-spend refusal (ruling 1).
+  for (const k of Object.keys(l)) {
+    if (!LIMIT_KEYS.has(k)) throw typeErr(where, `limits has an unknown key ${JSON.stringify(k)}; the limits are lifetimeCap, rate, start, expiry, recipients, perSpendMax. A misspelled key would be dropped silently, so it is refused.`)
+  }
   const lifetimeCap = l.lifetimeCap
   const rate = l.rate
   const start = l.start

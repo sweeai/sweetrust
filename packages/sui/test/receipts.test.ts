@@ -495,6 +495,19 @@ describe("a thrown submit is resolved by digest, never guessed to be a refusal",
 // ── Intake ───────────────────────────────────────────────────────────────────
 
 describe("intake: each argument field is read once", () => {
+  it("refuses a limits object with an unknown key instead of dropping it (a typo cannot weaken the allowance)", async () => {
+    const chain = mockChain(null, 0n)
+    const badLimits = { rate: { amount: testUSD.of(30), windowMs: DAY }, recipient: MERCHANT } as unknown as SuiAllowance["limits"]
+    await expect(adapter(chain).open({
+      signer: principal,
+      allowance: { network: "sui:testnet", asset: "0x2::sui::SUI", spender: A, limits: badLimits },
+    })).rejects.toThrow(/unknown key "recipient"/)
+    const spendBad = { rate: RATE, maxPerSpend: testUSD.of(5) } as unknown as SuiAllowance["limits"]
+    await expect(adapter(chain).spend({ signer: agent, allowance: handle(spendBad), amount: 1n, recipient: MERCHANT }))
+      .rejects.toThrow(/unknown key "maxPerSpend"/)
+    expect(chain.executed).toHaveLength(0)
+  })
+
   it("open() reads its limits once (a getter that changes its answer cannot split the check from the send)", async () => {
     let reads = 0
     const limits = {
