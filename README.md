@@ -1,10 +1,11 @@
 # sweetrust
 
-Swee's open-source packages. Currently one: [`sweetrust`](packages/trust), unscoped.
+Swee's open-source packages: [`sweetrust`](packages/trust), the kernel, and [`sweetrust-sui`](packages/sui), its first chain adapter. Both unscoped.
 
 | Package | What it is |
 |---|---|
 | [`sweetrust`](packages/trust) | Trust rails for AI agents — issue authority, enforce it, prove what happened. Zero runtime dependencies. |
+| [`sweetrust-sui`](packages/sui) | Delegated spending on Sui's native allowance, with receipts that say which limit Sui held, which the library held, and why a spend was refused. 0.1.0, unreleased. |
 
 ## Why one repository
 
@@ -24,7 +25,7 @@ pnpm build && pnpm test && pnpm typecheck
 ```
 
 Each package owns its own gates and its own `AGENTS.md`. Start with
-[`packages/trust/AGENTS.md`](packages/trust/AGENTS.md).
+[`packages/trust/AGENTS.md`](packages/trust/AGENTS.md), then [`packages/sui/AGENTS.md`](packages/sui/AGENTS.md) for the Sui adapter.
 
 ## Security
 

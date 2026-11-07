@@ -1,0 +1,64 @@
+{
+  "what": "One recorded Sui refusal per limit sweetrust-sui labels `chain`. Each digest is a failed testnet transaction whose effects carry the quoted 0x2::allowance abort. Re-check: open the explorer link, or fetch the digest from any testnet fullnode.",
+  "network": "sui:testnet",
+  "recordedAt": "2026-11-07T01:29:27.076Z",
+  "sdk": "@mysten/sui 2.35.0",
+  "cases": [
+    {
+      "limit": "lifetimeCap",
+      "date": "2026-11-07T01:28:48.126Z",
+      "digest": "6nNwQq7NhnqAPpwV3Wv57xu4avH4SYFhSoxKaSXzGf7c",
+      "explorer": "https://suiscan.xyz/testnet/tx/6nNwQq7NhnqAPpwV3Wv57xu4avH4SYFhSoxKaSXzGf7c",
+      "allowanceId": "0x15883607091f65f24d64631feafe16c97fd5496810b5b4389d621ddee69be2b9",
+      "abort": {
+        "module": "0x2::allowance",
+        "abortName": "EExceedsLifetimeCap",
+        "abortCode": 3,
+        "rawAbortCode": "13835904262624116743"
+      },
+      "why": "Refused by Sui validators (allowance::EExceedsLifetimeCap): this 0.0000006 SUI spend would bring the lifetime total to 0.0000012 SUI, over the 0.000001 SUI lifetime cap. 0.0000006 SUI had already been spent, so at most 0.0000004 SUI more can ever go out."
+    },
+    {
+      "limit": "rate",
+      "date": "2026-11-07T01:28:52.934Z",
+      "digest": "FjEPD1QNvvThe4Bzu631qAYFkccwRe7f4icQUXBZ5jJu",
+      "explorer": "https://suiscan.xyz/testnet/tx/FjEPD1QNvvThe4Bzu631qAYFkccwRe7f4icQUXBZ5jJu",
+      "allowanceId": "0x035702078cb2d2b752c39a2673be07f2700166fd4a356c188f40d78c3615f42f",
+      "abort": {
+        "module": "0x2::allowance",
+        "abortName": "EExceedsRateLimit",
+        "abortCode": 4,
+        "rawAbortCode": "13836185853565075465"
+      },
+      "why": "Refused by Sui validators (allowance::EExceedsRateLimit): this 0.0000003 SUI spend would bring the current window to 0.0000011 SUI, over the rate of 0.000001 SUI per day. Sui's window is fixed: it opened at the first charge (2026-11-07 01:28:51 UTC) and resets at 2026-11-08 01:28:51 UTC."
+    },
+    {
+      "limit": "start",
+      "date": "2026-11-07T01:28:56.368Z",
+      "digest": "2Jon6NQNEXQWnMxtfUdmzuD6fmLawrX9gm8jqdD2JFaX",
+      "explorer": "https://suiscan.xyz/testnet/tx/2Jon6NQNEXQWnMxtfUdmzuD6fmLawrX9gm8jqdD2JFaX",
+      "allowanceId": "0x06db22cbcdaf8d00ba9448562ff89ce77283dca513113fb0f51b92dcd693feec",
+      "abort": {
+        "module": "0x2::allowance",
+        "abortName": "ENotStarted",
+        "abortCode": 8,
+        "rawAbortCode": "13837311598853619729"
+      },
+      "why": "Refused by Sui validators (allowance::ENotStarted): the allowance starts at 2026-11-08 01:28:54 UTC, and this spend reached the chain at 2026-11-07 01:28:56 UTC, 23 hours 59 minutes early. Sui refuses every spend before the start time."
+    },
+    {
+      "limit": "expiry",
+      "date": "2026-11-07T01:29:25.034Z",
+      "digest": "F9HiFSpZwMh3QqpqUso64M3jReSwbBkg5pYff4nSnSjn",
+      "explorer": "https://suiscan.xyz/testnet/tx/F9HiFSpZwMh3QqpqUso64M3jReSwbBkg5pYff4nSnSjn",
+      "allowanceId": "0x365b25a5e54c42894cf9060c8b8109d46cf03924dd66969a0cd5b66b4ec86115",
+      "abort": {
+        "module": "0x2::allowance",
+        "abortName": "EExpired",
+        "abortCode": 2,
+        "rawAbortCode": "13835622766172438533"
+      },
+      "why": "Refused by Sui validators (allowance::EExpired): the allowance expired at 2026-11-07 01:29:23 UTC, and this spend reached the chain at 2026-11-07 01:29:25 UTC, 1 second after it. The expiry is exclusive: from that instant on, every spend is refused."
+    }
+  ]
+}
