@@ -36,11 +36,15 @@ jobs:
             typecheck: true
           - node: "24.x"
             typecheck: true
-          # The engines floor: package.json promises consumers Node ≥ 20.19, so this
-          # leg builds, tests and loads dist/ on it. It skips the typecheck gate,
-          # which is dev tooling.
+          # The engines floor: the kernel's package.json promises consumers Node ≥ 20.19,
+          # so this leg builds, tests and loads the kernel's dist/ on it. It skips the
+          # typecheck gate, which is dev tooling. It filters to the kernel because
+          # sweetrust-sui promises Node ≥ 22 (its peer @mysten/sui requires it); the
+          # 22.x and 24.x legs cover the adapter.
           - node: "20.19"
             typecheck: false
+            # A path, not the name: the private workspace root is also named "sweetrust".
+            only: "--filter ./packages/trust"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -54,8 +58,8 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       # Build first: the test suite and both typecheck gates read dist/.
-      - run: pnpm build
-      - run: pnpm test
+      - run: pnpm ${{ matrix.only }} build
+      - run: pnpm ${{ matrix.only }} test
       # The tests run src/ through vitest. This step loads what a consumer imports:
       # the built dist/, by package name, through the exports map.
       - name: load dist/ through the exports map
