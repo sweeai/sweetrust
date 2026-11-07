@@ -15,6 +15,13 @@ describe("scales", () => {
     expect(SUI.format(2_400_000n)).toBe("0.0024 SUI")
     expect(SUI.format(1_000_000_000n)).toBe("1 SUI")
   })
+  it("marks a rounded amount and carries its exact base units, so a receipt's sums stay true", () => {
+    expect(testUSD.format(2_400_049n)).toBe("≈24.00 testUSD (2,400,049 base units)")
+    expect(testUSD.format(2_400_500n)).toBe("≈24.01 testUSD (2,400,500 base units)")
+    expect(testUSD.format(-1_234n)).toBe("≈-0.01 testUSD (-1,234 base units)")
+    expect(testUSD.format(2_401_000n)).toBe("24.01 testUSD")
+    expect(SUI.format(1n)).toBe("0.000000001 SUI")
+  })
   it("converts display amounts exactly, never through a float", () => {
     expect(testUSD.of(24)).toBe(2_400_000n)
     expect(testUSD.of("0.10")).toBe(10_000n)

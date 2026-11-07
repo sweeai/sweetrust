@@ -52,4 +52,28 @@ on mainnet; this package has spent only on testnet). Tested against `@mysten/sui
   recorded Sui refusal per chain-held limit, each re-read from the chain by digest. The digests
   from 2026-11-07 (UTC) are in `test/conformance/testnet-digests.json`, and an offline test holds
   every `chain` label in `enforces` to a recorded refusal.
-
+- **An `errored` verdict for a spend whose outcome is unknown.** If submitting throws (a timeout,
+  a dropped connection), the adapter re-reads the transaction by its digest, which it computes
+  before sending. It reports `executed` or the chain's refusal when the chain can say, and
+  `errored`, carrying the digest, when it cannot. A thrown submit is never reported as a refusal,
+  so a retry cannot pay twice or open a second allowance. Look the digest up before retrying.
+- A limits object with a key outside the six (`recipient`, `maxPerSpend`, …) is refused at intake,
+  so a misspelled limit is never silently dropped.
+- Spend receipts print each chain-held limit from the allowance object on chain, not from the
+  handle passed to `spend()`, and flag any difference between the two. `spender` is the address
+  that actually signed.
+- **The client is checked against `network` before the first transaction.** On `sui:mainnet` and
+  `sui:testnet` the adapter compares the client's genesis checkpoint with the network's, once, and
+  refuses with `wrong-network` (nothing sent) when they differ, so a receipt never names a network
+  the transaction did not run on. Devnet and localnet are reset to new geneses, so they are not
+  checked. A failed check refuses with `not-submitted` and is tried again on the next send.
+- **A guard on the one SDK hook the adapter relies on.** A refusal reaches the chain only because
+  the adapter keeps `@mysten/sui` from simulating first, through `resolveTransactionPlugin`. If a
+  release of `@mysten/sui` ever builds without consulting it, the adapter sends nothing and
+  refuses with `not-submitted`, naming the cause, instead of risking a refusal with no digest.
+- A rounded amount on a receipt is marked and carries its exact base units, e.g.
+  `≈24.00 testUSD (2,400,049 base units)`, so the sums in a `why` stay true. Exact amounts read as
+  before.
+- Nothing that runs after a transaction is sent can throw away its receipt: a custom `explorer`
+  function that throws costs the receipt its link, a malformed `explorer` or `scale` is refused
+  when the adapter is created, and a rate window of any value can be written into a receipt.

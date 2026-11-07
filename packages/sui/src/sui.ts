@@ -122,6 +122,26 @@ const DEFAULT_GAS_BUDGET = 10_000_000n
 const DEFAULT_CONFIRM_TIMEOUT_MS = 30_000
 const SCHEMA = "sweetrust-sui/receipt@1" as const
 
+/**
+ * The genesis checkpoint digest of each Sui network whose genesis never changes,
+ * which is what every transport's `getChainIdentifier()` returns. Read from
+ * graphql.{mainnet,testnet}.sui.io on 2026-11-07. Devnet and localnet are reset
+ * to a new genesis, so a client on them cannot be checked and is taken at its word.
+ */
+const GENESIS: Readonly<Record<string, string>> = Object.freeze({
+  "sui:mainnet": "4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S",
+  "sui:testnet": "69WiPg3DAQiwdxfncX6wYQ2siKwAe6L9BZthQea3JNMD",
+})
+
+/**
+ * What the adapter says when `@mysten/sui` built a transaction without asking
+ * for `resolveTransactionPlugin`. The adapter's bypass of the transport's
+ * simulating resolver works through that one lookup; an SDK that no longer
+ * makes it could simulate a spend Sui would refuse and drop the refusal's
+ * digest, so the adapter sends nothing rather than send on an unknown path.
+ */
+const RESOLVER_UNCONSULTED = "this @mysten/sui built the transaction without consulting resolveTransactionPlugin, so sweetrust-sui cannot keep the transport from simulating it first, and a refusal might never reach the chain. Use a @mysten/sui release this adapter supports (tested: 2.35)."
+
 const defaultExplorer = (network: Caip2, digest: string): string | null => {
   const net = network.slice("sui:".length)
   return net === "mainnet" || net === "testnet" || net === "devnet" ? `https://suiscan.xyz/${net}/tx/${digest}` : null
@@ -204,7 +224,14 @@ function snapshotHandle(where: string, h: SuiAllowance): SuiAllowance {
   for (const [k, v] of [["network", network], ["asset", asset], ["allowanceId", allowanceId], ["capId", capId], ["funder", funder], ["spender", spender]] as const) {
     if (typeof v !== "string") throw typeErr(where, `allowance.${k} must be a string`)
   }
-  return Object.freeze({ network, asset, allowanceId, capId, funder, spender, limits: snapshotLimits(where, limits) })
+  const held = snapshotLimits(where, limits)
+  // open() refuses a bad window as a result (EBadRateLimit), so a handle that
+  // carries one was not made by open(). Caught here, before anything is sent,
+  // because the receipt's arithmetic on it would otherwise throw after the
+  // chain had moved.
+  const w = held.rate?.windowMs
+  if (w !== undefined && (!Number.isSafeInteger(w) || w <= 0)) throw typeErr(where, "allowance.limits.rate.windowMs must be a positive whole number of milliseconds, as open() returned it")
+  return Object.freeze({ network, asset, allowanceId, capId, funder, spender, limits: held })
 }
 
 // ── The adapter ──────────────────────────────────────────────────────────────
@@ -224,7 +251,22 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
   if (typeof gasBudget !== "bigint" || gasBudget <= 0n) throw typeErr("suiAllowances", "gasBudget must be a positive bigint (MIST)")
   if (typeof confirmTimeoutMs !== "number" || !Number.isFinite(confirmTimeoutMs) || confirmTimeoutMs < 0) throw typeErr("suiAllowances", "confirmTimeoutMs must be a non-negative number of milliseconds")
   if (log !== undefined && (typeof log !== "object" || log === null || typeof log.append !== "function")) throw typeErr("suiAllowances", "log must be a ReceiptLog (an object with append())")
+  if (explorerOpt !== undefined && explorerOpt !== null && typeof explorerOpt !== "function") throw typeErr("suiAllowances", "explorer must be a function (network, digest) => string | null, or null")
+  if (scaleOpt !== undefined && (typeof scaleOpt !== "object" || scaleOpt === null || typeof scaleOpt.format !== "function")) throw typeErr("suiAllowances", "scale must be a Scale from defineScale()")
   const explorer = explorerOpt === undefined ? defaultExplorer : explorerOpt
+  /**
+   * The explorer link runs after the chain has moved, so it may not throw: a
+   * host's link function that fails costs the receipt its link, never the receipt.
+   */
+  const explorerLink = (digest: string): string | null => {
+    if (explorer === null) return null
+    try {
+      const url = explorer(network, digest)
+      return typeof url === "string" ? url : null
+    } catch {
+      return null
+    }
+  }
   const core = client.core
 
   const scaleFor = (asset: string): Scale => scaleOpt ?? (normalizeStructTag(asset) === normalizeStructTag(SUI_TYPE) ? SUI : baseUnitsOf(asset))
@@ -268,7 +310,7 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
     asset: f.asset,
     allowanceId: f.allowanceId,
     digest: f.digest,
-    explorer: f.digest === null || explorer === null ? null : explorer(network, f.digest),
+    explorer: f.digest === null ? null : explorerLink(f.digest),
     at: f.at,
     atSource: f.atSource,
     funder: f.funder,
@@ -366,15 +408,55 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
    * executed, a refusal is a failed transaction with a digest, and the abort is
    * on chain for anyone to read.
    */
-  const buildClient = {
-    core: new Proxy(core, {
-      get(target, prop) {
-        if (prop === "resolveTransactionPlugin") return () => undefined
-        const v: unknown = Reflect.get(target, prop, target)
-        return typeof v === "function" ? (v as (...a: Array<unknown>) => unknown).bind(target) : v
-      },
-    }),
-  } as unknown as ClientWithCoreApi
+  /**
+   * One build client per build, which records whether the SDK asked for the
+   * transport's resolver. The adapter never sets a gas price, so every build
+   * needs resolving and must ask; a build that never asked means the SDK found
+   * its resolver some other way, and `execute()` sends nothing (fail closed,
+   * whatever `@mysten/sui` release is installed).
+   */
+  const buildClientFor = (): { readonly client: ClientWithCoreApi; readonly consulted: () => boolean } => {
+    let consulted = false
+    const client = {
+      core: new Proxy(core, {
+        get(target, prop) {
+          if (prop === "resolveTransactionPlugin") {
+            consulted = true
+            return () => undefined
+          }
+          const v: unknown = Reflect.get(target, prop, target)
+          return typeof v === "function" ? (v as (...a: Array<unknown>) => unknown).bind(target) : v
+        },
+      }),
+    } as unknown as ClientWithCoreApi
+    return { client, consulted: () => consulted }
+  }
+
+  /**
+   * Is the client really on `network`? Asked once per adapter, before the first
+   * transaction it sends: a client on another chain would execute there while
+   * every receipt named `network`. A failed read is not cached, so the next
+   * send asks again. null = on `network`, or `network` has no fixed genesis.
+   */
+  let chainCheck: Promise<{ code: RefusalCode; why: string } | null> | null = null
+  const wrongChain = (): Promise<{ code: RefusalCode; why: string } | null> => {
+    const expected = GENESIS[network]
+    if (expected === undefined) return Promise.resolve(null)
+    if (chainCheck === null) {
+      chainCheck = core.getChainIdentifier().then(
+        (r) => {
+          if (r.chainIdentifier === expected) return null
+          const known = Object.keys(GENESIS).find((k) => GENESIS[k] === r.chainIdentifier)
+          return { code: "wrong-network", why: `Refused in-process; nothing was sent. This adapter is set up for ${network}, but its Sui client is connected to ${known ?? `another chain (genesis checkpoint ${r.chainIdentifier})`}; a receipt from it would name the wrong network.` }
+        },
+        (e: unknown) => {
+          chainCheck = null
+          return { code: "not-submitted", why: `Refused in-process; nothing was sent. This adapter could not confirm that its Sui client is connected to ${network}. The Sui client said: ${clip(e)}` }
+        },
+      )
+    }
+    return chainCheck
+  }
 
   /**
    * Ask the chain whether a digest finalized. null = still unknown after the
@@ -409,7 +491,9 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
     try {
       tx.setSenderIfNotSet(signer.toSuiAddress())
       tx.setGasBudgetIfNotSet(gasBudget)
-      bytes = await tx.build({ client: buildClient })
+      const b = buildClientFor()
+      bytes = await tx.build({ client: b.client })
+      if (!b.consulted()) return { kind: "not-sent", message: RESOLVER_UNCONSULTED }
     } catch (e) {
       return { kind: "not-sent", message: clip(e) }
     }
@@ -535,7 +619,12 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
       return pre("EBadTimeWindow", "invalid-limit", `the expiry must come after the start; the start is ${fmtTime(startMs)} and the expiry ${fmtTime(expiryMs)}.`, ["start", "expiry"])
     }
 
-    // 5. Send it.
+    // 5. The client is on the network the allowance names (checked once, after every local rule,
+    //    so a refusal that needs no network never waits on one).
+    const offChain = await wrongChain()
+    if (offChain !== null) return plain(offChain.code, offChain.why)
+
+    // 6. Send it.
     const tx = new Transaction()
     const rateArg = r === undefined
       ? tx.moveCall({ target: "0x1::option::none", typeArguments: ["0x2::allowance::RateLimit"] })
@@ -677,6 +766,10 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
       return notSent("recipient-not-allowed", why, { recipients: recipientsLine("outside", why) })
     }
 
+    // The client is on the network the allowance names, checked after every local rule.
+    const offChain = await wrongChain()
+    if (offChain !== null) return notSent(offChain.code, offChain.why)
+
     // Send it. The chain holds the rest; a refusal comes back as a failed transaction with a digest.
     const tx = new Transaction()
     const coin = tx.coin({ type: h.asset, balance: amount, allowance: { objectId: h.allowanceId, funder: h.funder } })
@@ -783,6 +876,8 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
       const why = `Refused in-process; nothing was sent. The allowance is on ${h.network}, and this adapter is connected to ${network}.`
       return finish(receiptOf({ ...base, verdict: "refused", digest: null, ...localAt(), limits: [], refusal: refusal("wrong-network", "library", null, why), summary: why }))
     }
+    const offChain = await wrongChain()
+    if (offChain !== null) return finish(receiptOf({ ...base, verdict: "refused", digest: null, ...localAt(), limits: [], refusal: refusal(offChain.code, "library", null, offChain.why), summary: offChain.why }))
     const tx = new Transaction()
     // Mutability stated, so the build needs no function-signature lookup (the SDK's own pattern for 0x8 Random).
     const byValue = (objectId: string) => tx.object({ $kind: "UnresolvedObject", UnresolvedObject: { objectId, mutable: true } })

@@ -58,13 +58,21 @@ const nativeTag = (name: string): string => `${abortRef(name)}, abort code ${ABO
 
 // ── What each limit is, in words ─────────────────────────────────────────────
 
+/**
+ * A rate window in words. A window Sui would refuse (a fraction, zero, NaN) is
+ * shown as given and never converted: this text is written into receipts, and
+ * a receipt that cannot be written is lost (`BigInt(1.5)` throws).
+ */
+const windowWords = (ms: number, as: (ms: bigint) => string): string =>
+  Number.isSafeInteger(ms) && ms > 0 ? as(BigInt(ms)) : `${ms} ms`
+
 export function limitValue(limit: LimitName, limits: AllowanceLimits, scale: Scale): string {
   switch (limit) {
     case "lifetimeCap":
       return `${scale.format(limits.lifetimeCap ?? 0n)} in total`
     case "rate": {
       const r = limits.rate
-      return r === undefined ? "none" : `${scale.format(r.amount)} per ${periodPhrase(BigInt(r.windowMs))}, in fixed windows counted from the first charge`
+      return r === undefined ? "none" : `${scale.format(r.amount)} per ${windowWords(r.windowMs, periodPhrase)}, in fixed windows counted from the first charge`
     }
     case "start":
       return limits.start === undefined ? "none" : `from ${fmtTime(limits.start.getTime())}`
@@ -129,8 +137,8 @@ export function heldWhy(limit: LimitName, limits: AllowanceLimits, scale: Scale)
     case "rate": {
       const r = limits.rate
       const amount = r === undefined ? "?" : scale.format(r.amount)
-      const period = r === undefined ? "?" : periodPhrase(BigInt(r.windowMs))
-      const length = r === undefined ? "?" : fmtDuration(BigInt(r.windowMs))
+      const period = r === undefined ? "?" : windowWords(r.windowMs, periodPhrase)
+      const length = r === undefined ? "?" : windowWords(r.windowMs, fmtDuration)
       return `Held by Sui: at most ${amount} per ${period}; a spend past it aborts on chain (${nativeTag("EExceedsRateLimit")}). Sui's windows are fixed, not rolling: the first charge opens the first window, and each window lasts exactly ${length}.`
     }
     case "start":

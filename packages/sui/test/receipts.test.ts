@@ -6,12 +6,13 @@
  * here word for word where the numbers decide them, and by their load-bearing
  * phrases elsewhere.
  */
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
+import { Transaction } from "@mysten/sui/transactions"
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519"
 import { normalizeSuiAddress } from "@mysten/sui/utils"
 import { SignedReceiptLog, generateSigningKeypair, makeEd25519ReceiptSigner, verifySignedChain } from "sweetrust/verify"
 import { defineScale, enforces, suiAllowances, type AllowanceReceipt, type SuiAllowance } from "../src/index.ts"
-import { ALLOWANCE_ID, CAP_ID, DIGEST, allowanceState, mockChain, targetsOf, type MockChain } from "./helpers/mock-chain.ts"
+import { ALLOWANCE_ID, CAP_ID, DIGEST, MAINNET_GENESIS, TESTNET_GENESIS, allowanceState, mockChain, targetsOf, type MockChain } from "./helpers/mock-chain.ts"
 
 const principal = Ed25519Keypair.generate()
 const agent = Ed25519Keypair.generate()
@@ -539,5 +540,117 @@ describe("intake: each argument field is read once", () => {
     expect(reads).toBe(1)
     expect(receipt.verdict).toBe("executed")
     expect(lineOf(receipt, "lifetimeCap").value).toBe("30.00 testUSD in total")
+  })
+})
+
+// ── The security review's also-dos (2026-11-07) ──────────────────────────────
+
+describe("the client must be on the network the adapter names, checked before the first send", () => {
+  const spendOne = (chain: MockChain, a = adapter(chain)) =>
+    a.spend({ signer: agent, allowance: handle({ rate: RATE }), amount: testUSD.of(1), recipient: MERCHANT })
+
+  it("spend: a mainnet client behind a sui:testnet adapter sends nothing → wrong-network, refused by the library", async () => {
+    const chain = mockChain(allowanceState({ funder: P, spender: A, rate: windowed(0n, null) }), 0n)
+    chain.chainIdentifier = MAINNET_GENESIS
+    const r = await spendOne(chain)
+    expect(chain.executed).toHaveLength(0)
+    expect(r).toMatchObject({ verdict: "refused", digest: null })
+    expect(r.refusal).toMatchObject({ code: "wrong-network", refusedBy: "library", native: null })
+    expect(r.refusal?.why).toContain("connected to sui:mainnet")
+  })
+
+  it("open and revoke refuse the same way, and a chain with no known name is named by its genesis", async () => {
+    const chain = mockChain(allowanceState({ funder: P, spender: A, rate: windowed(0n, null) }), 0n)
+    chain.chainIdentifier = DIGEST(3)
+    const a = adapter(chain)
+    const { receipt, allowance } = await a.open({ signer: principal, allowance: { network: "sui:testnet", asset: "0x2::sui::SUI", spender: A, limits: { rate: RATE } } })
+    expect(allowance).toBeNull()
+    expect(receipt.refusal).toMatchObject({ code: "wrong-network", refusedBy: "library" })
+    expect(receipt.refusal?.why).toContain(`genesis checkpoint ${DIGEST(3)}`)
+    const revoked = await a.revoke({ signer: principal, allowance: handle({ rate: RATE }) })
+    expect(revoked.refusal).toMatchObject({ code: "wrong-network", refusedBy: "library" })
+    expect(chain.executed).toHaveLength(0)
+  })
+
+  it("a failed read refuses without sending, and is asked again on the next send, never cached", async () => {
+    const before = allowanceState({ funder: P, spender: A, rate: windowed(0n, null) })
+    const chain = mockChain(before, 0n)
+    chain.chainIdentifier = new Error("fetch failed: ECONNREFUSED")
+    const a = adapter(chain)
+    const first = await spendOne(chain, a)
+    expect(chain.executed).toHaveLength(0)
+    expect(first.refusal).toMatchObject({ code: "not-submitted", refusedBy: "library" })
+    expect(first.refusal?.why).toContain("could not confirm")
+    chain.chainIdentifier = TESTNET_GENESIS
+    chain.script.push({ kind: "executed", digest: DIGEST(1), timestampMs: ANCHOR, after: { ...before, rate: windowed(testUSD.of(1), ANCHOR) } })
+    const second = await spendOne(chain, a)
+    expect(second.verdict).toBe("executed")
+  })
+
+  it("a refusal that needs no network never waits on one: local rules are checked before the chain is asked", async () => {
+    const chain = mockChain(allowanceState({ funder: P, spender: A, rate: windowed(0n, null) }), 0n)
+    chain.chainIdentifier = new Error("fetch failed: ECONNREFUSED")
+    const a = adapter(chain)
+    const { receipt } = await a.open({ signer: principal, allowance: { network: "sui:testnet", asset: "0x2::sui::SUI", spender: A, limits: { lifetimeCap: 1n } } })
+    expect(receipt.refusal).toMatchObject({ code: "unbounded-time", native: { abortName: "ENoExpiration" } })
+    const r = await a.spend({ signer: agent, allowance: handle({ rate: RATE, recipients: [MERCHANT] }), amount: 1n, recipient: STRANGER })
+    expect(r.refusal).toMatchObject({ code: "recipient-not-allowed" })
+  })
+
+  it("devnet has no fixed genesis, so a devnet client is taken at its word", async () => {
+    const before = allowanceState({ funder: P, spender: A, rate: windowed(0n, null) })
+    const chain = mockChain(before, 0n)
+    chain.chainIdentifier = DIGEST(3)
+    chain.script.push({ kind: "executed", digest: DIGEST(1), timestampMs: ANCHOR, after: { ...before, rate: windowed(testUSD.of(1), ANCHOR) } })
+    const a = suiAllowances({ client: chain.client, network: "sui:devnet", scale: testUSD, now: () => LOCAL_NOW })
+    const r = await a.spend({ signer: agent, allowance: { ...handle({ rate: RATE }), network: "sui:devnet" }, amount: testUSD.of(1), recipient: MERCHANT })
+    expect(r.verdict).toBe("executed")
+  })
+})
+
+describe("nothing that runs after the chain has moved may throw the receipt away", () => {
+  it("an explorer function that throws costs the receipt its link, never the receipt", async () => {
+    const before = allowanceState({ funder: P, spender: A, rate: windowed(0n, null) })
+    const chain = mockChain(before, 0n)
+    chain.script.push({ kind: "executed", digest: DIGEST(1), timestampMs: ANCHOR, after: { ...before, rate: windowed(testUSD.of(1), ANCHOR) } })
+    const a = suiAllowances({ client: chain.client, network: "sui:testnet", scale: testUSD, now: () => LOCAL_NOW, explorer: () => { throw new Error("explorer down") } })
+    const r = await a.spend({ signer: agent, allowance: handle({ rate: RATE }), amount: testUSD.of(1), recipient: MERCHANT })
+    expect(r).toMatchObject({ verdict: "executed", digest: DIGEST(1), explorer: null })
+  })
+
+  it("an explorer or scale of the wrong shape is refused when the adapter is made, not after a send", () => {
+    const chain = mockChain(null, 0n)
+    expect(() => suiAllowances({ client: chain.client, network: "sui:testnet", explorer: "https://suiscan.xyz" as never })).toThrow(TypeError)
+    expect(() => suiAllowances({ client: chain.client, network: "sui:testnet", scale: { unit: "x" } as never })).toThrow(TypeError)
+  })
+
+  it("a bad rate window: open() refuses it as a result (Sui's EBadRateLimit); a handle carrying one throws before anything is sent", async () => {
+    const chain = mockChain(allowanceState({ funder: P, spender: A, rate: windowed(0n, null) }), 0n)
+    const a = adapter(chain)
+    for (const windowMs of [1.5, 0, Number.NaN]) {
+      const { receipt, allowance } = await a.open({ signer: principal, allowance: { network: "sui:testnet", asset: "0x2::sui::SUI", spender: A, limits: { rate: { amount: 1n, windowMs } } } })
+      expect(allowance).toBeNull()
+      expect(receipt.refusal).toMatchObject({ code: "invalid-limit", refusedBy: "library", native: { abortName: "EBadRateLimit", rawAbortCode: null } })
+    }
+    await expect(a.spend({ signer: agent, allowance: handle({ rate: { amount: 1n, windowMs: 0 } }), amount: 1n, recipient: MERCHANT })).rejects.toThrow(/positive whole number/)
+    await expect(a.spend({ signer: agent, allowance: handle({ rate: { amount: 1n, windowMs: Number.NaN } }), amount: 1n, recipient: MERCHANT })).rejects.toThrow(/positive whole number/)
+    expect(chain.executed).toHaveLength(0)
+  })
+})
+
+describe("an SDK that stops consulting resolveTransactionPlugin gets nothing sent", () => {
+  it("a build that never asked for the transport's resolver → not-submitted by the library, naming the SDK", async () => {
+    const chain = mockChain(allowanceState({ funder: P, spender: A, rate: windowed(0n, null) }), 0n)
+    // Stands in for a future @mysten/sui that resolves without the lookup the bypass relies on.
+    const build = vi.spyOn(Transaction.prototype, "build").mockResolvedValueOnce(new Uint8Array([1, 2, 3]))
+    try {
+      const r = await adapter(chain).spend({ signer: agent, allowance: handle({ rate: RATE }), amount: testUSD.of(1), recipient: MERCHANT })
+      expect(chain.executed).toHaveLength(0)
+      expect(r).toMatchObject({ verdict: "refused", digest: null })
+      expect(r.refusal).toMatchObject({ code: "not-submitted", refusedBy: "library", native: null })
+      expect(r.refusal?.why).toContain("resolveTransactionPlugin")
+    } finally {
+      build.mockRestore()
+    }
   })
 })

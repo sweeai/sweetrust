@@ -47,10 +47,17 @@ export interface MockChain {
   readonly simulated: Array<unknown>
   /** When true, the gas-coin reads throw, so `tx.build()` fails before anything is signed. */
   breakBuild?: boolean
+  /** What `getChainIdentifier()` answers: a genesis digest, or an Error it throws. Default: testnet's genesis. */
+  chainIdentifier: string | Error
 }
 
+/** Sui testnet's genesis checkpoint digest (graphql.testnet.sui.io, 2026-11-07). */
+export const TESTNET_GENESIS = "69WiPg3DAQiwdxfncX6wYQ2siKwAe6L9BZthQea3JNMD"
+/** Sui mainnet's genesis checkpoint digest (graphql.mainnet.sui.io, 2026-11-07). */
+export const MAINNET_GENESIS = "4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S"
+
 export function mockChain(initial: AllowanceState | null, clockMs: bigint): MockChain {
-  const chain: MockChain = { client: undefined as unknown as ClientWithCoreApi, state: initial, clockMs, script: [], executed: [], simulated: [] }
+  const chain: MockChain = { client: undefined as unknown as ClientWithCoreApi, state: initial, clockMs, script: [], executed: [], simulated: [], chainIdentifier: TESTNET_GENESIS }
   const txTime = new Map<string, number>()
   // Digests the fullnode would answer for: a tx finalizes only once it is here.
   const finalized = new Map<string, { kind: "Transaction" | "FailedTransaction"; tx: Record<string, unknown> }>()
@@ -106,7 +113,10 @@ export function mockChain(initial: AllowanceState | null, clockMs: bigint): Mock
   const core = {
     getObjects: async ({ objectIds }: { objectIds: Array<string> }) => ({ objects: objectIds.map(objectFor) }),
     getCurrentSystemState: async () => ({ systemState: { referenceGasPrice: "1000", epoch: "900" } }),
-    getChainIdentifier: async () => ({ chainIdentifier: DIGEST(3) }),
+    getChainIdentifier: async () => {
+      if (chain.chainIdentifier instanceof Error) throw chain.chainIdentifier
+      return { chainIdentifier: chain.chainIdentifier }
+    },
     getBalance: async () => {
       if (chain.breakBuild) throw new Error("mock-chain: gas balance lookup failed (breakBuild)")
       return { balance: { coinType: "0x2::sui::SUI", balance: "100000000", coinBalance: "100000000", addressBalance: "0" } }

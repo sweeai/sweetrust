@@ -114,6 +114,12 @@ export interface Refusal {
   readonly code: RefusalCode
   /** Who refused: the chain's validators, or this library in-process. */
   readonly refusedBy: "chain" | "library"
+  /**
+   * The chain's own words for the refusal. Set when the chain aborted; also set,
+   * with `rawAbortCode` null, when the library refused before sending because
+   * the chain's own rule would have aborted (a pre-flight of Sui's `ENoLimit`,
+   * `ENoExpiration`). Null when the library refused on a rule of its own.
+   */
   readonly native: NativeAbort | null
   /** Plain English: what was refused, by whom, and why. */
   readonly why: string

@@ -14,7 +14,11 @@ export interface Scale {
   readonly decimals: number
   /** Drop trailing zeros after the point ("0.0024 SUI", not "0.002400000 SUI"). */
   readonly trim: boolean
-  /** Render base units in this scale, e.g. 2_400_000n → "24.00 testUSD". */
+  /**
+   * Render base units in this scale, e.g. 2_400_000n → "24.00 testUSD". An
+   * amount the decimals cannot show exactly is marked and carries its base
+   * units: 2_400_049n → "≈24.00 testUSD (2,400,049 base units)".
+   */
   format(baseUnits: bigint): string
   /** Base units for a display amount, e.g. of(24) or of("24.50"). Exact: no float arithmetic. */
   of(amount: number | string): bigint
@@ -38,13 +42,18 @@ export function defineScale(args: { unit: string; baseUnitsPerUnit: bigint; deci
   const format = (baseUnits: bigint): string => {
     const negative = baseUnits < 0n
     const abs = negative ? -baseUnits : baseUnits
+    const sign = negative ? "-" : ""
     // Fixed-point: scale to `decimals` digits, rounding half up, all in bigint.
     const scaled = (abs * pow10(decimals) * 2n + per) / (per * 2n)
     const whole = scaled / pow10(decimals)
     let frac = decimals === 0 ? "" : (scaled % pow10(decimals)).toString().padStart(decimals, "0")
     if (trim) frac = frac.replace(/0+$/, "")
     const digits = whole.toLocaleString("en-US") + (frac === "" ? "" : `.${frac}`)
-    return `${negative ? "-" : ""}${digits} ${unit}`
+    // A rounded amount says so and carries its exact base units, so the sums in
+    // a receipt's WHY stay true: "≈24.00 testUSD (2,400,049 base units)" never
+    // reads as exactly 24.00 beside a cap of 24.00.
+    if ((abs * pow10(decimals)) % per !== 0n) return `≈${sign}${digits} ${unit} (${sign}${abs.toLocaleString("en-US")} base units)`
+    return `${sign}${digits} ${unit}`
   }
 
   const of = (amount: number | string): bigint => {
