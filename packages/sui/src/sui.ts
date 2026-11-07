@@ -438,8 +438,8 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
    * every receipt named `network`. A failed read is not cached, so the next
    * send asks again. null = on `network`, or `network` has no fixed genesis.
    */
-  let chainCheck: Promise<{ code: RefusalCode; why: string } | null> | null = null
-  const wrongChain = (): Promise<{ code: RefusalCode; why: string } | null> => {
+  let chainCheck: Promise<{ code: RefusalCode; reason: string } | null> | null = null
+  const wrongChain = (): Promise<{ code: RefusalCode; reason: string } | null> => {
     const expected = GENESIS[network]
     if (expected === undefined) return Promise.resolve(null)
     if (chainCheck === null) {
@@ -447,11 +447,11 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
         (r) => {
           if (r.chainIdentifier === expected) return null
           const known = Object.keys(GENESIS).find((k) => GENESIS[k] === r.chainIdentifier)
-          return { code: "wrong-network", why: `Refused in-process; nothing was sent. This adapter is set up for ${network}, but its Sui client is connected to ${known ?? `another chain (genesis checkpoint ${r.chainIdentifier})`}; a receipt from it would name the wrong network.` }
+          return { code: "wrong-network", reason: `This adapter is set up for ${network}, but its Sui client is connected to ${known ?? `another chain (genesis checkpoint ${r.chainIdentifier})`}; a receipt from it would name the wrong network.` }
         },
         (e: unknown) => {
           chainCheck = null
-          return { code: "not-submitted", why: `Refused in-process; nothing was sent. This adapter could not confirm that its Sui client is connected to ${network}. The Sui client said: ${clip(e)}` }
+          return { code: "not-submitted", reason: `This adapter could not confirm that its Sui client is connected to ${network}. The Sui client said: ${clip(e)}` }
         },
       )
     }
@@ -622,7 +622,7 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
     // 5. The client is on the network the allowance names (checked once, after every local rule,
     //    so a refusal that needs no network never waits on one).
     const offChain = await wrongChain()
-    if (offChain !== null) return plain(offChain.code, offChain.why)
+    if (offChain !== null) return plain(offChain.code, `Refused at open(); nothing was sent. ${offChain.reason}`)
 
     // 6. Send it.
     const tx = new Transaction()
@@ -768,7 +768,7 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
 
     // The client is on the network the allowance names, checked after every local rule.
     const offChain = await wrongChain()
-    if (offChain !== null) return notSent(offChain.code, offChain.why)
+    if (offChain !== null) return notSent(offChain.code, `Refused in-process; nothing was sent. ${offChain.reason}`)
 
     // Send it. The chain holds the rest; a refusal comes back as a failed transaction with a digest.
     const tx = new Transaction()
@@ -877,7 +877,10 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
       return finish(receiptOf({ ...base, verdict: "refused", digest: null, ...localAt(), limits: [], refusal: refusal("wrong-network", "library", null, why), summary: why }))
     }
     const offChain = await wrongChain()
-    if (offChain !== null) return finish(receiptOf({ ...base, verdict: "refused", digest: null, ...localAt(), limits: [], refusal: refusal(offChain.code, "library", null, offChain.why), summary: offChain.why }))
+    if (offChain !== null) {
+      const why = `Refused in-process; nothing was sent. ${offChain.reason}`
+      return finish(receiptOf({ ...base, verdict: "refused", digest: null, ...localAt(), limits: [], refusal: refusal(offChain.code, "library", null, why), summary: why }))
+    }
     const tx = new Transaction()
     // Mutability stated, so the build needs no function-signature lookup (the SDK's own pattern for 0x8 Random).
     const byValue = (objectId: string) => tx.object({ $kind: "UnresolvedObject", UnresolvedObject: { objectId, mutable: true } })
@@ -918,6 +921,11 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
   const remaining: SuiAllowances["remaining"] = async (args) => {
     if (typeof args !== "object" || args === null) throw typeErr("remaining", "arguments must be an object")
     const h = snapshotHandle("remaining", args.allowance)
+    // Read on the wrong chain, the allowance would not be found and would be
+    // reported as revoked: a confident false answer, so this read refuses to answer.
+    if (h.network !== network) throw typeErr("remaining", `the allowance is on ${h.network}, and this adapter is connected to ${network}; read there, it would look revoked`)
+    const offChain = await wrongChain()
+    if (offChain !== null) throw new Error(`sweetrust-sui remaining: ${offChain.reason}`)
     const scale = scaleFor(h.asset)
     const fmt = scale.format
     const [state, clock] = await Promise.all([readAllowance(h.allowanceId, null), readClockMs()])

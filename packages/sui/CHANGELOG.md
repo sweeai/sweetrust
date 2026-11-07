@@ -67,10 +67,13 @@ on mainnet; this package has spent only on testnet). Tested against `@mysten/sui
   refuses with `wrong-network` (nothing sent) when they differ, so a receipt never names a network
   the transaction did not run on. Devnet and localnet are reset to new geneses, so they are not
   checked. A failed check refuses with `not-submitted` and is tried again on the next send.
+  `remaining()` makes the same check, and refuses to answer (it throws) for a handle from another
+  network, where the allowance would not be found and would look revoked.
 - **A guard on the one SDK hook the adapter relies on.** A refusal reaches the chain only because
   the adapter keeps `@mysten/sui` from simulating first, through `resolveTransactionPlugin`. If a
   release of `@mysten/sui` ever builds without consulting it, the adapter sends nothing and
   refuses with `not-submitted`, naming the cause, instead of risking a refusal with no digest.
+  The hook is unchanged through `@mysten/sui` 2.39.1 (its `resolve.mjs` is byte-identical to 2.35.0's).
 - A rounded amount on a receipt is marked and carries its exact base units, e.g.
   `≈24.00 testUSD (2,400,049 base units)`, so the sums in a `why` stay true. Exact amounts read as
   before.

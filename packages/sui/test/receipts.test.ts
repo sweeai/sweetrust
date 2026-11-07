@@ -597,6 +597,14 @@ describe("the client must be on the network the adapter names, checked before th
     expect(r.refusal).toMatchObject({ code: "recipient-not-allowed" })
   })
 
+  it("remaining() will not answer from the wrong chain, where the allowance would look revoked", async () => {
+    const chain = mockChain(null, 0n)
+    const a = adapter(chain)
+    await expect(a.remaining({ allowance: { ...handle({ rate: RATE }), network: "sui:mainnet" } })).rejects.toThrow(/would look revoked/)
+    chain.chainIdentifier = MAINNET_GENESIS
+    await expect(a.remaining({ allowance: handle({ rate: RATE }) })).rejects.toThrow(/connected to sui:mainnet/)
+  })
+
   it("devnet has no fixed genesis, so a devnet client is taken at its word", async () => {
     const before = allowanceState({ funder: P, spender: A, rate: windowed(0n, null) })
     const chain = mockChain(before, 0n)
