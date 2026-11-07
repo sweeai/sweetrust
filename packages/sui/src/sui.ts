@@ -20,7 +20,7 @@
  * spender gas and is exactly what makes it a record a stranger can look up.
  * Errors are thrown only for programmer errors (a wrong JS type).
  */
-import { Transaction } from "@mysten/sui/transactions"
+import { Transaction, TransactionDataBuilder } from "@mysten/sui/transactions"
 import type { Signer } from "@mysten/sui/cryptography"
 import type { ClientWithCoreApi, SuiClientTypes } from "@mysten/sui/client"
 import { isValidSuiAddress, normalizeStructTag, normalizeSuiAddress } from "@mysten/sui/utils"
@@ -102,6 +102,13 @@ export interface SuiAllowancesOptions {
   readonly log?: ReceiptAppender
   /** Gas budget per transaction, in MIST. Set explicitly so a refused spend executes and leaves a digest. Default 10_000_000 (0.01 SUI). */
   readonly gasBudget?: bigint
+  /**
+   * How long to wait, in ms, for a transaction to confirm on chain after
+   * `signAndExecuteTransaction` throws, before a verb returns `errored`. The
+   * throw may mean the signed transaction was forwarded and will still finalize,
+   * so the adapter re-reads the digest rather than guess. Default 30_000.
+   */
+  readonly confirmTimeoutMs?: number
   /** The explorer page for a digest, or null for none. Default: suiscan.xyz. */
   readonly explorer?: ((network: Caip2, digest: string) => string | null) | null
   /** This machine's clock, for receipts of refusals that never reached the chain. Default `Date.now`. */
@@ -112,6 +119,7 @@ export type SuiAllowances = AllowanceAdapter<Signer, SuiAllowance>
 
 const SUI_TYPE = "0x2::sui::SUI"
 const DEFAULT_GAS_BUDGET = 10_000_000n
+const DEFAULT_CONFIRM_TIMEOUT_MS = 30_000
 const SCHEMA = "sweetrust-sui/receipt@1" as const
 
 const defaultExplorer = (network: Caip2, digest: string): string | null => {
@@ -200,11 +208,13 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
   const scaleOpt = options.scale
   const log = options.log
   const gasBudget = options.gasBudget ?? DEFAULT_GAS_BUDGET
+  const confirmTimeoutMs = options.confirmTimeoutMs ?? DEFAULT_CONFIRM_TIMEOUT_MS
   const explorerOpt = options.explorer
   const localNow = options.now ?? Date.now
   if (typeof client !== "object" || client === null || typeof client.core !== "object") throw typeErr("suiAllowances", "client must be a @mysten/sui client (it needs client.core)")
   if (typeof network !== "string" || !/^sui:[-a-z0-9]{1,32}$/.test(network)) throw typeErr("suiAllowances", `network must be a CAIP-2 Sui chain id such as "sui:testnet", got ${JSON.stringify(network)}`)
   if (typeof gasBudget !== "bigint" || gasBudget <= 0n) throw typeErr("suiAllowances", "gasBudget must be a positive bigint (MIST)")
+  if (typeof confirmTimeoutMs !== "number" || !Number.isFinite(confirmTimeoutMs) || confirmTimeoutMs < 0) throw typeErr("suiAllowances", "confirmTimeoutMs must be a non-negative number of milliseconds")
   if (log !== undefined && (typeof log !== "object" || log === null || typeof log.append !== "function")) throw typeErr("suiAllowances", "log must be a ReceiptLog (an object with append())")
   const explorer = explorerOpt === undefined ? defaultExplorer : explorerOpt
   const core = client.core
@@ -329,7 +339,13 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
     readonly digest: string
     readonly tx: SuiClientTypes.Transaction<Include>
   }
-  type Thrown = { readonly kind: "thrown"; readonly message: string }
+  /** Build or sign threw: the transaction was never signed, so nothing reached Sui. Safe to refuse. */
+  type NotSent = { readonly kind: "not-sent"; readonly message: string }
+  /** Submit threw AFTER signing, and the chain could not confirm the digest: the outcome is unknown. */
+  type Unknown = { readonly kind: "unknown"; readonly digest: string; readonly message: string }
+  type Outcome = Executed | NotSent | Unknown
+
+  const clip = (e: unknown): string => (e instanceof Error ? e.message : String(e)).replace(/\s+/g, " ").slice(0, 400)
 
   /**
    * The client every transaction is BUILT with: the caller's client, minus its
@@ -352,16 +368,50 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
     }),
   } as unknown as ClientWithCoreApi
 
-  const execute = async (tx: Transaction, signer: Signer): Promise<Executed | Thrown> => {
+  /**
+   * Ask the chain whether a digest finalized. null = still unknown after the
+   * wait (not forwarded, or forwarded but not yet — the caller treats it as
+   * unknown, never as a refusal). A finalized transaction that aborted comes
+   * back as `failed`, with its digest, exactly like the direct path.
+   */
+  const resolveDigest = async (digest: string): Promise<Executed | null> => {
+    try {
+      const res = await core.waitForTransaction({ digest, timeout: confirmTimeoutMs, include: { effects: true, objectTypes: true } })
+      if (res.$kind === "Transaction") return { kind: "executed", digest, tx: res.Transaction }
+      return { kind: "failed", digest, tx: res.FailedTransaction }
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Build, then sign-and-submit, as two steps split at the point of no return.
+   *
+   * `tx.build()` produces unsigned bytes: if it throws, nothing was signed and
+   * nothing reached Sui (`not-sent`), so the verb refuses in-process. The
+   * transaction's digest is derived from those bytes BEFORE submit (the Sui
+   * digest is over the transaction data, not the signature), so if
+   * `signAndExecuteTransaction` then throws — the signed bytes may already have
+   * been forwarded and may finalize — the adapter re-reads that exact digest
+   * instead of guessing. Only when the chain cannot confirm it is the outcome
+   * `unknown`; a thrown submit is never reported as a definite refusal.
+   */
+  const execute = async (tx: Transaction, signer: Signer): Promise<Outcome> => {
+    let bytes: Uint8Array
     try {
       tx.setSenderIfNotSet(signer.toSuiAddress())
       tx.setGasBudgetIfNotSet(gasBudget)
-      const bytes = await tx.build({ client: buildClient })
+      bytes = await tx.build({ client: buildClient })
+    } catch (e) {
+      return { kind: "not-sent", message: clip(e) }
+    }
+    const digest = TransactionDataBuilder.getDigestFromBytes(bytes)
+    try {
       const res = await core.signAndExecuteTransaction({ transaction: bytes, signer, include: { effects: true, objectTypes: true } })
       if (res.$kind === "Transaction") return { kind: "executed", digest: res.Transaction.digest, tx: res.Transaction }
       return { kind: "failed", digest: res.FailedTransaction.digest, tx: res.FailedTransaction }
     } catch (e) {
-      return { kind: "thrown", message: (e instanceof Error ? e.message : String(e)).replace(/\s+/g, " ").slice(0, 400) }
+      return (await resolveDigest(digest)) ?? { kind: "unknown", digest, message: clip(e) }
     }
   }
 
@@ -499,8 +549,21 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
       ],
     })
     const out = await execute(tx, signer)
-    if (out.kind === "thrown") {
-      return refused(refusal("chain-error", "chain", null, `Refused before execution; no transaction was recorded. The Sui client or validators said: ${out.message}`), () => null)
+    if (out.kind === "not-sent") {
+      return refused(refusal("not-submitted", "library", null, `Refused in-process; nothing was sent to Sui. The transaction could not be built or signed, so no allowance was opened. The Sui client said: ${out.message}`), () => null)
+    }
+    if (out.kind === "unknown") {
+      const why = `Could not confirm the open: the transaction was signed and may have reached ${network}, but sweetrust-sui could not read its outcome within ${confirmTimeoutMs} ms. The allowance MAY or MAY NOT have been created, so do not retry blindly — a retry could open a SECOND allowance and double the spender's budget. Look up ${out.digest} on ${network} first. The Sui client said: ${out.message}`
+      return {
+        receipt: finish(receiptOf({
+          verb: "open", verdict: "errored", asset: assetType, allowanceId: null, digest: out.digest, ...localAt(),
+          funder, spender, amount: null, amountText: null, recipient: null,
+          limits: present.map((l) => line(l, limitValue(l, limits, scale), holder(l), "unchecked",
+            "Not confirmed: the open's outcome is unknown, so this library can vouch for nothing it holds.")),
+          refusal: null, summary: why,
+        })),
+        allowance: null,
+      }
     }
     const when = await chainTime(out.digest)
     const at = { at: new Date(Number(when.ms)).toISOString(), atSource: when.source }
@@ -604,18 +667,35 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
     const recipientsWithin = (): LimitLine => recipientsLine("within",
       `Held by the library, in-process: the payee ${shortAddress(recipient)} was checked against the allowed list before sending. ${RECIPIENTS_SUCCESSOR}`)
 
-    if (out.kind === "thrown") {
+    if (out.kind === "not-sent" || out.kind === "unknown") {
+      // Re-read the allowance first: if it is gone, a spend against it cannot have
+      // executed (its input object no longer exists), so nothing moved — a safe refusal.
       const state = await readAllowance(h.allowanceId, null)
-      const gone = state === null
-      const why = gone
-        ? `Refused before anything reached Sui's checks: allowance ${h.allowanceId} no longer exists on ${network}, so there is nothing to spend against. It was revoked (revoke deletes it), or it never existed. No transaction was recorded.`
-        : `Refused before execution; no transaction was recorded. The Sui client or validators said: ${out.message}`
-      const code: RefusalCode = gone ? "allowance-gone" : /insufficient|balance/i.test(out.message) ? "insufficient-funds" : "chain-error"
+      if (state === null) {
+        const why = `Refused: allowance ${h.allowanceId} no longer exists on ${network}, so there was nothing to spend against. It was revoked (revoke deletes it), or it never existed. No transaction was recorded.`
+        return finish(receiptOf({
+          ...base, recipient, verdict: "refused", digest: null, ...localAt(),
+          limits: present.map((l) => l === "recipients" ? recipientsWithin()
+            : line(l, limitValue(l, h.limits, scale), holder(l), "unchecked", "Not evaluated: the allowance is gone, so nothing was spent.")),
+          refusal: refusal("allowance-gone", "chain", null, why), summary: why,
+        }))
+      }
+      if (out.kind === "not-sent") {
+        const why = `Refused in-process; nothing was sent to Sui. The transaction could not be built or signed, so nothing was spent. The Sui client said: ${out.message}`
+        return finish(receiptOf({
+          ...base, recipient, verdict: "refused", digest: null, ...localAt(),
+          limits: present.map((l) => l === "recipients" ? recipientsWithin()
+            : line(l, limitValue(l, h.limits, scale), holder(l), "unchecked", "Not evaluated: nothing was sent to Sui.")),
+          refusal: refusal("not-submitted", "library", null, why), summary: why,
+        }))
+      }
+      // Signed, submitted, and the chain could not confirm the digest: the outcome is unknown.
+      const why = `Could not confirm the spend: the transaction was signed and may have reached ${network}, but sweetrust-sui could not read its outcome within ${confirmTimeoutMs} ms. The ${amountText} MAY or MAY NOT have moved, so do not retry blindly — a retry could pay twice. Look up ${out.digest} on ${network}, or call remaining(), before retrying. The Sui client said: ${out.message}`
       return finish(receiptOf({
-        ...base, recipient, verdict: "refused", digest: null, ...localAt(),
+        ...base, recipient, verdict: "errored", digest: out.digest, ...localAt(),
         limits: present.map((l) => l === "recipients" ? recipientsWithin()
-          : line(l, limitValue(l, h.limits, scale), holder(l), "unchecked", `Not evaluated: the transaction never reached Sui's checks (${gone ? "the allowance is gone" : "it was rejected before execution"}).`)),
-        refusal: refusal(code, "chain", null, why), summary: why,
+          : line(l, limitValue(l, h.limits, scale), holder(l), "unchecked", "Not confirmed: the spend's outcome is unknown.")),
+        refusal: null, summary: why,
       }))
     }
 
@@ -687,12 +767,18 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
     const byValue = (objectId: string) => tx.object({ $kind: "UnresolvedObject", UnresolvedObject: { objectId, mutable: true } })
     tx.moveCall({ target: "0x2::allowance::revoke", typeArguments: [balanceType(h.asset)], arguments: [byValue(h.capId), byValue(h.allowanceId)] })
     const out = await execute(tx, signer)
-    if (out.kind === "thrown") {
+    if (out.kind === "not-sent" || out.kind === "unknown") {
       const state = await readAllowance(h.allowanceId, null)
-      const why = state === null
-        ? `Refused before execution: allowance ${h.allowanceId} no longer exists on ${network}; it was already revoked. No transaction was recorded.`
-        : `Refused before execution; no transaction was recorded. Only the funder ${h.funder}, who holds the AllowanceCap ${h.capId}, can revoke. The Sui client or validators said: ${out.message}`
-      return finish(receiptOf({ ...base, verdict: "refused", digest: null, ...localAt(), limits: [], refusal: refusal(state === null ? "allowance-gone" : "chain-error", "chain", null, why), summary: why }))
+      if (state === null) {
+        const why = `Refused: allowance ${h.allowanceId} no longer exists on ${network}; it was already revoked, so there is nothing to revoke. No transaction was recorded.`
+        return finish(receiptOf({ ...base, verdict: "refused", digest: null, ...localAt(), limits: [], refusal: refusal("allowance-gone", "chain", null, why), summary: why }))
+      }
+      if (out.kind === "not-sent") {
+        const why = `Refused in-process; nothing was sent to Sui. The revoke could not be built or signed. Only the funder ${h.funder}, who holds the AllowanceCap ${h.capId}, can revoke. The Sui client said: ${out.message}`
+        return finish(receiptOf({ ...base, verdict: "refused", digest: null, ...localAt(), limits: [], refusal: refusal("not-submitted", "library", null, why), summary: why }))
+      }
+      const why = `Could not confirm the revoke: the transaction was signed and may have reached ${network}, but sweetrust-sui could not read its outcome within ${confirmTimeoutMs} ms. The allowance MAY or MAY NOT still be live. Look up ${out.digest} on ${network}, or call remaining(), before relying on it. The Sui client said: ${out.message}`
+      return finish(receiptOf({ ...base, verdict: "errored", digest: out.digest, ...localAt(), limits: [], refusal: null, summary: why }))
     }
     const when = await chainTime(out.digest)
     const at = { at: new Date(Number(when.ms)).toISOString(), atSource: when.source }

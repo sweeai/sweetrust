@@ -8,7 +8,7 @@
  * simulated refusal leaves no digest.
  */
 import type { ClientWithCoreApi } from "@mysten/sui/client"
-import { Transaction } from "@mysten/sui/transactions"
+import { Transaction, TransactionDataBuilder } from "@mysten/sui/transactions"
 import { normalizeSuiAddress } from "@mysten/sui/utils"
 import { encodeAllowance, encodeClock, type AllowanceState } from "../../src/allowance-move.ts"
 
@@ -21,11 +21,21 @@ export const ALLOWANCE_ID = normalizeSuiAddress("0xa110")
 export const CAP_ID = normalizeSuiAddress("0xca9")
 const COIN_ID = normalizeSuiAddress("0xc017")
 
+/** How a scripted transaction finalizes on chain (its digest is supplied by the caller or derived). */
+export type Finalization =
+  | { kind: "executed"; timestampMs: number; after?: AllowanceState | null; created?: boolean }
+  | { kind: "abort"; timestampMs: number; abortName: string; errorCode: number; message?: string }
+  | { kind: "failed"; timestampMs: number; error: Record<string, unknown> }
+
 export type Scripted =
-  | { kind: "executed"; digest: string; timestampMs: number; after?: AllowanceState | null; created?: boolean }
-  | { kind: "abort"; digest: string; timestampMs: number; abortName: string; errorCode: number; message?: string }
-  | { kind: "failed"; digest: string; timestampMs: number; error: Record<string, unknown> }
-  | { kind: "throw"; message: string; after?: AllowanceState | null }
+  | ({ digest: string } & Finalization)
+  /**
+   * signAndExecuteTransaction throws. `after` sets the state the throw leaves
+   * behind; `finalizes` makes the signed transaction ALSO land on chain under
+   * its derived digest — the dangerous case where the response was lost but the
+   * money moved, so waitForTransaction can later confirm it.
+   */
+  | { kind: "throw"; message: string; after?: AllowanceState | null; finalizes?: Finalization }
 
 export interface MockChain {
   readonly client: ClientWithCoreApi
@@ -35,11 +45,49 @@ export interface MockChain {
   readonly script: Array<Scripted>
   readonly executed: Array<{ bytes: Uint8Array; sender: string }>
   readonly simulated: Array<unknown>
+  /** When true, the gas-coin reads throw, so `tx.build()` fails before anything is signed. */
+  breakBuild?: boolean
 }
 
 export function mockChain(initial: AllowanceState | null, clockMs: bigint): MockChain {
   const chain: MockChain = { client: undefined as unknown as ClientWithCoreApi, state: initial, clockMs, script: [], executed: [], simulated: [] }
   const txTime = new Map<string, number>()
+  // Digests the fullnode would answer for: a tx finalizes only once it is here.
+  const finalized = new Map<string, { kind: "Transaction" | "FailedTransaction"; tx: Record<string, unknown> }>()
+
+  /** Build the TransactionResult a scripted finalization returns, keyed by its digest. */
+  const buildResult = (fin: Finalization, digest: string): { $kind: "Transaction" | "FailedTransaction"; Transaction?: Record<string, unknown>; FailedTransaction?: Record<string, unknown> } => {
+    const base = { digest, signatures: [], epoch: "900", timestampMs: null, checkpoint: null, balanceChanges: undefined, events: undefined, transaction: undefined, bcs: undefined }
+    if (fin.kind === "executed") {
+      const effects = fin.created
+        ? { changedObjects: [
+            { objectId: ALLOWANCE_ID, idOperation: "Created", outputOwner: { $kind: "Shared" } },
+            { objectId: CAP_ID, idOperation: "Created", outputOwner: { $kind: "AddressOwner" } },
+          ] }
+        : { changedObjects: [] }
+      const objectTypes = fin.created
+        ? { [ALLOWANCE_ID]: "0x2::allowance::Allowance<0x2::balance::Balance<0x2::sui::SUI>>", [CAP_ID]: "0x2::allowance::AllowanceCap<0x2::balance::Balance<0x2::sui::SUI>>" }
+        : {}
+      return { $kind: "Transaction", Transaction: { ...base, status: { success: true, error: null }, effects, objectTypes } }
+    }
+    const error = fin.kind === "abort"
+      ? {
+          $kind: "MoveAbort",
+          message: fin.message ?? `MoveAbort in 1st command, '${fin.abortName}'`,
+          MoveAbort: {
+            abortCode: "13836185853565075465",
+            location: { package: "0x0000000000000000000000000000000000000000000000000000000000000002", module: "allowance", functionName: "consume" },
+            cleverError: { constantName: fin.abortName, errorCode: fin.errorCode },
+          },
+        }
+      : fin.error
+    return { $kind: "FailedTransaction", FailedTransaction: { ...base, status: { success: false, error }, effects: { changedObjects: [] }, objectTypes: {} } }
+  }
+
+  const register = (res: ReturnType<typeof buildResult>, digest: string, timestampMs: number): void => {
+    txTime.set(digest, timestampMs)
+    finalized.set(digest, { kind: res.$kind, tx: (res.$kind === "Transaction" ? res.Transaction : res.FailedTransaction) as Record<string, unknown> })
+  }
 
   const objectFor = (id: string): Record<string, unknown> | Error => {
     const nid = normalizeSuiAddress(id)
@@ -59,8 +107,14 @@ export function mockChain(initial: AllowanceState | null, clockMs: bigint): Mock
     getObjects: async ({ objectIds }: { objectIds: Array<string> }) => ({ objects: objectIds.map(objectFor) }),
     getCurrentSystemState: async () => ({ systemState: { referenceGasPrice: "1000", epoch: "900" } }),
     getChainIdentifier: async () => ({ chainIdentifier: DIGEST(3) }),
-    getBalance: async () => ({ balance: { coinType: "0x2::sui::SUI", balance: "100000000", coinBalance: "100000000", addressBalance: "0" } }),
-    listCoins: async () => ({ objects: [{ objectId: COIN_ID, version: "7", digest: DIGEST(1), balance: "100000000", coinType: "0x2::sui::SUI" }], hasNextPage: false, cursor: null }),
+    getBalance: async () => {
+      if (chain.breakBuild) throw new Error("mock-chain: gas balance lookup failed (breakBuild)")
+      return { balance: { coinType: "0x2::sui::SUI", balance: "100000000", coinBalance: "100000000", addressBalance: "0" } }
+    },
+    listCoins: async () => {
+      if (chain.breakBuild) throw new Error("mock-chain: gas coin lookup failed (breakBuild)")
+      return { objects: [{ objectId: COIN_ID, version: "7", digest: DIGEST(1), balance: "100000000", coinType: "0x2::sui::SUI" }], hasNextPage: false, cursor: null }
+    },
     simulateTransaction: async (o: unknown) => {
       chain.simulated.push(o)
       throw new Error("mock-chain: the adapter simulated a transaction; it must execute it instead")
@@ -81,41 +135,28 @@ export function mockChain(initial: AllowanceState | null, clockMs: bigint): Mock
       const next = chain.script.shift()
       if (next === undefined) throw new Error("mock-chain: no scripted result left")
       if (next.kind === "throw") {
+        // The response is lost. If `finalizes` is set, the signed tx still landed
+        // under its derived digest, so waitForTransaction can confirm it later.
+        if (next.finalizes !== undefined) {
+          const digest = TransactionDataBuilder.getDigestFromBytes(transaction)
+          register(buildResult(next.finalizes, digest), digest, next.finalizes.timestampMs)
+        }
         if (next.after !== undefined) chain.state = next.after
         throw new Error(next.message)
       }
-      txTime.set(next.digest, next.timestampMs)
-      const base = { digest: next.digest, signatures: [], epoch: "900", timestampMs: null, checkpoint: null, balanceChanges: undefined, events: undefined, transaction: undefined, bcs: undefined }
-      if (next.kind === "executed") {
-        if (next.after !== undefined) chain.state = next.after
-        const effects = next.created
-          ? { changedObjects: [
-              { objectId: ALLOWANCE_ID, idOperation: "Created", outputOwner: { $kind: "Shared" } },
-              { objectId: CAP_ID, idOperation: "Created", outputOwner: { $kind: "AddressOwner" } },
-            ] }
-          : { changedObjects: [] }
-        const objectTypes = next.created
-          ? { [ALLOWANCE_ID]: "0x2::allowance::Allowance<0x2::balance::Balance<0x2::sui::SUI>>", [CAP_ID]: "0x2::allowance::AllowanceCap<0x2::balance::Balance<0x2::sui::SUI>>" }
-          : {}
-        return { $kind: "Transaction", Transaction: { ...base, status: { success: true, error: null }, effects, objectTypes } }
-      }
-      const error = next.kind === "abort"
-        ? {
-            $kind: "MoveAbort",
-            message: next.message ?? `MoveAbort in 1st command, '${next.abortName}'`,
-            MoveAbort: {
-              abortCode: "13836185853565075465",
-              location: { package: "0x0000000000000000000000000000000000000000000000000000000000000002", module: "allowance", functionName: "consume" },
-              cleverError: { constantName: next.abortName, errorCode: next.errorCode },
-            },
-          }
-        : next.error
-      return { $kind: "FailedTransaction", FailedTransaction: { ...base, status: { success: false, error }, effects: { changedObjects: [] }, objectTypes: {} } }
+      const res = buildResult(next, next.digest)
+      register(res, next.digest, next.timestampMs)
+      if (next.kind === "executed" && next.after !== undefined) chain.state = next.after
+      return res
     },
-    waitForTransaction: async ({ digest }: { digest: string }) => ({
-      $kind: "Transaction",
-      Transaction: { digest, timestampMs: txTime.get(digest) ?? null, status: { success: true, error: null } },
-    }),
+    // The fullnode only answers for a digest that finalized; everything else is
+    // "not found", exactly as a genuinely-unsent transaction would be.
+    waitForTransaction: async ({ digest }: { digest: string }) => {
+      const f = finalized.get(digest)
+      if (f === undefined) throw new Error(`mock-chain: transaction ${digest} not found`)
+      const tx = { ...f.tx, timestampMs: txTime.get(digest) ?? null }
+      return f.kind === "Transaction" ? { $kind: "Transaction" as const, Transaction: tx } : { $kind: "FailedTransaction" as const, FailedTransaction: tx }
+    },
   }
   ;(chain as { client: ClientWithCoreApi }).client = { core } as unknown as ClientWithCoreApi
   return chain

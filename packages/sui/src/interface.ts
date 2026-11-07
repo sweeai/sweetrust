@@ -89,6 +89,8 @@ export type RefusalCode =
   /** The allowance no longer exists: revoked, or never opened. */
   | "allowance-gone"
   | "insufficient-funds"
+  /** The transaction could not be built or signed, so nothing was sent; the library refused in-process. */
+  | "not-submitted"
   /** The chain refused for a reason this library does not classify; `native` and `why` quote it. */
   | "chain-error"
 
@@ -145,16 +147,32 @@ export type Verb = "open" | "spend" | "revoke"
 /**
  * The record every verb returns. JSON-safe: amounts are base-unit strings,
  * times are ISO strings, absent values are null.
+ *
+ * `verdict` is a RETRY CONTRACT, not just a label:
+ * - `executed`: it happened. The chain finalized the transaction.
+ * - `refused`: it provably did NOT happen — nothing moved. Either the library
+ *   refused in-process before sending, or the chain rejected it (a failed
+ *   transaction, or an input that no longer exists). Safe to act on and, where
+ *   the refusal was transient, safe to retry.
+ * - `errored`: UNKNOWN. The transaction was signed and may have reached the
+ *   chain, but this adapter could not read its outcome. It MAY have executed.
+ *   Do not retry blindly — a blind retry can pay twice or open a second
+ *   allowance. The `digest` is set so the outcome can be looked up on chain, or
+ *   read back with `remaining()`, before anything is retried.
  */
 export interface AllowanceReceipt {
   readonly schema: "sweetrust-sui/receipt@1"
   readonly verb: Verb
-  readonly verdict: "executed" | "refused"
+  readonly verdict: "executed" | "refused" | "errored"
   readonly network: Caip2
   readonly asset: string
-  /** The allowance object, or null when an open was refused before anything was sent. */
+  /** The allowance object, or null when an open was refused or could not be confirmed before anything was sent. */
   readonly allowanceId: string | null
-  /** The transaction digest, or null when nothing was sent. A refused spend that reached the chain has one. */
+  /**
+   * The transaction digest, or null when nothing was sent. A refused spend that
+   * reached the chain has one; an `errored` receipt carries the digest derived
+   * from the signed transaction, so the real outcome can be looked up on chain.
+   */
   readonly digest: string | null
   /** A public explorer page for the digest, or null. */
   readonly explorer: string | null

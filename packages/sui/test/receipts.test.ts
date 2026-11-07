@@ -405,6 +405,93 @@ describe("receipts on a SweeTrust SignedReceiptLog", () => {
   })
 })
 
+// ── A submit that throws after signing ────────────────────────────────────────
+
+describe("a thrown submit is resolved by digest, never guessed to be a refusal", () => {
+  it("spend: the response is lost but the transaction finalized → `executed`, not refused (no double-pay)", async () => {
+    const after = allowanceState({ funder: P, spender: A, rate: windowed(testUSD.of(10), ANCHOR) })
+    const chain = mockChain(allowanceState({ funder: P, spender: A, rate: windowed(0n, ANCHOR) }), BigInt(ANCHOR + 1000))
+    chain.script.push({ kind: "throw", message: "fetch failed: socket hang up", after, finalizes: { kind: "executed", timestampMs: ANCHOR + 1000, after } })
+    const r = await adapter(chain).spend({ signer: agent, allowance: handle({ rate: RATE }), amount: testUSD.of(10), recipient: MERCHANT })
+    expect(r).toMatchObject({ verdict: "executed", refusal: null })
+    expect(r.digest).not.toBeNull()
+    expect(r.summary).toContain("Sent 10.00 testUSD")
+  })
+
+  it("spend: the response is lost and nothing landed → `errored` with the digest, warning against a blind retry", async () => {
+    const chain = mockChain(allowanceState({ funder: P, spender: A, rate: windowed(0n, ANCHOR) }), BigInt(ANCHOR + 1000))
+    chain.script.push({ kind: "throw", message: "fetch failed: ETIMEDOUT" })
+    const r = await adapter(chain).spend({ signer: agent, allowance: handle({ rate: RATE }), amount: testUSD.of(10), recipient: MERCHANT })
+    expect(r).toMatchObject({ verdict: "errored", refusal: null })
+    expect(r.digest).not.toBeNull()
+    expect(r.summary).toContain("do not retry blindly")
+    expect(r.summary).toContain("pay twice")
+    expect(lineOf(r, "rate")).toMatchObject({ verdict: "unchecked" })
+  })
+
+  it("spend: a build failure sends nothing → refused by the library, never a chain refusal", async () => {
+    const chain = mockChain(allowanceState({ funder: P, spender: A, rate: windowed(0n, ANCHOR) }), BigInt(ANCHOR))
+    chain.breakBuild = true
+    const r = await adapter(chain).spend({ signer: agent, allowance: handle({ rate: RATE }), amount: testUSD.of(10), recipient: MERCHANT })
+    expect(chain.executed).toHaveLength(0)
+    expect(r).toMatchObject({ verdict: "refused", digest: null })
+    expect(r.refusal).toMatchObject({ code: "not-submitted", refusedBy: "library", native: null })
+  })
+
+  it("spend: the response is lost and the allowance is gone → `allowance-gone`, because a spend cannot execute against a deleted object", async () => {
+    const chain = mockChain(null, 0n)
+    chain.script.push({ kind: "throw", message: "The following input objects are invalid: deleted" })
+    const r = await adapter(chain).spend({ signer: agent, allowance: handle({ rate: RATE }), amount: 1n, recipient: MERCHANT })
+    expect(r).toMatchObject({ verdict: "refused", digest: null })
+    expect(r.refusal).toMatchObject({ code: "allowance-gone", refusedBy: "chain" })
+  })
+
+  it("open: the response is lost but the allowance WAS created → the real allowance, not a false refusal (no double-open)", async () => {
+    const chain = mockChain(null, 0n)
+    chain.script.push({ kind: "throw", message: "fetch failed: socket hang up", finalizes: { kind: "executed", timestampMs: ANCHOR, created: true } })
+    const { receipt, allowance } = await adapter(chain).open({
+      signer: principal,
+      allowance: { network: "sui:testnet", asset: "0x2::sui::SUI", spender: A, limits: { rate: { amount: testUSD.of(30), windowMs: DAY } } },
+    })
+    expect(receipt.verdict).toBe("executed")
+    expect(allowance?.allowanceId).toBe(ALLOWANCE_ID)
+    expect(receipt.digest).not.toBeNull()
+  })
+
+  it("open: the response is lost and nothing landed → `errored`, allowance null, warning against a second allowance", async () => {
+    const chain = mockChain(null, 0n)
+    chain.script.push({ kind: "throw", message: "fetch failed: ETIMEDOUT" })
+    const { receipt, allowance } = await adapter(chain).open({
+      signer: principal,
+      allowance: { network: "sui:testnet", asset: "0x2::sui::SUI", spender: A, limits: { rate: { amount: testUSD.of(30), windowMs: DAY } } },
+    })
+    expect(receipt.verdict).toBe("errored")
+    expect(allowance).toBeNull()
+    expect(receipt.digest).not.toBeNull()
+    expect(receipt.summary).toContain("double the spender's budget")
+  })
+
+  it("revoke: the response is lost and nothing landed → `errored`, not a false 'still live' refusal", async () => {
+    const chain = mockChain(allowanceState({ funder: P, spender: A, rate: windowed(0n, ANCHOR) }), BigInt(ANCHOR))
+    chain.script.push({ kind: "throw", message: "fetch failed: ETIMEDOUT" })
+    const r = await adapter(chain).revoke({ signer: principal, allowance: handle({ rate: RATE }) })
+    expect(r).toMatchObject({ verdict: "errored", refusal: null })
+    expect(r.digest).not.toBeNull()
+  })
+
+  it("an errored receipt lands on the SignedReceiptLog as an `errored` decision, and the chain still verifies", async () => {
+    const keys = generateSigningKeypair()
+    const signer = makeEd25519ReceiptSigner(keys)
+    const log = new SignedReceiptLog(signer)
+    const chain = mockChain(allowanceState({ funder: P, spender: A, rate: windowed(0n, ANCHOR) }), BigInt(ANCHOR))
+    chain.script.push({ kind: "throw", message: "fetch failed: ETIMEDOUT" })
+    const r = await adapter(chain, log).spend({ signer: agent, allowance: handle({ rate: RATE }), amount: testUSD.of(10), recipient: MERCHANT })
+    expect(r.verdict).toBe("errored")
+    expect(log.all()[0]).toMatchObject({ sink: "sweetrust-sui.spend", decision: "errored" })
+    expect(verifySignedChain(log.signed(), { trustedSignerPublicKeyHex: signer.publicKeyHex })).toMatchObject({ valid: true, reason: "ok" })
+  })
+})
+
 // ── Intake ───────────────────────────────────────────────────────────────────
 
 describe("intake: each argument field is read once", () => {
