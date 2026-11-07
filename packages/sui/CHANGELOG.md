@@ -78,5 +78,9 @@ on mainnet; this package has spent only on testnet). Tested against `@mysten/sui
   `≈24.00 testUSD (2,400,049 base units)`, so the sums in a `why` stay true. Exact amounts read as
   before.
 - Nothing that runs after a transaction is sent can throw away its receipt: a custom `explorer`
-  function that throws costs the receipt its link, a malformed `explorer` or `scale` is refused
-  when the adapter is created, and a rate window of any value can be written into a receipt.
+  function that throws costs the receipt its link; a `now` clock that throws or returns a fraction
+  falls back to the system clock; a malformed `explorer`, `scale` or `now` is refused when the
+  adapter is created; a rate window of any value can be written into a receipt; and an `open()`
+  whose effects cannot be read is `errored`, with its digest, instead of throwing.
+- A chain-held limit that the handle passed to `spend()` claims but the allowance on chain does not
+  hold is shown as `unchecked` ("none on chain"), never as a zero limit Sui checked.

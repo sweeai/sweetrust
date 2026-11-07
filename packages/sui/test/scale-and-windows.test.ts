@@ -21,6 +21,7 @@ describe("scales", () => {
     expect(testUSD.format(-1_234n)).toBe("≈-0.01 testUSD (-1,234 base units)")
     expect(testUSD.format(2_401_000n)).toBe("24.01 testUSD")
     expect(SUI.format(1n)).toBe("0.000000001 SUI")
+    expect(testUSD.format(1n)).toBe("≈0.00 testUSD (1 base unit)")
   })
   it("converts display amounts exactly, never through a float", () => {
     expect(testUSD.of(24)).toBe(2_400_000n)

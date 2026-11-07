@@ -52,7 +52,7 @@ export function defineScale(args: { unit: string; baseUnitsPerUnit: bigint; deci
     // A rounded amount says so and carries its exact base units, so the sums in
     // a receipt's WHY stay true: "≈24.00 testUSD (2,400,049 base units)" never
     // reads as exactly 24.00 beside a cap of 24.00.
-    if ((abs * pow10(decimals)) % per !== 0n) return `≈${sign}${digits} ${unit} (${sign}${abs.toLocaleString("en-US")} base units)`
+    if ((abs * pow10(decimals)) % per !== 0n) return `≈${sign}${digits} ${unit} (${sign}${abs.toLocaleString("en-US")} base unit${abs === 1n ? "" : "s"})`
     return `${sign}${digits} ${unit}`
   }
 

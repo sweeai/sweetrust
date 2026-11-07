@@ -651,14 +651,81 @@ describe("an SDK that stops consulting resolveTransactionPlugin gets nothing sen
     const chain = mockChain(allowanceState({ funder: P, spender: A, rate: windowed(0n, null) }), 0n)
     // Stands in for a future @mysten/sui that resolves without the lookup the bypass relies on.
     const build = vi.spyOn(Transaction.prototype, "build").mockResolvedValueOnce(new Uint8Array([1, 2, 3]))
+    const submit = vi.spyOn(chain.client.core, "signAndExecuteTransaction")
     try {
       const r = await adapter(chain).spend({ signer: agent, allowance: handle({ rate: RATE }), amount: testUSD.of(1), recipient: MERCHANT })
-      expect(chain.executed).toHaveLength(0)
+      expect(submit).not.toHaveBeenCalled()
       expect(r).toMatchObject({ verdict: "refused", digest: null })
       expect(r.refusal).toMatchObject({ code: "not-submitted", refusedBy: "library", native: null })
+      expect(r.refusal?.why).toContain("sweetrust-sui stopped before signing")
       expect(r.refusal?.why).toContain("resolveTransactionPlugin")
+      expect(r.refusal?.why).not.toContain("The Sui client said")
     } finally {
       build.mockRestore()
+      submit.mockRestore()
     }
+  })
+})
+
+// ── The blind review of the also-dos (2026-11-07) ────────────────────────────
+
+describe("no host-supplied or chain-supplied oddity can lose a receipt after a send", () => {
+  it("a host clock that returns a fraction, or throws, still yields the `errored` receipt", async () => {
+    for (const now of [() => LOCAL_NOW + 0.5, () => { throw new Error("clock broke") }]) {
+      const chain = mockChain(allowanceState({ funder: P, spender: A, rate: windowed(0n, ANCHOR) }), BigInt(ANCHOR + 1000))
+      chain.script.push({ kind: "throw", message: "fetch failed: ETIMEDOUT" })
+      const a = suiAllowances({ client: chain.client, network: "sui:testnet", scale: testUSD, now })
+      const r = await a.spend({ signer: agent, allowance: handle({ rate: RATE }), amount: testUSD.of(10), recipient: MERCHANT })
+      expect(r.verdict).toBe("errored")
+      expect(r.digest).not.toBeNull()
+    }
+  })
+
+  it("`now` that is not a function (Date.now() instead of Date.now) is refused when the adapter is made", () => {
+    const chain = mockChain(null, 0n)
+    expect(() => suiAllowances({ client: chain.client, network: "sui:testnet", now: Date.now() as never })).toThrow(/not Date\.now\(\)/)
+  })
+
+  it("open(): an executed transaction whose effects name no allowance is `errored` with its digest, never a throw", async () => {
+    const chain = mockChain(null, 0n)
+    chain.script.push({ kind: "executed", digest: DIGEST(0), timestampMs: ANCHOR })
+    const { receipt, allowance } = await adapter(chain).open({
+      signer: principal,
+      allowance: { network: "sui:testnet", asset: "0x2::sui::SUI", spender: A, limits: { rate: RATE } },
+    })
+    expect(allowance).toBeNull()
+    expect(receipt).toMatchObject({ verdict: "errored", digest: DIGEST(0), refusal: null })
+    expect(receipt.summary).toContain("SECOND allowance")
+  })
+
+  it("the chain check survives a client that answers nothing or throws synchronously, and asks again next time", async () => {
+    const chain = mockChain(allowanceState({ funder: P, spender: A, rate: windowed(0n, null) }), 0n)
+    chain.chainIdentifier = undefined as never
+    const a = adapter(chain)
+    const first = await a.revoke({ signer: principal, allowance: handle({ rate: RATE }) })
+    expect(first.refusal).toMatchObject({ code: "not-submitted", refusedBy: "library" })
+    expect(first.refusal?.why).toContain("no chain identifier")
+    const core = chain.client.core as unknown as { getChainIdentifier: () => unknown }
+    const original = core.getChainIdentifier
+    core.getChainIdentifier = () => { throw new Error("sync boom") }
+    const second = await a.revoke({ signer: principal, allowance: handle({ rate: RATE }) })
+    expect(second.refusal).toMatchObject({ code: "not-submitted" })
+    expect(second.refusal?.why).toContain("sync boom")
+    core.getChainIdentifier = original
+    chain.chainIdentifier = MAINNET_GENESIS
+    const third = await a.revoke({ signer: principal, allowance: handle({ rate: RATE }) })
+    expect(third.refusal).toMatchObject({ code: "wrong-network" })
+    expect(chain.executed).toHaveLength(0)
+  })
+
+  it("a cap the handle claims but the chain does not hold is shown as unchecked, never as a zero cap Sui checked", async () => {
+    const before = allowanceState({ funder: P, spender: A, rate: windowed(0n, null) })
+    const chain = mockChain(before, 0n)
+    chain.script.push({ kind: "executed", digest: DIGEST(1), timestampMs: ANCHOR, after: { ...before, currentSpend: testUSD.of(1), rate: windowed(testUSD.of(1), ANCHOR) } })
+    const r = await adapter(chain).spend({ signer: agent, allowance: handle({ lifetimeCap: testUSD.of(100), rate: RATE }), amount: testUSD.of(1), recipient: MERCHANT })
+    expect(r.verdict).toBe("executed")
+    expect(lineOf(r, "lifetimeCap")).toMatchObject({ value: "none on chain", heldBy: "chain", verdict: "unchecked" })
+    expect(lineOf(r, "lifetimeCap").why).toContain("holds no")
+    expect(lineOf(r, "lifetimeCap").why).not.toContain("0.00 testUSD cap")
   })
 })

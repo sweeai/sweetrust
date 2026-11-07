@@ -251,6 +251,7 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
   if (typeof gasBudget !== "bigint" || gasBudget <= 0n) throw typeErr("suiAllowances", "gasBudget must be a positive bigint (MIST)")
   if (typeof confirmTimeoutMs !== "number" || !Number.isFinite(confirmTimeoutMs) || confirmTimeoutMs < 0) throw typeErr("suiAllowances", "confirmTimeoutMs must be a non-negative number of milliseconds")
   if (log !== undefined && (typeof log !== "object" || log === null || typeof log.append !== "function")) throw typeErr("suiAllowances", "log must be a ReceiptLog (an object with append())")
+  if (options.now !== undefined && typeof options.now !== "function") throw typeErr("suiAllowances", "now must be a function returning epoch milliseconds, e.g. Date.now (not Date.now())")
   if (explorerOpt !== undefined && explorerOpt !== null && typeof explorerOpt !== "function") throw typeErr("suiAllowances", "explorer must be a function (network, digest) => string | null, or null")
   if (scaleOpt !== undefined && (typeof scaleOpt !== "object" || scaleOpt === null || typeof scaleOpt.format !== "function")) throw typeErr("suiAllowances", "scale must be a Scale from defineScale()")
   const explorer = explorerOpt === undefined ? defaultExplorer : explorerOpt
@@ -323,7 +324,21 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
     summary: f.summary,
   })
 
-  const localAt = (): { at: string; atSource: "local" } => ({ at: new Date(localNow()).toISOString(), atSource: "local" })
+  /**
+   * The local clock, as whole milliseconds. It runs after sends (an `errored`
+   * receipt, a missing chain timestamp), so it may not throw: a host's clock that
+   * throws or returns a fraction or NaN falls back to the system clock.
+   */
+  const nowLocal = (): number => {
+    try {
+      const v = localNow()
+      if (typeof v === "number" && Number.isFinite(v)) return Math.floor(v)
+    } catch {
+      // fall through to the system clock
+    }
+    return Date.now()
+  }
+  const localAt = (): { at: string; atSource: "local" } => ({ at: new Date(nowLocal()).toISOString(), atSource: "local" })
 
   // ── Chain I/O ──
 
@@ -381,7 +396,7 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
       await sleep(750)
     }
     const clock = await readClockMs()
-    return clock === null ? { ms: BigInt(localNow()), source: "local" } : { ms: clock, source: "chain" }
+    return clock === null ? { ms: BigInt(nowLocal()), source: "local" } : { ms: clock, source: "chain" }
   }
 
   type Executed = {
@@ -390,11 +405,14 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
     readonly tx: SuiClientTypes.Transaction<Include>
   }
   /** Build or sign threw: the transaction was never signed, so nothing reached Sui. Safe to refuse. */
-  type NotSent = { readonly kind: "not-sent"; readonly message: string }
+  /** `own`: the adapter stopped before signing, so the message is its own, not the client's. */
+  type NotSent = { readonly kind: "not-sent"; readonly message: string; readonly own?: true }
   /** Submit threw AFTER signing, and the chain could not confirm the digest: the outcome is unknown. */
   type Unknown = { readonly kind: "unknown"; readonly digest: string; readonly message: string }
   type Outcome = Executed | NotSent | Unknown
 
+  /** Who said why nothing was sent: the client's error, or the adapter's own stop. */
+  const notSentWords = (o: NotSent): string => o.own === true ? `sweetrust-sui stopped before signing: ${o.message}` : `The Sui client said: ${o.message}`
   const clip = (e: unknown): string => (e instanceof Error ? e.message : String(e)).replace(/\s+/g, " ").slice(0, 400)
 
   /**
@@ -443,17 +461,19 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
     const expected = GENESIS[network]
     if (expected === undefined) return Promise.resolve(null)
     if (chainCheck === null) {
-      chainCheck = core.getChainIdentifier().then(
-        (r) => {
-          if (r.chainIdentifier === expected) return null
-          const known = Object.keys(GENESIS).find((k) => GENESIS[k] === r.chainIdentifier)
-          return { code: "wrong-network", reason: `This adapter is set up for ${network}, but its Sui client is connected to ${known ?? `another chain (genesis checkpoint ${r.chainIdentifier})`}; a receipt from it would name the wrong network.` }
-        },
-        (e: unknown) => {
+      chainCheck = Promise.resolve()
+        .then(() => core.getChainIdentifier())
+        .then((r) => {
+          const id: unknown = r?.chainIdentifier
+          if (typeof id !== "string") throw new Error("the client returned no chain identifier")
+          if (id === expected) return null
+          const known = Object.keys(GENESIS).find((k) => GENESIS[k] === id)
+          return { code: "wrong-network" as RefusalCode, reason: `This adapter is set up for ${network}, but its Sui client is connected to ${known ?? `another chain (genesis checkpoint ${id})`}; a receipt from it would name the wrong network.` }
+        })
+        .catch((e: unknown) => {
           chainCheck = null
-          return { code: "not-submitted", reason: `This adapter could not confirm that its Sui client is connected to ${network}. The Sui client said: ${clip(e)}` }
-        },
-      )
+          return { code: "not-submitted" as RefusalCode, reason: `This adapter could not confirm that its Sui client is connected to ${network}. The Sui client said: ${clip(e)}` }
+        })
     }
     return chainCheck
   }
@@ -493,7 +513,7 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
       tx.setGasBudgetIfNotSet(gasBudget)
       const b = buildClientFor()
       bytes = await tx.build({ client: b.client })
-      if (!b.consulted()) return { kind: "not-sent", message: RESOLVER_UNCONSULTED }
+      if (!b.consulted()) return { kind: "not-sent", message: RESOLVER_UNCONSULTED, own: true }
     } catch (e) {
       return { kind: "not-sent", message: clip(e) }
     }
@@ -647,7 +667,7 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
     })
     const out = await execute(tx, signer)
     if (out.kind === "not-sent") {
-      return refused(refusal("not-submitted", "library", null, `Refused in-process; nothing was sent to Sui. The transaction could not be built or signed, so no allowance was opened. The Sui client said: ${out.message}`), () => null)
+      return refused(refusal("not-submitted", "library", null, `Refused in-process; nothing was sent to Sui. The transaction could not be built or signed, so no allowance was opened. ${notSentWords(out)}`), () => null)
     }
     if (out.kind === "unknown") {
       const why = `Could not confirm the open: the transaction was signed and may have reached ${network}, but sweetrust-sui could not read its outcome within ${confirmTimeoutMs} ms. The allowance MAY or MAY NOT have been created, so do not retry blindly — a retry could open a SECOND allowance and double the spender's budget. Look up ${out.digest} on ${network} first. The Sui client said: ${out.message}`
@@ -691,7 +711,18 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
       else if (t === "" && c.outputOwner?.$kind === "AddressOwner") capId = normAddr(c.objectId)
     }
     if (allowanceId === null || capId === null) {
-      throw new Error(`sweetrust-sui open: transaction ${out.digest} executed but its effects name no Allowance/AllowanceCap; inspect it on an explorer`)
+      // The transaction executed, so something may have been opened: a throw here
+      // would lose the receipt and invite a second open. It is `errored`, with the digest.
+      const why = `Could not confirm the open: transaction ${out.digest} executed on ${network}, but sweetrust-sui could not find the Allowance and AllowanceCap among its effects. An allowance MAY have been opened, so do not retry blindly — a retry could open a SECOND allowance and double the spender's budget. Look up ${out.digest} on ${network} first.`
+      return {
+        receipt: finish(receiptOf({
+          verb: "open", verdict: "errored", asset: assetType, allowanceId, digest: out.digest, ...at,
+          funder, spender, amount: null, amountText: null, recipient: null,
+          limits: present.map((l) => line(l, limitValue(l, limits, scale), holder(l), "unchecked", "Unknown: the opened allowance could not be identified in the transaction's effects.")),
+          refusal: null, summary: why,
+        })),
+        allowance: null,
+      }
     }
     const handle: SuiAllowance = Object.freeze({ network, asset: assetType, allowanceId, capId, funder, spender, limits })
     const chainHeld = present.filter((l) => holder(l) === "chain").map(limitWords)
@@ -737,6 +768,17 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
       const chain = chainLimitValue(l, st, scale)
       const claimed = limitValue(l, h.limits, scale)
       return { value: chain, flag: chain === claimed ? "" : ` (the handle passed to spend() said ${claimed}; the chain's value shown here is authoritative.)` }
+    }
+    /**
+     * A chain-held limit the handle claims but the allowance on chain does not
+     * hold: Sui checked nothing, so the line says so instead of reading the
+     * missing value as zero.
+     */
+    const absentOnChain = (l: LimitName, st: AllowanceState | null): LimitLine | null => {
+      if (holder(l) !== "chain" || st === null) return null
+      const missing = l === "lifetimeCap" ? st.lifetimeCap === null : l === "rate" ? st.rate === null : l === "start" ? st.startMs === null : l === "expiry" ? st.expiryMs === null : false
+      if (!missing) return null
+      return line(l, "none on chain", "chain", "unchecked", `Not checked by Sui: the handle passed to spend() says ${limitValue(l, h.limits, scale)}, but allowance ${h.allowanceId} on chain holds no ${limitWords(l)}, so Sui checked none.`)
     }
     const notSent = (code: RefusalCode, why: string, own: Partial<Record<LimitName, LimitLine>> = {}): AllowanceReceipt =>
       finish(receiptOf({
@@ -792,7 +834,7 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
         }))
       }
       if (out.kind === "not-sent") {
-        const why = `Refused in-process; nothing was sent to Sui. The transaction could not be built or signed, so nothing was spent. The Sui client said: ${out.message}`
+        const why = `Refused in-process; nothing was sent to Sui. The transaction could not be built or signed, so nothing was spent. ${notSentWords(out)}`
         return finish(receiptOf({
           ...base, recipient, verdict: "refused", digest: null, ...localAt(),
           limits: present.map((l) => l === "recipients" ? recipientsWithin()
@@ -818,6 +860,8 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
     if (out.kind === "executed") {
       const lines = present.map((l) => {
         if (l === "recipients") return recipientsWithin()
+        const absent = absentOnChain(l, facts === null ? null : facts.state)
+        if (absent !== null) return absent
         const { value, flag } = heldValue(l, facts === null ? null : facts.state)
         return line(l, value, holder(l), "within", (facts === null ? "Sui checked it: the spend executed." : chainWithinWhy(l, facts)) + flag)
       })
@@ -849,6 +893,8 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
     }
     const lines = present.map((l): LimitLine => {
       if (l === "recipients") return recipientsWithin()
+      const absent = absentOnChain(l, facts === null ? null : facts.state)
+      if (absent !== null) return absent
       const { value, flag } = heldValue(l, facts === null ? null : facts.state)
       const idx = CHAIN_CHECK_ORDER.indexOf(l)
       if (failed !== null && l === failed) return line(l, value, "chain", "outside", why + flag)
@@ -893,7 +939,7 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
         return finish(receiptOf({ ...base, verdict: "refused", digest: null, ...localAt(), limits: [], refusal: refusal("allowance-gone", "chain", null, why), summary: why }))
       }
       if (out.kind === "not-sent") {
-        const why = `Refused in-process; nothing was sent to Sui. The revoke could not be built or signed. Only the funder ${h.funder}, who holds the AllowanceCap ${h.capId}, can revoke. The Sui client said: ${out.message}`
+        const why = `Refused in-process; nothing was sent to Sui. The revoke could not be built or signed. Only the funder ${h.funder}, who holds the AllowanceCap ${h.capId}, can revoke. ${notSentWords(out)}`
         return finish(receiptOf({ ...base, verdict: "refused", digest: null, ...localAt(), limits: [], refusal: refusal("not-submitted", "library", null, why), summary: why }))
       }
       const why = `Could not confirm the revoke: the transaction was signed and may have reached ${network}, but sweetrust-sui could not read its outcome within ${confirmTimeoutMs} ms. The allowance MAY or MAY NOT still be live. Look up ${out.digest} on ${network}, or call remaining(), before relying on it. The Sui client said: ${out.message}`
@@ -929,7 +975,7 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
     const scale = scaleFor(h.asset)
     const fmt = scale.format
     const [state, clock] = await Promise.all([readAllowance(h.allowanceId, null), readClockMs()])
-    const nowMs = clock ?? BigInt(localNow())
+    const nowMs = clock ?? BigInt(nowLocal())
     const at = new Date(Number(nowMs)).toISOString()
     if (state === undefined) throw new Error(`sweetrust-sui remaining: could not read allowance ${h.allowanceId} on ${network}`)
     if (state === null) {
