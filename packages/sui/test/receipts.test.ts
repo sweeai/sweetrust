@@ -492,6 +492,22 @@ describe("a thrown submit is resolved by digest, never guessed to be a refusal",
   })
 })
 
+// ── Receipts quote the chain, not the caller's handle ─────────────────────────
+
+describe("a spend receipt takes chain-held values from the chain, never the handle", () => {
+  it("shows the chain's lifetime cap (not the handle's), flags the disagreement, and reports the signer as spender", async () => {
+    const chain = mockChain(allowanceState({ funder: P, spender: A, lifetimeCap: testUSD.of(100), currentSpend: testUSD.of(10) }), BigInt(ANCHOR))
+    chain.script.push({ kind: "executed", digest: DIGEST(0), timestampMs: ANCHOR, after: allowanceState({ funder: P, spender: A, lifetimeCap: testUSD.of(100), currentSpend: testUSD.of(20) }) })
+    // The handle lies: it claims a $10 cap where the chain holds $100.
+    const r = await adapter(chain).spend({ signer: agent, allowance: handle({ lifetimeCap: testUSD.of(10) }), amount: testUSD.of(10), recipient: MERCHANT })
+    expect(r.verdict).toBe("executed")
+    const cap = lineOf(r, "lifetimeCap")
+    expect(cap.value).toBe("100.00 testUSD in total")
+    expect(cap.why).toContain("the handle passed to spend() said 10.00 testUSD in total")
+    expect(r.spender).toBe(A)
+  })
+})
+
 // ── Intake ───────────────────────────────────────────────────────────────────
 
 describe("intake: each argument field is read once", () => {

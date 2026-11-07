@@ -31,7 +31,7 @@ import {
 } from "./allowance-move.ts"
 import {
   CHAIN_CHECK_ORDER, LIMIT_BY_ABORT, PER_SPEND_UNHELD_WHY, RECIPIENTS_SUCCESSOR,
-  chainOutsideWhy, chainWithinWhy, fmtDuration, fmtTime, heldWhy, limitValue, limitWords, line,
+  chainLimitValue, chainOutsideWhy, chainWithinWhy, fmtDuration, fmtTime, heldWhy, limitValue, limitWords, line,
   periodPhrase, presentLimits, shortAddress, type SpendFacts,
 } from "./explain.ts"
 import type {
@@ -634,10 +634,20 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
     const scale = scaleFor(h.asset)
     const present = presentLimits(h.limits)
     const amountText = scale.format(amount)
+    // The receipt's spender is who actually signed, not what the handle claims.
+    const signerAddr = normAddr(signer.toSuiAddress())
 
     const base = {
-      verb: "spend" as Verb, asset: h.asset, allowanceId: h.allowanceId, funder: h.funder, spender: h.spender,
+      verb: "spend" as Verb, asset: h.asset, allowanceId: h.allowanceId, funder: h.funder, spender: signerAddr,
       amount: amount.toString(), amountText, recipient: recipientRaw,
+    }
+    // A chain-held limit's value comes from the chain object, never the handle; a
+    // disagreement is flagged on the receipt, not hidden.
+    const heldValue = (l: LimitName, st: AllowanceState | null): { value: string; flag: string } => {
+      if (holder(l) !== "chain" || st === null) return { value: limitValue(l, h.limits, scale), flag: "" }
+      const chain = chainLimitValue(l, st, scale)
+      const claimed = limitValue(l, h.limits, scale)
+      return { value: chain, flag: chain === claimed ? "" : ` (the handle passed to spend() said ${claimed}; the chain's value shown here is authoritative.)` }
     }
     const notSent = (code: RefusalCode, why: string, own: Partial<Record<LimitName, LimitLine>> = {}): AllowanceReceipt =>
       finish(receiptOf({
@@ -713,8 +723,11 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
     const facts: SpendFacts | null = state === null || state === undefined ? null : { scale, amount, nowMs: when.ms, state, executed: out.kind === "executed" }
 
     if (out.kind === "executed") {
-      const lines = present.map((l) => l === "recipients" ? recipientsWithin()
-        : line(l, limitValue(l, h.limits, scale), holder(l), "within", facts === null ? "Sui checked it: the spend executed." : chainWithinWhy(l, facts)))
+      const lines = present.map((l) => {
+        if (l === "recipients") return recipientsWithin()
+        const { value, flag } = heldValue(l, facts === null ? null : facts.state)
+        return line(l, value, holder(l), "within", (facts === null ? "Sui checked it: the spend executed." : chainWithinWhy(l, facts)) + flag)
+      })
       return finish(receiptOf({
         ...base, recipient, verdict: "executed", digest: out.digest, ...at, limits: lines, refusal: null,
         summary: `Sent ${amountText} to ${recipient} under allowance ${h.allowanceId} on ${network} (tx ${out.digest}).`,
@@ -743,12 +756,12 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
     }
     const lines = present.map((l): LimitLine => {
       if (l === "recipients") return recipientsWithin()
-      const value = limitValue(l, h.limits, scale)
+      const { value, flag } = heldValue(l, facts === null ? null : facts.state)
       const idx = CHAIN_CHECK_ORDER.indexOf(l)
-      if (failed !== null && l === failed) return line(l, value, "chain", "outside", why)
-      if (failed !== null && idx < failedAt && facts !== null) return line(l, value, "chain", "within", chainWithinWhy(l, facts))
-      if (failed !== null) return line(l, value, "chain", "unchecked", `Not evaluated: Sui checks the start, the expiry, the lifetime cap and then the rate, and stops at the first that fails; ${limitWords(failed)} failed first.`)
-      return line(l, value, "chain", "unchecked", `Not evaluated: Sui refused the transaction before its limit checks${native === null ? "" : `, on ${native.abortName}`}.`)
+      if (failed !== null && l === failed) return line(l, value, "chain", "outside", why + flag)
+      if (failed !== null && idx < failedAt && facts !== null) return line(l, value, "chain", "within", chainWithinWhy(l, facts) + flag)
+      if (failed !== null) return line(l, value, "chain", "unchecked", `Not evaluated: Sui checks the start, the expiry, the lifetime cap and then the rate, and stops at the first that fails; ${limitWords(failed)} failed first.` + flag)
+      return line(l, value, "chain", "unchecked", `Not evaluated: Sui refused the transaction before its limit checks${native === null ? "" : `, on ${native.abortName}`}.` + flag)
     })
     return finish(receiptOf({
       ...base, recipient, verdict: "refused", digest: out.digest, ...at, limits: lines,

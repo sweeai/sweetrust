@@ -79,6 +79,31 @@ export function limitValue(limit: LimitName, limits: AllowanceLimits, scale: Sca
   }
 }
 
+/**
+ * A chain-held limit's value as the ON-CHAIN object holds it, not as the caller's
+ * handle claims. A spend receipt must show the chain's numbers for a chain-held
+ * limit; the handle can be stale or hand-forged. Returns "" for limits the chain
+ * does not hold (recipients, perSpendMax), whose value legitimately comes from the handle.
+ */
+export function chainLimitValue(limit: LimitName, s: AllowanceState, scale: Scale): string {
+  switch (limit) {
+    case "lifetimeCap":
+      return `${scale.format(s.lifetimeCap ?? 0n)} in total`
+    case "rate": {
+      const r = s.rate
+      if (r === null) return "none"
+      const period = r.window.kind === "periodic" ? periodPhrase(r.window.periodMs) : `${r.window.months}-month window`
+      return `${scale.format(r.limit)} per ${period}, in fixed windows counted from the first charge`
+    }
+    case "start":
+      return s.startMs === null ? "none" : `from ${fmtTime(s.startMs)}`
+    case "expiry":
+      return s.expiryMs === null ? "none" : `until ${fmtTime(s.expiryMs)} (exclusive)`
+    default:
+      return ""
+  }
+}
+
 /** The limits this allowance actually carries, in a fixed order. */
 export function presentLimits(limits: AllowanceLimits): Array<LimitName> {
   const out: Array<LimitName> = []
