@@ -44,7 +44,7 @@ src/
 scripts/
   readme-typecheck.ts    compiles the README's ts blocks against dist/*.d.mts (a `pnpm typecheck` gate)
   forgery-typecheck.ts   proves an object literal cannot satisfy Sourced in the shipped declarations (same)
-docs/adr/         decisions with force — 0001 authority is possession · 0002 the interior hash is canonical · 0003 one delegated-allowance interface, adapters outside the kernel (packages/sui) · 0004 the audit log is bound at construction · 0005 a limit lives in the grant and is counted from the log · 0006 a mandate is resumed from the log, never re-minted at boot
+docs/adr/         decisions with force — 0001 authority is possession · 0002 the interior hash is canonical · 0003 one delegated-allowance interface, adapters outside the kernel (packages/sui) · 0004 the audit log is bound at construction · 0005 a limit lives in the grant and is counted from the log · 0006 a mandate is resumed from the log, never re-minted at boot · 0007 every sink call returns a Promise, one async path · 0008 no on-chain verdict check, an unjudged spend is made findable · 0009 receiptBody gains optional verdict and approval, unjudged receipts keep their 0.5.0 hash
 test/
   helpers/via-client.ts  the pre-0.5.0 call shape routed through createTrust, so the older suites exercise the shipped door
   index-barrel.test.ts   guards the barrel against silent export loss
