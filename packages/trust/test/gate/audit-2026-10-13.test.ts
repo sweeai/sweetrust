@@ -18,6 +18,8 @@ import { createHash } from "node:crypto"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
 import { Sourced, allowlisted, corroborate, humanConfirm, makeSink, meetsTier, minTier, ReceiptLog, type JudgmentProvider } from "../../src/gate/trust.js"
+import type { GrantedPurpose } from "../../src/purpose.ts"
+import { GRANTED } from "../helpers/granted.ts"
 
 // ── #1 HIGH — sealAncestors' forEach leaked the raw Set ──────────────────────
 // ADVERTISED (sealAncestors): "Seal a Set so the mutators throw while reads
@@ -173,7 +175,7 @@ describe("#13 — describe() tolerates a non-number confidence", () => {
     expect(nullConf().describe()).not.toContain("conf")
   })
 
-  it("an enforce sink refuses it WITH a receipt rather than crashing before one", () => {
+  it("an enforce sink refuses it WITH a receipt rather than crashing before one", async () => {
     const log = new ReceiptLog()
     let ran = 0
     const pay = makeSink<{ to: Sourced<string> }, string>({
@@ -186,7 +188,7 @@ describe("#13 — describe() tolerates a non-number confidence", () => {
         return "sent"
       },
     })
-    const r = pay({ to: nullConf() })
+    const r = await pay({ to: nullConf() })
     expect(r.ok).toBe(false)
     expect(ran).toBe(0)
     expect(log.all()).toHaveLength(1)
@@ -272,7 +274,7 @@ describe("#11 — the log owns seq, prevHash and hash; an entry cannot supply th
 // commit; what append() returns and what all() hands out is the same frozen
 // object, and nothing holding it can change what the log says.
 describe("#12 — a committed receipt is deep-frozen", () => {
-  const paid = () => {
+  const paid = async () => {
     const log = new ReceiptLog()
     const pay = makeSink<{ to: Sourced<string> }, string>({
       name: "pay",
@@ -281,12 +283,12 @@ describe("#12 — a committed receipt is deep-frozen", () => {
       log,
       execute: () => "sent",
     })
-    const r = pay({ to: Sourced.fromAuthority("ACME", "reg") })
+    const r = await pay({ to: Sourced.fromAuthority("ACME", "reg") })
     return { log, receipt: r.receipt }
   }
 
-  it("the receipt, its args bag and each argument record are frozen", () => {
-    const { log, receipt } = paid()
+  it("the receipt, its args bag and each argument record are frozen", async () => {
+    const { log, receipt } = await paid()
     expect(Object.isFrozen(receipt)).toBe(true)
     expect(Object.isFrozen(receipt.args)).toBe(true)
     expect(Object.isFrozen(receipt.args.to)).toBe(true)
@@ -294,8 +296,8 @@ describe("#12 — a committed receipt is deep-frozen", () => {
     expect(Object.isFrozen(log.all()[0])).toBe(true)
   })
 
-  it("ATTACK: the toJSON swap that kept the chain green while hiding the argument now throws", () => {
-    const { log, receipt } = paid()
+  it("ATTACK: the toJSON swap that kept the chain green while hiding the argument now throws", async () => {
+    const { log, receipt } = await paid()
     const original = receipt.args
     expect(() => {
       ;(receipt as { args: unknown }).args = { toJSON: () => original }
@@ -344,42 +346,42 @@ describe("#17 — a BigInt and a non-finite number render unambiguously", () => 
       ...(redact ? { redact: { amount: redact } } : {}),
       execute: () => "ok",
     })
-    const call = (v: unknown) => pay({ amount: Sourced.fromAuthority(v, "t") }).receipt.args.amount!.value
+    const call = async (v: unknown) => (await pay({ amount: Sourced.fromAuthority(v, "t") })).receipt.args.amount!.value
     return { log, call }
   }
 
-  it("a bigint and the string that used to collide with it are distinct on the receipt", () => {
+  it("a bigint and the string that used to collide with it are distinct on the receipt", async () => {
     const { log, call } = sink()
-    expect(call(5n)).toEqual({ $bigint: "5" })
-    expect(call("5n")).toBe("5n")
-    expect(call(-7n)).toEqual({ $bigint: "-7" })
+    expect(await call(5n)).toEqual({ $bigint: "5" })
+    expect(await call("5n")).toBe("5n")
+    expect(await call(-7n)).toEqual({ $bigint: "-7" })
     expect(log.verifyChain()).toBe(true)
   })
 
-  it("NaN, Infinity and -Infinity are no longer written as null", () => {
+  it("NaN, Infinity and -Infinity are no longer written as null", async () => {
     const { log, call } = sink()
-    expect(call(NaN)).toEqual({ $number: "NaN" })
-    expect(call(Infinity)).toEqual({ $number: "Infinity" })
-    expect(call(-Infinity)).toEqual({ $number: "-Infinity" })
-    expect(call(null)).toBe(null)
-    expect(call({ amount: NaN, memo: 5n })).toEqual({ amount: { $number: "NaN" }, memo: { $bigint: "5" } })
+    expect(await call(NaN)).toEqual({ $number: "NaN" })
+    expect(await call(Infinity)).toEqual({ $number: "Infinity" })
+    expect(await call(-Infinity)).toEqual({ $number: "-Infinity" })
+    expect(await call(null)).toBe(null)
+    expect(await call({ amount: NaN, memo: 5n })).toEqual({ amount: { $number: "NaN" }, memo: { $bigint: "5" } })
     expect(log.verifyChain()).toBe(true)
   })
 
-  it("the hash and truncate policies use the same encoding", () => {
+  it("the hash and truncate policies use the same encoding", async () => {
     const hashed = sink("hash")
-    expect(hashed.call(42n)).toBe("sha256:" + createHash("sha256").update('{"$bigint":"42"}').digest("hex"))
-    expect(hashed.call(NaN)).toBe("sha256:" + createHash("sha256").update('{"$number":"NaN"}').digest("hex"))
+    expect(await hashed.call(42n)).toBe("sha256:" + createHash("sha256").update('{"$bigint":"42"}').digest("hex"))
+    expect(await hashed.call(NaN)).toBe("sha256:" + createHash("sha256").update('{"$number":"NaN"}').digest("hex"))
     const truncated = sink("truncate")
-    expect(truncated.call(42n)).toBe('{"$bigint":"42"}')
-    expect(truncated.call(Infinity)).toBe('{"$number":"Infinity"}')
-    expect(truncated.call("5n")).toBe("5n")
+    expect(await truncated.call(42n)).toBe('{"$bigint":"42"}')
+    expect(await truncated.call(Infinity)).toBe('{"$number":"Infinity"}')
+    expect(await truncated.call("5n")).toBe("5n")
   })
 
-  it("CONTROL: finite numbers, -0, strings, booleans and plain objects are byte-identical to JSON.stringify", () => {
+  it("CONTROL: finite numbers, -0, strings, booleans and plain objects are byte-identical to JSON.stringify", async () => {
     const { call } = sink()
     for (const v of [12.5, -0, 0, 1e21, "x", true, false, { b: 1, a: [true, null] }]) {
-      expect(call(v)).toEqual(JSON.parse(JSON.stringify(v)))
+      expect(await call(v)).toEqual(JSON.parse(JSON.stringify(v)))
     }
   })
 })
@@ -686,29 +688,29 @@ describe("#9 — fromAuthority freezes an object value, so an allowlisted hand-o
 // spec once, at construction, reading every field as an OWN key.
 describe("#15 — makeSink reads its spec by own key, once, at construction", () => {
   const good = () => Sourced.fromAuthority("ACME-8817", "payee-registry")
-  const withPolluted = <T,>(key: string, value: unknown, body: () => T): T => {
+  const withPolluted = async <T,>(key: string, value: unknown, body: () => Promise<T>): Promise<T> => {
     ;(Object.prototype as Record<string, unknown>)[key] = value
     try {
-      return body()
+      return await body()
     } finally {
       delete (Object.prototype as Record<string, unknown>)[key]
     }
   }
 
-  it("a polluted Object.prototype.redact does not redact a sink that declared none", () => {
-    const value = withPolluted("redact", { to: "hash" }, () => {
+  it("a polluted Object.prototype.redact does not redact a sink that declared none", async () => {
+    const value = await withPolluted("redact", { to: "hash" }, async () => {
       const log = new ReceiptLog()
       const pay = makeSink<{ to: Sourced<string> }, string>({ name: "pay", requires: { to: "verified" }, mode: "enforce", log, execute: () => "sent" })
-      return pay({ to: good() }).receipt.args.to!.value
+      return (await pay({ to: good() })).receipt.args.to!.value
     })
     expect(value).toBe("ACME-8817")
   })
 
-  it("a polluted Object.prototype.judgment does not install a judgment wall on a sink that declared none", () => {
-    const out = withPolluted(
+  it("a polluted Object.prototype.judgment does not install a judgment wall on a sink that declared none", async () => {
+    const out = await withPolluted(
       "judgment",
-      { provider: { name: "polluted", assess: () => ({ assessment: "mismatch", confidence: 1, rationale: "polluted" }) }, floor: 0 },
-      () => {
+      { provider: { name: "polluted", model: "m@1", assess: async () => ({ assessment: "mismatch", confidence: 1, rationale: "polluted" }) }, floor: 0 },
+      async () => {
         const log = new ReceiptLog()
         let ran = 0
         const pay = makeSink<{ to: Sourced<string> }, string>({
@@ -721,14 +723,14 @@ describe("#15 — makeSink reads its spec by own key, once, at construction", ()
             return "sent"
           },
         })
-        const r = pay({ to: good() })
+        const r = await pay({ to: good() })
         return { ok: r.ok, decision: r.receipt.decision, ran }
       },
     )
     expect(out).toEqual({ ok: true, decision: "executed", ran: 1 })
   })
 
-  it("the spec is snapshotted: swapping fields on the spec object after construction changes nothing", () => {
+  it("the spec is snapshotted: swapping fields on the spec object after construction changes nothing", async () => {
     const log = new ReceiptLog()
     const spec = {
       name: "pay",
@@ -740,7 +742,7 @@ describe("#15 — makeSink reads its spec by own key, once, at construction", ()
     const pay = makeSink<{ to: Sourced<string> }, string>(spec)
     ;(spec as { mode: string }).mode = "observe"
     ;(spec as { requires: Record<string, string> }).requires = { to: "untrusted" }
-    const r = pay({ to: Sourced.fromChannel("evil", "email") })
+    const r = await pay({ to: Sourced.fromChannel("evil", "email") })
     expect(r.ok).toBe(false)
     expect(r.receipt.decision).toBe("refused")
   })
@@ -811,13 +813,13 @@ describe("#4 — makeSink validates mode, log and requires at construction", () 
     }
   })
 
-  it("CONTROL: the three modes construct, and enforce still refuses the under-tier argument", () => {
+  it("CONTROL: the three modes construct, and enforce still refuses the under-tier argument", async () => {
     for (const mode of ["observe", "warn", "enforce"] as const) {
       const { make } = build({ mode })
       expect(make).not.toThrow()
     }
     const { make, ran } = build({ mode: "enforce" })
-    const r = make()({ to: evil() })
+    const r = await make()({ to: evil() })
     expect(r.ok).toBe(false)
     expect(ran()).toBe(0)
   })
@@ -847,7 +849,7 @@ describe("#7 — the judgment wall fails closed when it cannot score", () => {
         requires: { to: "verified" },
         mode,
         log,
-        judgment: { provider, floor: floor as number },
+        judgment: { provider, floor: floor as number, granted: GRANTED },
         execute: () => {
           ran++
           return "sent"
@@ -855,11 +857,11 @@ describe("#7 — the judgment wall fails closed when it cannot score", () => {
       })
     return { log, make, ran: () => ran }
   }
-  const verdict = (v: unknown): JudgmentProvider => ({ name: "edge", assess: () => v as never })
+  const verdict = (v: unknown): JudgmentProvider => ({ name: "edge", model: "m@1", assess: async () => v as never })
 
-  it("(a) a throwing provider BLOCKS in enforce, with a receipt, and execute never runs", () => {
-    const { log, make, ran } = sink({ name: "boom", assess: () => { throw new Error("scorer down") } })
-    const r = make()({ to: good() })
+  it("(a) a throwing provider BLOCKS in enforce, with a receipt, and execute never runs", async () => {
+    const { log, make, ran } = sink({ name: "boom", model: "m@1", assess: () => { throw new Error("scorer down") } })
+    const r = await make()({ to: good() })
     expect(r.ok).toBe(false)
     if (!r.ok) expect(r.refusal).toContain("scorer down")
     expect(ran()).toBe(0)
@@ -868,9 +870,9 @@ describe("#7 — the judgment wall fails closed when it cannot score", () => {
     expect(log.verifyChain()).toBe(true)
   })
 
-  it.each(["observe", "warn"] as const)("(a) a throwing provider FLAGS in %s — it executes, with the failure on the receipt", (mode) => {
-    const { log, make, ran } = sink({ name: "boom", assess: () => { throw new Error("scorer down") } }, mode)
-    const r = make()({ to: good() })
+  it.each(["observe", "warn"] as const)("(a) a throwing provider FLAGS in %s — it executes, with the failure on the receipt", async (mode) => {
+    const { log, make, ran } = sink({ name: "boom", model: "m@1", assess: () => { throw new Error("scorer down") } }, mode)
+    const r = await make()({ to: good() })
     expect(r.ok).toBe(true)
     expect(ran()).toBe(1)
     expect(r.receipt.decision).toBe("judgment-flagged")
@@ -880,19 +882,19 @@ describe("#7 — the judgment wall fails closed when it cannot score", () => {
 
   it.each([NaN, undefined, null, "0.99", Infinity, -Infinity])(
     "(b) a mismatch with confidence %j BLOCKS in enforce (non-finite confidence fails closed)",
-    (confidence) => {
+    async (confidence) => {
       const { log, make, ran } = sink(verdict({ assessment: "mismatch", confidence, rationale: "payee is NOT intended" }))
-      const r = make()({ to: good() })
+      const r = await make()({ to: good() })
       expect(r.ok).toBe(false)
       expect(ran()).toBe(0)
       expect(log.all().map((x) => x.decision)).toEqual(["judgment-blocked"])
     },
   )
 
-  it("(b) a provider that returns no verdict object at all blocks in enforce, with a receipt", () => {
+  it("(b) a provider that returns no verdict object at all blocks in enforce, with a receipt", async () => {
     for (const v of [null, undefined, "match", 42]) {
       const { log, make, ran } = sink(verdict(v))
-      expect(() => make()({ to: good() })).not.toThrow()
+      await expect(make()({ to: good() })).resolves.toMatchObject({ ok: false })
       expect(ran()).toBe(0)
       expect(log.all().map((x) => x.decision)).toEqual(["judgment-blocked"])
     }
@@ -909,13 +911,13 @@ describe("#7 — the judgment wall fails closed when it cannot score", () => {
     expect(make).toThrow(/assess/)
   })
 
-  it("CONTROL: floor 0 and 1 construct; match executes; a mismatch below the floor and an unsure both flag", () => {
+  it("CONTROL: floor 0 and 1 construct; match executes; a mismatch below the floor and an unsure both flag", async () => {
     expect(sink(verdict({ assessment: "match", confidence: 1, rationale: "" }), "enforce", 0).make).not.toThrow()
     expect(sink(verdict({ assessment: "match", confidence: 1, rationale: "" }), "enforce", 1).make).not.toThrow()
-    expect(sink(verdict({ assessment: "match", confidence: 0.9, rationale: "" })).make()({ to: good() }).receipt.decision).toBe("executed")
-    expect(sink(verdict({ assessment: "mismatch", confidence: 0.3, rationale: "" })).make()({ to: good() }).receipt.decision).toBe("judgment-flagged")
-    expect(sink(verdict({ assessment: "unsure", confidence: 0.99, rationale: "" })).make()({ to: good() }).receipt.decision).toBe("judgment-flagged")
-    expect(sink(verdict({ assessment: "mismatch", confidence: 0.95, rationale: "" })).make()({ to: good() }).receipt.decision).toBe("judgment-blocked")
+    expect((await sink(verdict({ assessment: "match", confidence: 0.9, rationale: "" })).make()({ to: good() })).receipt.decision).toBe("executed")
+    expect((await sink(verdict({ assessment: "mismatch", confidence: 0.3, rationale: "" })).make()({ to: good() })).receipt.decision).toBe("judgment-flagged")
+    expect((await sink(verdict({ assessment: "unsure", confidence: 0.99, rationale: "" })).make()({ to: good() })).receipt.decision).toBe("judgment-flagged")
+    expect((await sink(verdict({ assessment: "mismatch", confidence: 0.95, rationale: "" })).make()({ to: good() })).receipt.decision).toBe("judgment-blocked")
   })
 })
 
@@ -954,58 +956,58 @@ describe("#3 — execute() and the judge see the checked snapshot, never the cal
     return { log, pay, saw: () => saw }
   }
 
-  it("(a) a getter that flips GOOD → EVIL between reads: execute gets the value that was checked", () => {
+  it("(a) a getter that flips GOOD → EVIL between reads: execute gets the value that was checked", async () => {
     const { pay, saw, log } = mk()
     const g = good()
     const e = evil()
     let n = 0
-    const r = pay({ get to() { return n++ === 0 ? g : e } } as never)
+    const r = await pay({ get to() { return n++ === 0 ? g : e } } as never)
     expect(r.ok).toBe(true)
     expect(r.receipt.args.to!.tier).toBe("verified")
     expect(saw()!.to).toBe(g)
     expect(log.verifyChain()).toBe(true)
   })
 
-  it("(b) a Proxy that flips between reads: same", () => {
+  it("(b) a Proxy that flips between reads: same", async () => {
     const { pay, saw } = mk()
     const g = good()
     const e = evil()
     let n = 0
-    const r = pay(new Proxy({ to: g }, { get: (t, p) => (p === "to" && n++ > 0 ? e : Reflect.get(t, p)) }) as never)
+    const r = await pay(new Proxy({ to: g }, { get: (t, p) => (p === "to" && n++ > 0 ? e : Reflect.get(t, p)) }) as never)
     expect(r.ok).toBe(true)
     expect(saw()!.to).toBe(g)
   })
 
-  it("(c) a symbol-keyed argument never reaches execute", () => {
+  it("(c) a symbol-keyed argument never reaches execute", async () => {
     const { pay, saw } = mk()
     const memo = Symbol("memo")
-    const r = pay({ to: good(), [memo]: evil() } as never)
+    const r = await pay({ to: good(), [memo]: evil() } as never)
     expect(r.ok).toBe(true)
     expect(Object.getOwnPropertySymbols(saw()!)).toEqual([])
     expect(saw()![memo]).toBeUndefined()
   })
 
-  it("(d) a non-enumerable argument never reaches execute", () => {
+  it("(d) a non-enumerable argument never reaches execute", async () => {
     const { pay, saw } = mk()
     const args = { to: good() }
     Object.defineProperty(args, "memo", { value: evil(), enumerable: false })
-    expect(pay(args as never).ok).toBe(true)
+    expect((await pay(args as never)).ok).toBe(true)
     expect(saw()!.memo).toBeUndefined()
   })
 
-  it("(e) an inherited argument never reaches execute", () => {
+  it("(e) an inherited argument never reaches execute", async () => {
     const { pay, saw } = mk()
     const args = Object.create({ memo: evil() })
     args.to = good()
-    expect(pay(args).ok).toBe(true)
+    expect((await pay(args)).ok).toBe(true)
     expect(saw()!.memo).toBeUndefined()
     expect("memo" in saw()!).toBe(false)
   })
 
-  it("(f) BREAKING: in observe and warn an undeclared argument is recorded and raised, but no longer reaches execute", () => {
+  it("(f) BREAKING: in observe and warn an undeclared argument is recorded and raised, but no longer reaches execute", async () => {
     for (const mode of ["observe", "warn"] as const) {
       const { pay, saw } = mk(mode)
-      const r = pay({ to: good(), memo: evil() })
+      const r = await pay({ to: good(), memo: evil() })
       expect(r.ok).toBe(true)
       expect(r.receipt.args.memo!.provenance).toContain("UNDECLARED")
       expect(r.receipt.reason).toContain("memo was passed but is not declared")
@@ -1014,23 +1016,24 @@ describe("#3 — execute() and the judge see the checked snapshot, never the cal
     }
   })
 
-  it("(g) execute's argument object has a null prototype and exactly the declared keys, holding the same Sourced objects", () => {
+  it("(g) execute's argument object has a null prototype and exactly the declared keys, holding the same Sourced objects", async () => {
     const { pay, saw } = mk()
     const g = good()
-    pay({ to: g })
+    await pay({ to: g })
     expect(Object.getPrototypeOf(saw()!)).toBe(null)
     expect(Object.keys(saw()!)).toEqual(["to"])
     expect(saw()!.to).toBe(g)
   })
 
-  it("(h, #8) the judge sees a declared argument named __proto__, in a null-prototype bag", () => {
+  it("(h, #8) the judge sees a declared argument named __proto__, in a null-prototype bag", async () => {
     let judgeKeys: string[] = []
     let judgeProto: unknown = "unset"
     const spy: JudgmentProvider = {
       name: "spy",
-      assess: (_a, args) => {
-        judgeKeys = Object.keys(args)
-        judgeProto = Object.getPrototypeOf(args)
+      model: "m@1",
+      assess: async ({ action }) => {
+        judgeKeys = Object.keys(action.args)
+        judgeProto = Object.getPrototypeOf(action.args)
         return { assessment: "match", confidence: 1, rationale: "" }
       },
     }
@@ -1040,13 +1043,13 @@ describe("#3 — execute() and the judge see the checked snapshot, never the cal
       requires: { ["__proto__"]: "verified", to: "verified" },
       mode: "enforce",
       log,
-      judgment: { provider: spy, floor: 0.5 },
+      judgment: { provider: spy, floor: 0.5, granted: GRANTED },
       execute: () => "ok",
     })
     const args: Record<string, Sourced<unknown>> = Object.create(null)
     args["__proto__"] = Sourced.fromAuthority("JUDGE-MUST-SEE-THIS", "r")
     args.to = Sourced.fromAuthority("y", "r")
-    const r = sink(args)
+    const r = await sink(args)
     expect(r.ok).toBe(true)
     expect(Object.keys(r.receipt.args)).toContain("__proto__")
     expect(judgeKeys.sort()).toEqual(["__proto__", "to"])
@@ -1073,7 +1076,7 @@ describe("#5 — an async action that rejects leaves an `errored` receipt behind
   const settle = async () => {
     await new Promise((r) => setTimeout(r, 0))
   }
-  const mk = (execute: () => unknown, judgment?: { provider: JudgmentProvider; floor: number }) => {
+  const mk = (execute: () => unknown, judgment?: { provider: JudgmentProvider; floor: number; granted: GrantedPurpose }) => {
     const log = new ReceiptLog()
     const pay = makeSink<{ to: Sourced<string> }, unknown>({
       name: "pay",
@@ -1094,20 +1097,14 @@ describe("#5 — an async action that rejects leaves an `errored` receipt behind
       })()
       return returned
     })
-    const r = pay({ to: good() })
-    expect(r.ok).toBe(true)
-    expect(r.receipt.decision).toBe("executed")
-    // The flip (chunk 4 #5): the host gets a WRAPPED promise that writes the
-    // receipt and re-raises — not its own object, which the gate's handler
-    // would otherwise have marked handled. The "#5 flip" block below holds
-    // the rest of the contract; this line is the one the old test asserted
-    // the other way.
-    expect(r.ok && r.result).not.toBe(returned)
+    // 0.6.0 (ADR 0007): the sink awaits `execute`, so the rejection reaches the
+    // caller through the sink's own promise. The contract under test is the
+    // receipt order, which the "#5 flip" block below holds alongside the crash.
+    await expect(pay({ to: good() })).rejects.toThrow("network down after debit")
     let rejected = false
     await returned!.catch(() => {
       rejected = true
     })
-    await (r.ok ? (r.result as Promise<unknown>).catch(() => undefined) : undefined)
     await settle()
     expect(rejected).toBe(true)
     expect(log.all().map((x) => x.decision)).toEqual(["executed", "errored"])
@@ -1121,20 +1118,17 @@ describe("#5 — an async action that rejects leaves an `errored` receipt behind
 
   it("a fulfilled promise leaves only `executed`", async () => {
     const { log, pay } = mk(async () => "paid")
-    const r = pay({ to: good() })
-    await (r.ok ? r.result : undefined)
+    await pay({ to: good() })
     await settle()
     expect(log.all().map((x) => x.decision)).toEqual(["executed"])
   })
 
   it("a flagged async action that rejects: judgment-flagged first, then errored", async () => {
-    const unsure: JudgmentProvider = { name: "u", assess: () => ({ assessment: "unsure", confidence: 0.4, rationale: "near the cap" }) }
+    const unsure: JudgmentProvider = { name: "u", model: "m@1", assess: async () => ({ assessment: "unsure", confidence: 0.4, rationale: "near the cap" }) }
     const { log, pay } = mk(async () => {
       throw new Error("rpc timeout")
-    }, { provider: unsure, floor: 0.8 })
-    const r = pay({ to: good() })
-    expect(r.receipt.decision).toBe("judgment-flagged")
-    await (r.ok ? (r.result as Promise<unknown>).catch(() => undefined) : undefined)
+    }, { provider: unsure, floor: 0.8, granted: GRANTED })
+    await expect(pay({ to: good() })).rejects.toThrow("rpc timeout")
     await settle()
     expect(log.all().map((x) => x.decision)).toEqual(["judgment-flagged", "errored"])
     expect(log.all()[1]!.reason).toContain("rpc timeout")
@@ -1147,21 +1141,20 @@ describe("#5 — an async action that rejects leaves an `errored` receipt behind
         queueMicrotask(() => onRejected?.(new Error("thenable failed")))
       },
     }))
-    const r = pay({ to: good() })
-    await (r.ok ? Promise.resolve(r.result).catch(() => undefined) : undefined)
+    await expect(pay({ to: good() })).rejects.toThrow("thenable failed")
     await settle()
     expect(log.all().map((x) => x.decision)).toEqual(["executed", "errored"])
     expect(log.all()[1]!.reason).toContain("thenable failed")
   })
 
-  it("CONTROL: a synchronous result and a synchronous throw behave as before", () => {
+  it("CONTROL: a synchronous result and a synchronous throw behave as before", async () => {
     const sync = mk(() => "paid")
-    expect(sync.pay({ to: good() }).receipt.decision).toBe("executed")
+    expect((await sync.pay({ to: good() })).receipt.decision).toBe("executed")
     expect(sync.log.all()).toHaveLength(1)
     const thrower = mk(() => {
       throw new Error("boom")
     })
-    expect(() => thrower.pay({ to: good() })).toThrow("boom")
+    await expect(thrower.pay({ to: good() })).rejects.toThrow("boom")
     expect(thrower.log.all().map((x) => x.decision)).toEqual(["errored"])
   })
 })
@@ -1181,7 +1174,7 @@ describe("#5 flip — the sink's promise writes the errored receipt AND re-raise
   const settle = async () => {
     await new Promise((r) => setTimeout(r, 0))
   }
-  const mk = (execute: () => unknown, judgment?: { provider: JudgmentProvider; floor: number }) => {
+  const mk = (execute: () => unknown, judgment?: { provider: JudgmentProvider; floor: number; granted: GrantedPurpose }) => {
     const log = new ReceiptLog()
     const pay = makeSink<{ to: Sourced<string> }, unknown>({
       name: "pay",
@@ -1203,11 +1196,9 @@ describe("#5 flip — the sink's promise writes the errored receipt AND re-raise
       })()
       return host
     })
-    const r = pay({ to: good() })
-    expect(r.ok).toBe(true)
-    if (!r.ok) return
-    expect(r.result).not.toBe(host) // a wrapper, not the host's object
-    await expect(r.result as Promise<unknown>).rejects.toBe(boom) // the identical error, re-raised
+    const sinkPromise = pay({ to: good() })
+    expect(sinkPromise).not.toBe(host) // the sink's own promise, not the host's object
+    await expect(sinkPromise).rejects.toBe(boom) // the identical error, re-raised
     await settle()
     expect(log.all().map((x) => x.decision)).toEqual(["executed", "errored"])
     expect(log.all()[1]!.reason).toContain("network down after debit")
@@ -1215,28 +1206,26 @@ describe("#5 flip — the sink's promise writes the errored receipt AND re-raise
   })
 
   it("the same through the judgment-flagged path", async () => {
-    const unsure: JudgmentProvider = { name: "u", assess: () => ({ assessment: "unsure", confidence: 0.4, rationale: "near the cap" }) }
+    const unsure: JudgmentProvider = { name: "u", model: "m@1", assess: async () => ({ assessment: "unsure", confidence: 0.4, rationale: "near the cap" }) }
     const boom = new Error("rpc timeout")
     const { log, pay } = mk(async () => {
       throw boom
-    }, { provider: unsure, floor: 0.8 })
-    const r = pay({ to: good() })
-    expect(r.receipt.decision).toBe("judgment-flagged")
-    await expect(r.ok ? (r.result as Promise<unknown>) : Promise.resolve()).rejects.toBe(boom)
+    }, { provider: unsure, floor: 0.8, granted: GRANTED })
+    await expect(pay({ to: good() })).rejects.toBe(boom)
     await settle()
     expect(log.all().map((x) => x.decision)).toEqual(["judgment-flagged", "errored"])
   })
 
-  it("a non-promise thenable comes back as a real Promise that rejects with its reason", async () => {
+  it("a non-promise thenable comes back through a real Promise that rejects with its reason", async () => {
     const reason = new Error("thenable failed")
     const { log, pay } = mk(() => ({
       then(_onFulfilled: unknown, onRejected?: (e: unknown) => void) {
         queueMicrotask(() => onRejected?.(reason))
       },
     }))
-    const r = pay({ to: good() })
-    expect(r.ok && r.result).toBeInstanceOf(Promise)
-    await expect(r.ok ? (r.result as Promise<unknown>) : Promise.resolve()).rejects.toBe(reason)
+    const sinkPromise = pay({ to: good() })
+    expect(sinkPromise).toBeInstanceOf(Promise)
+    await expect(sinkPromise).rejects.toBe(reason)
     await settle()
     expect(log.all().map((x) => x.decision)).toEqual(["executed", "errored"])
   })
@@ -1262,7 +1251,7 @@ describe("#5 flip — the sink's promise writes the errored receipt AND re-raise
         process.stdout.write(JSON.stringify({ code, decisions: log.all().map((r) => r.decision) }))
       })
       const r = pay({ to: Sourced.fromAuthority("ACME", "reg") })
-      ${hostCatches ? "r.result.catch(() => {})" : "/* the host forgets its catch */"}
+      ${hostCatches ? "r.catch(() => {})" : "/* the host forgets its catch */"}
     `
     const run = spawnSync(process.execPath, ["--experimental-strip-types", "--no-warnings", "--input-type=module", "-e", script], {
       encoding: "utf8",
@@ -1287,19 +1276,18 @@ describe("#5 flip — the sink's promise writes the errored receipt AND re-raise
     expect(stderr).not.toContain("rejected after debit")
   })
 
-  it("CONTROL: a fulfilled promise resolves to its value through the wrapper, and the sync paths are untouched", async () => {
+  it("CONTROL: a fulfilled promise resolves to its value, and the sync paths are untouched", async () => {
     const { log, pay } = mk(async () => "paid")
-    const r = pay({ to: good() })
-    await expect(r.ok ? (r.result as Promise<unknown>) : Promise.resolve()).resolves.toBe("paid")
+    await expect(pay({ to: good() })).resolves.toMatchObject({ ok: true, result: "paid" })
     await settle()
     expect(log.all().map((x) => x.decision)).toEqual(["executed"])
     const sync = mk(() => "paid")
-    const s = sync.pay({ to: good() })
+    const s = await sync.pay({ to: good() })
     expect(s.ok && s.result).toBe("paid")
     const thrower = mk(() => {
       throw new Error("boom")
     })
-    expect(() => thrower.pay({ to: good() })).toThrow("boom")
+    await expect(thrower.pay({ to: good() })).rejects.toThrow("boom")
     expect(thrower.log.all().map((x) => x.decision)).toEqual(["errored"])
   })
 })
@@ -1317,24 +1305,24 @@ describe("#20 — the decision names the mode: observe → observed, warn → wa
     return { log, pay }
   }
 
-  it("observe + violation → observed, with the violation on the receipt", () => {
+  it("observe + violation → observed, with the violation on the receipt", async () => {
     const { pay } = sink("observe")
-    const r = pay({ to: Sourced.fromChannel("evil", "email") })
+    const r = await pay({ to: Sourced.fromChannel("evil", "email") })
     expect(r.ok).toBe(true)
     expect(r.receipt.decision).toBe("observed")
     expect(r.receipt.reason).toContain("requires verified")
   })
 
-  it("observe + clean → observed, with no reason", () => {
+  it("observe + clean → observed, with no reason", async () => {
     const { pay } = sink("observe")
-    const r = pay({ to: Sourced.fromAuthority("ACME", "reg") })
+    const r = await pay({ to: Sourced.fromAuthority("ACME", "reg") })
     expect(r.receipt.decision).toBe("observed")
     expect(r.receipt.reason).toBeUndefined()
   })
 
-  it("warn + violation → warned; warn + clean → executed (unchanged)", () => {
+  it("warn + violation → warned; warn + clean → executed (unchanged)", async () => {
     const { pay } = sink("warn")
-    expect(pay({ to: Sourced.fromChannel("evil", "email") }).receipt.decision).toBe("warned")
-    expect(pay({ to: Sourced.fromAuthority("ACME", "reg") }).receipt.decision).toBe("executed")
+    expect((await pay({ to: Sourced.fromChannel("evil", "email") })).receipt.decision).toBe("warned")
+    expect((await pay({ to: Sourced.fromAuthority("ACME", "reg") })).receipt.decision).toBe("executed")
   })
 })

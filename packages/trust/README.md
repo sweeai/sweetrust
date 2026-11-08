@@ -86,7 +86,7 @@ const payee   = allowlisted(account, PAYEE_REGISTRY, vendor, "payee-registry") /
 // value, so there is no way to spend the output without having looked.
 if (!payee.ok) throw new Error(payee.reason)
 
-pay({ to: payee.value, amount })
+await pay({ to: payee.value, amount })
 // Refused? The refusal names the tier gap AND renders the provenance —
 // and the refusal itself is on the receipt chain.
 ```

@@ -30,9 +30,11 @@ import {
   ReceiptLog,
   Sourced,
   TIERS,
+  type GrantedPurpose,
   type JudgmentProvider,
   type Tier,
 } from "../../src/gate/index.ts"
+import { GRANTED } from "../helpers/granted.ts"
 
 // ── The lattice (§3) ─────────────────────────────────────────────────────────
 
@@ -352,7 +354,7 @@ describe("makeSink", () => {
   }
   const untrusted = () => Sourced.fromLLM("MULE-6660", "ExtractInvoice", [])
 
-  const paySink = (log: ReceiptLog, mode: "observe" | "warn" | "enforce", judgment?: { provider: JudgmentProvider; floor: number }) =>
+  const paySink = (log: ReceiptLog, mode: "observe" | "warn" | "enforce", judgment?: { provider: JudgmentProvider; floor: number; granted: GrantedPurpose }) =>
     makeSink<Args, string>({
       name: "pay",
       requires: { to: "verified", amount: "corroborated" },
@@ -362,9 +364,9 @@ describe("makeSink", () => {
       execute: ({ to, amount }) => `paid ${amount.value} to ${to.value}`,
     })
 
-  test("enforce: satisfied appetite executes and the receipt says so", () => {
+  test("enforce: satisfied appetite executes and the receipt says so", async () => {
     const log = new ReceiptLog()
-    const r = paySink(log, "enforce")({ to: verified(), amount: corroboratedAmount() })
+    const r = await paySink(log, "enforce")({ to: verified(), amount: corroboratedAmount() })
     expect(r.ok).toBe(true)
     expect(r.receipt.decision).toBe("executed")
     expect(log.verifyChain()).toBe(true)
@@ -384,7 +386,7 @@ describe("makeSink", () => {
   // whatever wrote the schema.
   test.each(["constructor", "__proto__", "toString", "valueOf", "hasOwnProperty", "isPrototypeOf"])(
     "enforce: an undeclared argument named %s is caught, recorded, and refused",
-    (evilName) => {
+    async (evilName) => {
       const log = new ReceiptLog()
       let reached: Record<string, unknown> | undefined
       const sink = makeSink<Record<string, Sourced<unknown>>, string>({
@@ -398,7 +400,7 @@ describe("makeSink", () => {
         },
       })
 
-      const r = sink({ to: verified(), [evilName]: untrusted() } as Record<string, Sourced<unknown>>)
+      const r = await sink({ to: verified(), [evilName]: untrusted() } as Record<string, Sourced<unknown>>)
 
       // Fail CLOSED: the sink has no stated appetite for this argument.
       expect(r.ok).toBe(false)
@@ -415,9 +417,9 @@ describe("makeSink", () => {
     },
   )
 
-  test("enforce: under-tier argument refuses, fail-closed, with provenance RENDERED", () => {
+  test("enforce: under-tier argument refuses, fail-closed, with provenance RENDERED", async () => {
     const log = new ReceiptLog()
-    const r = paySink(log, "enforce")({ to: untrusted(), amount: corroboratedAmount() })
+    const r = await paySink(log, "enforce")({ to: untrusted(), amount: corroboratedAmount() })
     expect(r.ok).toBe(false)
     if (!r.ok) {
       expect(r.refusal).toContain("requires verified")
@@ -426,38 +428,38 @@ describe("makeSink", () => {
     }
   })
 
-  test("enforce: a MISSING declared argument is a violation (fail closed)", () => {
+  test("enforce: a MISSING declared argument is a violation (fail closed)", async () => {
     const log = new ReceiptLog()
-    const r = paySink(log, "enforce")({ to: verified() } as unknown as Args)
+    const r = await paySink(log, "enforce")({ to: verified() } as unknown as Args)
     expect(r.ok).toBe(false)
     if (!r.ok) expect(r.refusal).toContain("was not provided")
   })
 
-  test("observe: violations execute anyway, recorded as observed (Rule 5 on-ramp)", () => {
+  test("observe: violations execute anyway, recorded as observed (Rule 5 on-ramp)", async () => {
     // Until the 2026-10-13 gate audit this test passed a CLEAN call, so it
     // never exercised the violation it names — and the kernel labelled an
     // observe-mode call WITH violations "warned". It now passes an under-tier
     // argument: the call executes, the label is `observed`, and the reasons
     // ride along on the receipt.
     const log = new ReceiptLog()
-    const r = paySink(log, "observe")({ to: untrusted(), amount: corroboratedAmount() })
+    const r = await paySink(log, "observe")({ to: untrusted(), amount: corroboratedAmount() })
     expect(r.ok).toBe(true)
     expect(r.receipt.decision).toBe("observed")
     expect(r.receipt.reason).toContain("requires verified")
   })
 
-  test("warn: violations execute but the receipt says warned + carries the reasons", () => {
+  test("warn: violations execute but the receipt says warned + carries the reasons", async () => {
     const log = new ReceiptLog()
-    const r = paySink(log, "warn")({ to: untrusted(), amount: corroboratedAmount() })
+    const r = await paySink(log, "warn")({ to: untrusted(), amount: corroboratedAmount() })
     expect(r.ok).toBe(true)
     expect(r.receipt.decision).toBe("warned")
     expect(r.receipt.reason).toContain("requires verified")
   })
 
-  test("judgment wall: in-bounds-but-wrong blocks AFTER tiers pass (the 2nd wall)", () => {
+  test("judgment wall: in-bounds-but-wrong blocks AFTER tiers pass (the 2nd wall)", async () => {
     const log = new ReceiptLog()
-    const judgment = { provider: mockJudgmentProvider({ intendedPayees: new Set(["someone-else"]), maxAmount: 5000 }), floor: 0.7 }
-    const r = paySink(log, "enforce", judgment)({ to: verified(), amount: corroboratedAmount() })
+    const judgment = { provider: mockJudgmentProvider({ intendedPayees: new Set(["someone-else"]), maxAmount: 5000 }), floor: 0.7, granted: GRANTED }
+    const r = await paySink(log, "enforce", judgment)({ to: verified(), amount: corroboratedAmount() })
     expect(r.ok).toBe(false)
     if (!r.ok) {
       expect(r.refusal).toContain("judgment-blocked")
@@ -466,27 +468,28 @@ describe("makeSink", () => {
     }
   })
 
-  test("judgment wall: unsure FLAGS and defers — it executes with the doubt on the receipt", () => {
+  test("judgment wall: unsure FLAGS and defers — it executes with the doubt on the receipt", async () => {
     const log = new ReceiptLog()
     // amount 1200 with cap 1100: intended payee, slightly over → the mock's honest "unsure" band
-    const judgment = { provider: mockJudgmentProvider({ intendedPayees: new Set(["ACME-8817"]), maxAmount: 1100 }), floor: 0.7 }
-    const r = paySink(log, "enforce", judgment)({ to: verified(), amount: corroboratedAmount() })
+    const judgment = { provider: mockJudgmentProvider({ intendedPayees: new Set(["ACME-8817"]), maxAmount: 1100 }), floor: 0.7, granted: GRANTED }
+    const r = await paySink(log, "enforce", judgment)({ to: verified(), amount: corroboratedAmount() })
     expect(r.ok).toBe(true)
     expect(r.receipt.decision).toBe("judgment-flagged")
     expect(r.receipt.reason).toContain("unsure")
   })
 
-  test("judgment wall: never reached when the tier wall refuses (order is load-bearing)", () => {
+  test("judgment wall: never reached when the tier wall refuses (order is load-bearing)", async () => {
     const log = new ReceiptLog()
     let judged = 0
     const spy: JudgmentProvider = {
       name: "spy",
-      assess: () => {
+      model: "m@1",
+      assess: async () => {
         judged++
         return { assessment: "match", confidence: 1, rationale: "" }
       },
     }
-    const r = paySink(log, "enforce", { provider: spy, floor: 0.7 })({ to: untrusted(), amount: corroboratedAmount() })
+    const r = await paySink(log, "enforce", { provider: spy, floor: 0.7, granted: GRANTED })({ to: untrusted(), amount: corroboratedAmount() })
     expect(r.ok).toBe(false)
     expect(judged).toBe(0)
   })
@@ -495,14 +498,15 @@ describe("makeSink", () => {
 // ── Redaction seam (receipts are signed + anchorable — policy applies pre-hash) ──
 
 describe("redaction seam", () => {
-  test("hash/truncate shape the receipt; execute and judgment see RAW values", () => {
+  test("hash/truncate shape the receipt; execute and judgment see RAW values", async () => {
     const log = new ReceiptLog()
     let executedSecret: unknown = null
     let judgedSecret: unknown = null
     const judge: JudgmentProvider = {
       name: "spy",
-      assess: (_sink, args) => {
-        judgedSecret = args.secret!.value
+      model: "m@1",
+      assess: async ({ action }) => {
+        judgedSecret = action.args.secret
         return { assessment: "match", confidence: 0.99, rationale: "spy" }
       },
     }
@@ -511,7 +515,7 @@ describe("redaction seam", () => {
       requires: { secret: "verified", memo: "verified" },
       mode: "enforce",
       log,
-      judgment: { provider: judge, floor: 0.8 },
+      judgment: { provider: judge, floor: 0.8, granted: GRANTED },
       redact: { secret: "hash", memo: "truncate" },
       execute: (args) => {
         executedSecret = args.secret.value
@@ -520,7 +524,7 @@ describe("redaction seam", () => {
     })
     const secret = Sourced.fromAuthority("hunter2-super-secret-credential", "vault")
     const memo = Sourced.fromAuthority("m".repeat(200), "vault")
-    const r = sink({ secret, memo })
+    const r = await sink({ secret, memo })
     expect(r.ok).toBe(true)
     // raw values reached execute + judgment
     expect(executedSecret).toBe("hunter2-super-secret-credential")
@@ -534,7 +538,7 @@ describe("redaction seam", () => {
     expect(log.verifyChain()).toBe(true)
   })
 
-  test("default policy is raw — existing receipts unchanged", () => {
+  test("default policy is raw — existing receipts unchanged", async () => {
     const log = new ReceiptLog()
     const sink = makeSink<{ amount: Sourced<number> }, string>({
       name: "raw-sink",
@@ -543,7 +547,7 @@ describe("redaction seam", () => {
       log,
       execute: () => "ok",
     })
-    sink({ amount: Sourced.fromAuthority(1200, "ledger") })
+    await sink({ amount: Sourced.fromAuthority(1200, "ledger") })
     expect(log.all().at(-1)!.args.amount!.value).toBe(1200)
     expect(log.verifyChain()).toBe(true)
   })

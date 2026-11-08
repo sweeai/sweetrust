@@ -36,6 +36,7 @@
  */
 import { generateKeyPairSync } from "node:crypto"
 import { describe, expect, test } from "vitest"
+import { GRANTED } from "./helpers/granted.ts"
 import { poison, readsOf, SecondRead } from "./helpers/poison.ts"
 import { MandateFailure } from "../src/mandate/errors.ts"
 import {
@@ -544,7 +545,7 @@ describe("mandate: every exported function reads its args bag, and each capabili
 describe("gate: the sink spec, its nested bags, the call's args bag, the log entry and the declassifiers", () => {
   const good = () => Sourced.fromAuthority("ACME", "reg")
   const bad = () => Sourced.fromLLM("EVIL", "Extract", [])
-  const unsure: JudgmentProvider = { name: "u", assess: () => ({ assessment: "unsure", confidence: 0.4, rationale: "near the cap" }) }
+  const unsure: JudgmentProvider = { name: "u", model: "m@1", assess: async () => ({ assessment: "unsure", confidence: 0.4, rationale: "near the cap" }) }
 
   type Spec = Parameters<typeof makeSink<{ to: Sourced<string> }, string>>[0]
   const spec = (log: ReceiptLog, judgment?: boolean): Spec => ({
@@ -554,7 +555,7 @@ describe("gate: the sink spec, its nested bags, the call's args bag, the log ent
     log,
     execute: ({ to }) => `paid ${to.value}`,
     redact: { to: "hash" },
-    ...(judgment ? { judgment: { provider: unsure, floor: 0.8 } } : {}),
+    ...(judgment ? { judgment: { provider: unsure, floor: 0.8, granted: GRANTED } } : {}),
   })
   const poisonedSpec = (log: ReceiptLog, judgment?: boolean): Spec => {
     const s = spec(log, judgment)
@@ -563,31 +564,38 @@ describe("gate: the sink spec, its nested bags, the call's args bag, the log ent
         ...s,
         requires: poison(s.requires, "spec.requires"),
         redact: poison(s.redact!, "spec.redact"),
-        ...(s.judgment ? { judgment: poison(s.judgment, "spec.judgment") } : {}),
+        ...(s.judgment
+          ? {
+              judgment: poison(
+                { ...s.judgment, provider: poison(s.judgment.provider, "spec.judgment.provider"), granted: poison(s.judgment.granted, "spec.judgment.granted") },
+                "spec.judgment",
+              ),
+            }
+          : {}),
       },
       "spec",
     )
   }
   const decisions = (log: ReceiptLog) => log.all().map((r) => r.decision)
 
-  test("makeSink spec + the call's args bag: executed, refused (under-tier), refused (undeclared key)", () => {
+  test("makeSink spec + the call's args bag: executed, refused (under-tier), refused (undeclared key)", async () => {
     for (const judgment of [false, true]) {
-      sameVerdict(
+      await sameVerdictAsync(
         `makeSink${judgment ? " +judgment" : ""}`,
-        () => {
+        async () => {
           const log = new ReceiptLog()
           const pay = makeSink(spec(log, judgment))
-          const a = pay({ to: good() })
-          const b = pay({ to: bad() })
-          const c = pay({ to: good(), extra: good() } as any)
+          const a = await pay({ to: good() })
+          const b = await pay({ to: bad() })
+          const c = await pay({ to: good(), extra: good() } as any)
           return { a: [a.ok, a.receipt.decision], b: [b.ok, b.receipt.decision], c: [c.ok, c.receipt.decision], decisions: decisions(log), chain: log.verifyChain() }
         },
-        () => {
+        async () => {
           const log = new ReceiptLog()
           const pay = makeSink(poisonedSpec(log, judgment))
-          const a = pay(poison({ to: good() }, "args"))
-          const b = pay(poison({ to: bad() }, "args"))
-          const c = pay(poison({ to: good(), extra: good() } as any, "args"))
+          const a = await pay(poison({ to: good() }, "args"))
+          const b = await pay(poison({ to: bad() }, "args"))
+          const c = await pay(poison({ to: good(), extra: good() } as any, "args"))
           return { a: [a.ok, a.receipt.decision], b: [b.ok, b.receipt.decision], c: [c.ok, c.receipt.decision], decisions: decisions(log), chain: log.verifyChain() }
         },
       )
@@ -690,21 +698,21 @@ describe("gate: the sink spec, its nested bags, the call's args bag, the log ent
 // ── verify, and mandate's signer surface ─────────────────────────────────────
 
 describe("verify + signer: records, options bags, signer configs and sign/preimage envelopes", () => {
-  const session = () => {
+  const session = async () => {
     const keys = generateSigningKeypair()
     const log = new SignedReceiptLog(makeEd25519ReceiptSigner(keys))
     const pay = makeSink<{ to: Sourced<string> }, string>({ name: "pay", requires: { to: "verified" }, mode: "enforce", log, execute: ({ to }) => `paid ${to.value}` })
-    pay({ to: Sourced.fromAuthority("ACME", "reg") })
-    pay({ to: Sourced.fromLLM("EVIL", "Extract", []) })
-    pay({ to: Sourced.fromAuthority("ACME", "reg") })
+    await pay({ to: Sourced.fromAuthority("ACME", "reg") })
+    await pay({ to: Sourced.fromLLM("EVIL", "Extract", []) })
+    await pay({ to: Sourced.fromAuthority("ACME", "reg") })
     const records = log.signed() as SignedReceipt[]
     const pin = publicKeyHexFromPem(keys.publicKeyPem)
     return { keys, log, records, pin }
   }
   const poisonRecords = (records: ReadonlyArray<SignedReceipt>) => records.map((r, i) => poison({ ...r }, `records[${i}]`))
 
-  test("verifySignedChain — valid, with a seal, with a receipt memo, wrong pin, unknown option", () => {
-    const { records, pin, log } = session()
+  test("verifySignedChain — valid, with a seal, with a receipt memo, wrong pin, unknown option", async () => {
+    const { records, pin, log } = await session()
     const head = log.head()
     const mid = log.all()[1]!.hash
     const cases: Array<[string, () => Parameters<typeof verifySignedChain>[1]]> = [

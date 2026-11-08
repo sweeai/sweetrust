@@ -12,6 +12,7 @@
 
 import { describe, it, expect } from "vitest"
 import { Sourced, corroborate, ReceiptLog, makeSink } from "../../src/gate/trust.js"
+import { GRANTED } from "../helpers/granted.ts"
 
 const sample = () => {
   const email = Sourced.fromChannel({ x: 1 }, "email-inbound")
@@ -100,7 +101,7 @@ describe("the fixes did not change any behaviour they weren't meant to", () => {
     expect(Object.isFrozen(v)).toBe(true)
   })
 
-  it("un-redacted sinks still record the judgment rationale verbatim", () => {
+  it("un-redacted sinks still record the judgment rationale verbatim", async () => {
     // The A4 fix must only bite when a redact policy is actually set. A sink
     // with no redaction loses nothing.
     const log = new ReceiptLog()
@@ -112,17 +113,19 @@ describe("the fixes did not change any behaviour they weren't meant to", () => {
       judgment: {
         provider: {
           name: "j",
-          assess: () => ({ assessment: "unsure", confidence: 0.4, rationale: "SPECIFIC-DETAIL-42" }),
+          model: "m@1",
+          assess: async () => ({ assessment: "unsure", confidence: 0.4, rationale: "SPECIFIC-DETAIL-42" }),
         },
         floor: 0.8,
+        granted: GRANTED,
       },
       execute: () => "ok",
     })
-    const out = send({ to: Sourced.fromAuthority("a@b.example", "dir") })
+    const out = await send({ to: Sourced.fromAuthority("a@b.example", "dir") })
     expect(out.receipt.reason).toContain("SPECIFIC-DETAIL-42")
   })
 
-  it("a clean enforce-mode call is untouched: executed, chain verifies, no extra keys", () => {
+  it("a clean enforce-mode call is untouched: executed, chain verifies, no extra keys", async () => {
     const log = new ReceiptLog()
     const pay = makeSink<{ amount: Sourced<number> }, string>({
       name: "pay",
@@ -131,7 +134,7 @@ describe("the fixes did not change any behaviour they weren't meant to", () => {
       log,
       execute: () => "sent",
     })
-    const out = pay({ amount: Sourced.fromAuthority(10, "treasury") })
+    const out = await pay({ amount: Sourced.fromAuthority(10, "treasury") })
     expect(out.ok).toBe(true)
     expect(out.receipt.decision).toBe("executed")
     expect(Object.keys(out.receipt.args)).toEqual(["amount"])

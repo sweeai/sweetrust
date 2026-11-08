@@ -27,6 +27,8 @@ import { createHash } from "node:crypto"
 // The rail's one canonicalization, from a leaf that imports only node:crypto.
 // This is NOT an import of mandate: the gate still stands alone (src/index.ts).
 import { canonicalJSON, sha256Hex } from "../canon.ts"
+// Types only: the purpose leaf has no runtime content, so the gate still stands alone.
+import type { GrantedPurpose, Purpose } from "../purpose.ts"
 
 // ── Tiers (the lattice) ─────────────────────────────────────────────────────
 // Three rungs. The spec drew a fourth, `asserted`, between untrusted and
@@ -896,7 +898,7 @@ export class ReceiptLog {
 // Messages are fixed strings: a key or a value here is caller-controlled, and
 // a refusal string ends up in receipts and in front of models.
 
-interface Action {
+export interface Action {
   readonly sink: string
   readonly args: Readonly<Record<string, unknown>>
 }
@@ -1072,10 +1074,21 @@ export interface JudgmentVerdict {
   readonly rationale: string
 }
 
+/**
+ * A judge. Asynchronous since 0.6.0 (ADR 0007): a judge is a model behind a
+ * network call or an inference step, and its answer arrives later.
+ *
+ * `input` has exactly two keys (spec I5): the owner's purpose and the action,
+ * as raw values. No agent prose reaches a judge. The signal fires at the sink's
+ * deadline, and an answer that arrives after it is discarded, so a provider
+ * that cannot finish should stop rather than keep spending.
+ */
 export interface JudgmentProvider {
-  /** Score a proposed action against the principal's declared intent. */
   readonly name: string
-  assess(action: string, args: Record<string, { value: unknown; tier: Tier }>): JudgmentVerdict
+  /** The pinned model version, for example "jev@2026-09-15". Empty is a TypeError at sink construction. */
+  readonly model: string
+  /** Score a proposed action against the owner's purpose. */
+  assess(input: { readonly purpose: Purpose; readonly action: Action }, signal: AbortSignal): Promise<JudgmentVerdict>
 }
 
 /**
@@ -1090,11 +1103,12 @@ export function mockJudgmentProvider(intent: {
 }): JudgmentProvider {
   return {
     name: "mock-judgment",
-    assess(action, args) {
-      const to = String(args.to?.value ?? "")
-      const amount = Number(args.amount?.value ?? NaN)
+    model: "mock-judgment@1",
+    async assess({ action }) {
+      const to = String(action.args.to ?? "")
+      const amount = Number(action.args.amount ?? NaN)
       if (intent.intendedPayees.has(to) && amount <= intent.maxAmount) {
-        return { assessment: "match", confidence: 0.9, rationale: `${action} matches declared intent` }
+        return { assessment: "match", confidence: 0.9, rationale: `${action.sink} matches declared intent` }
       }
       // Near-edge amounts read as "unsure" — the honest, defer-to-human band.
       if (intent.intendedPayees.has(to) && amount <= intent.maxAmount * 1.1) {
@@ -1109,6 +1123,12 @@ export function mockJudgmentProvider(intent: {
 
 export type EnforcementMode = "observe" | "warn" | "enforce"
 const MODES: ReadonlySet<string> = new Set<EnforcementMode>(["observe", "warn", "enforce"])
+
+/** How long a judged sink waits for its judge unless told otherwise. */
+const DEFAULT_JUDGMENT_TIMEOUT_MS = 5000
+/** The largest delay setTimeout honors. Past it Node fires after 1ms, so a generous deadline would become an impossible one. */
+const MAX_JUDGMENT_TIMEOUT_MS = 2 ** 31 - 1
+const ASSESSMENTS: ReadonlySet<unknown> = new Set(["match", "mismatch", "unsure"])
 
 /** Name a value in a TypeError without dereferencing it. */
 const preview = (v: unknown): string =>
@@ -1145,6 +1165,147 @@ function renderForReceipt(value: unknown, policy: "raw" | "hash" | "truncate"): 
   return json === undefined ? undefined : JSON.parse(json)
 }
 
+/** Run a renderer over something thrown. Its `message` and `toString` are the thrower's code and can throw too. */
+const safely = (render: () => string): string => {
+  try {
+    return render()
+  } catch {
+    return "a reason that could not be rendered"
+  }
+}
+
+/**
+ * Pin the grant at construction: each field read once, the purpose copied and
+ * frozen, so neither the host nor a provider can change what later calls are
+ * judged against (spec I3).
+ */
+function pinGranted(where: string, granted: unknown): GrantedPurpose {
+  if (typeof granted !== "object" || granted === null) {
+    throw new TypeError(`${where}: judgment.granted must be { purpose, grantHash } from the signed grant, got ${preview(granted)}`)
+  }
+  const purposeRaw = Object.hasOwn(granted, "purpose") ? (granted as GrantedPurpose).purpose : undefined
+  const grantHash = Object.hasOwn(granted, "grantHash") ? (granted as GrantedPurpose).grantHash : undefined
+  if (typeof grantHash !== "string" || !/^[0-9a-f]{64}$/.test(grantHash)) {
+    throw new TypeError(`${where}: judgment.granted.grantHash must be 64 lowercase hex, got ${preview(grantHash)}`)
+  }
+  let purpose: Purpose
+  try {
+    purpose = copyExact(purposeRaw, false) as Purpose
+  } catch (err) {
+    throw new TypeError(`${where}: judgment.granted.purpose must be plain JSON (${firstLine(err)})`)
+  }
+  if (typeof purpose !== "object" || purpose === null || typeof purpose.statement !== "string" || purpose.statement.length === 0) {
+    throw new TypeError(`${where}: judgment.granted.purpose must carry a non-empty statement`)
+  }
+  return Object.freeze({ purpose: deepFreeze(purpose), grantHash })
+}
+
+interface BoundJudge {
+  readonly assess: (input: Parameters<JudgmentProvider["assess"]>[0], signal: AbortSignal) => unknown
+  readonly name: string
+  readonly model: string
+  readonly floor: number
+  readonly timeoutMs: number
+  readonly granted: GrantedPurpose
+}
+
+/** Validate a sink's judgment config and read every field of it once; a misconfigured judged sink never exists. */
+function bindJudge(
+  where: string,
+  config: { readonly provider: JudgmentProvider; readonly floor: number; readonly timeoutMs?: number | undefined; readonly granted: GrantedPurpose },
+): BoundJudge {
+  // `floor: undefined` made `confidence >= floor` false forever, so a
+  // mismatch at 0.99 never blocked (the 2026-10-13 gate audit).
+  const { provider, floor, timeoutMs = DEFAULT_JUDGMENT_TIMEOUT_MS, granted } = config
+  if (typeof provider !== "object" || provider === null) {
+    throw new TypeError(`${where}: judgment.provider must be an object with an assess() method, got ${preview(provider)}`)
+  }
+  // The provider's three fields are read once, here. Every call uses these.
+  const { assess, name, model } = provider
+  if (typeof assess !== "function") {
+    throw new TypeError(`${where}: judgment.provider must be an object with an assess() method, got ${preview(provider)}`)
+  }
+  if (typeof model !== "string" || model.length === 0) {
+    throw new TypeError(`${where}: judgment.provider.model must be a non-empty pinned version, got ${preview(model)}`)
+  }
+  if (typeof floor !== "number" || !Number.isFinite(floor) || floor < 0 || floor > 1) {
+    throw new TypeError(`${where}: judgment.floor must be a finite number in [0, 1], got ${preview(floor)}`)
+  }
+  if (typeof timeoutMs !== "number" || !Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > MAX_JUDGMENT_TIMEOUT_MS) {
+    throw new TypeError(`${where}: judgment.timeoutMs must be a positive number of milliseconds no larger than ${MAX_JUDGMENT_TIMEOUT_MS}, got ${preview(timeoutMs)}`)
+  }
+  const bound: BoundJudge = {
+    assess: (input, signal) => assess.call(provider, input, signal),
+    name: String(name),
+    model,
+    floor,
+    timeoutMs,
+    granted: pinGranted(where, granted),
+  }
+  return Object.freeze(bound)
+}
+
+type Consulted = { readonly out: unknown } | { readonly failure: string }
+
+/**
+ * Ask the judge, with a deadline. Whichever settles first decides, and
+ * `resolve` ignores every later call, so a late verdict has nowhere to go. A
+ * rejection after the deadline lands in a handler and is dropped, so it cannot
+ * surface as an unhandled rejection.
+ *
+ * A provider that answers from its own abort listener is still late: its
+ * answer reaches `settle` through a promise callback, which cannot run until
+ * this timer callback has returned, and by then the failure has won.
+ *
+ * The timer is cleared the moment the judge answers, so a fast verdict leaves
+ * nothing holding the process open. It is deliberately not `unref`ed: while a
+ * judge is still out, a process with nothing else to do must wait for the
+ * deadline, not exit with the call neither executed nor recorded.
+ */
+const consultJudge = (ask: (signal: AbortSignal) => unknown, timeoutMs: number): Promise<Consulted> =>
+  new Promise((resolve) => {
+    const controller = new AbortController()
+    const timer = setTimeout(() => {
+      const failure = `no verdict within ${timeoutMs}ms`
+      resolve({ failure })
+      controller.abort(new DOMException(failure, "TimeoutError"))
+    }, timeoutMs)
+    const settle = (answer: Consulted) => {
+      clearTimeout(timer)
+      resolve(answer)
+    }
+    const failed = (err: unknown) => settle({ failure: safely(() => firstLine(err)) })
+    try {
+      Promise.resolve(ask(controller.signal)).then((out) => settle({ out }), failed)
+    } catch (err) {
+      failed(err)
+    }
+  })
+
+/**
+ * Read a judge's answer, once, as own keys. Anything that is not a verdict is
+ * a failure, never a verdict with blanks in it: an object with no assessment
+ * used to pass as one, and that is how an unawaited Promise executed.
+ */
+function readVerdict(consulted: Consulted): { readonly assessment: unknown; readonly confidence: unknown; readonly rationale: unknown } | { readonly failure: string } {
+  if ("failure" in consulted) return consulted
+  const { out } = consulted
+  if (typeof out !== "object" || out === null) return { failure: `provider returned ${preview(out)} instead of a verdict` }
+  try {
+    const field = (k: string): unknown => (Object.hasOwn(out, k) ? (out as Record<string, unknown>)[k] : undefined)
+    const assessment = field("assessment")
+    const confidence = field("confidence")
+    const rationale = field("rationale")
+    if (!ASSESSMENTS.has(assessment)) return { failure: `provider returned an unknown assessment ${preview(assessment)}` }
+    if (typeof confidence !== "number" || !Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
+      return { failure: `provider returned confidence ${preview(confidence)}, not a number in [0, 1]` }
+    }
+    return { assessment, confidence, rationale }
+  } catch (err) {
+    return { failure: `reading the verdict threw: ${safely(() => firstLine(err))}` }
+  }
+}
+
 /**
  * A privileged operation that declares its appetite: each argument's minimum
  * tier. In `enforce` mode an under-tier argument refuses the call with the
@@ -1161,6 +1322,10 @@ function renderForReceipt(value: unknown, policy: "raw" | "hash" | "truncate"): 
  * `requires` declares, each read once from the caller's object at check time.
  * An argument the spec never declared is recorded on the receipt and raised as
  * a violation, and does not reach `execute` in any mode.
+ *
+ * Every call returns a Promise, judged or not (ADR 0007), and `result` is the
+ * settled value of whatever `execute` returned. A caller who forgets `await`
+ * reads `.ok` as undefined on the Promise, never true.
  */
 export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec: {
   readonly name: string
@@ -1174,8 +1339,19 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
    * cannot. `floor` is the confidence a "mismatch" must clear to block; below
    * it, or on "unsure", the action is FLAGGED (allowed, but the doubt is on the
    * receipt) rather than blocked — judgment defers to a human when unsure.
+   *
+   * `granted` is the owner's purpose and the hash of the grant that signs it,
+   * bound here and never per call (spec I3). `timeoutMs` (default 5000) is the
+   * judge's deadline: at it the provider's signal fires, any later answer is
+   * discarded, and the call has no verdict. No verdict and a malformed verdict
+   * both block in enforce and flag in observe/warn.
    */
-  readonly judgment?: { readonly provider: JudgmentProvider; readonly floor: number }
+  readonly judgment?: {
+    readonly provider: JudgmentProvider
+    readonly floor: number
+    readonly timeoutMs?: number
+    readonly granted: GrantedPurpose
+  }
   /**
    * Per-arg receipt-rendering policy. Receipts are signed and potentially
    * anchored on-chain — they can never be redacted after the fact, so the
@@ -1206,14 +1382,26 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
     for (const k of Object.keys(source)) out[k] = (source as Record<string, V>)[k] as V
     return Object.freeze(out)
   }
+  // Own keys, each read once. `granted` above all: an inherited one would let a
+  // polluted Object.prototype supply the purpose a judge scores against (I3).
   const ownJudgment = own("judgment")
+  const judgmentField = <K extends keyof NonNullable<typeof ownJudgment>>(k: K): NonNullable<typeof ownJudgment>[K] | undefined =>
+    typeof ownJudgment === "object" && ownJudgment !== null && Object.hasOwn(ownJudgment, k) ? ownJudgment[k] : undefined
   const cfg = Object.freeze({
     name: own("name") as string,
     requires: copyOwn<Tier>(own("requires")) ?? Object.freeze(Object.create(null) as Record<string, Tier>),
     mode: own("mode") as EnforcementMode,
     log: own("log") as ReceiptLog,
     execute: own("execute") as (args: Args) => R,
-    judgment: ownJudgment === undefined ? undefined : Object.freeze({ provider: ownJudgment.provider, floor: ownJudgment.floor }),
+    judgment:
+      ownJudgment === undefined
+        ? undefined
+        : Object.freeze({
+            provider: judgmentField("provider") as JudgmentProvider,
+            floor: judgmentField("floor") as number,
+            timeoutMs: judgmentField("timeoutMs"),
+            granted: judgmentField("granted") as GrantedPurpose,
+          }),
     redact: copyOwn<"raw" | "hash" | "truncate" | undefined>(own("redact")),
   })
 
@@ -1237,19 +1425,9 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
       throw new TypeError(`${where}: requires.${key} must be one of ${TIERS.map((t) => `"${t}"`).join(" | ")}, got ${preview(tier)}`)
     }
   }
-  if (cfg.judgment !== undefined) {
-    // `floor: undefined` made `confidence >= floor` false forever, so a
-    // mismatch at 0.99 never blocked (the 2026-10-13 gate audit).
-    const { provider, floor } = cfg.judgment
-    if (typeof provider !== "object" || provider === null || typeof provider.assess !== "function") {
-      throw new TypeError(`${where}: judgment.provider must be an object with an assess() method, got ${preview(provider)}`)
-    }
-    if (typeof floor !== "number" || !Number.isFinite(floor) || floor < 0 || floor > 1) {
-      throw new TypeError(`${where}: judgment.floor must be a finite number in [0, 1], got ${preview(floor)}`)
-    }
-  }
+  const judge = cfg.judgment === undefined ? undefined : bindJudge(where, cfg.judgment)
 
-  return (args: Args): SinkResult<R> => {
+  return async (args: Args): Promise<SinkResult<Awaited<R>>> => {
     // `Object.create(null)` rather than `{}`: `rendered` is keyed by ATTACKER-
     // SUPPLIED argument names and then handed to the receipt. A plain object
     // literal inherits `Object.prototype`, so an argument named `__proto__`
@@ -1269,46 +1447,64 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
     // violation; it no longer reaches execute() in ANY mode.
     const checked: Record<string, Sourced<unknown>> = Object.create(null)
 
-    // An async action's outcome arrives after its receipt (the 2026-10-13 gate
-    // audit). The `errored` receipt below is sync-only: `execute: async () =>
-    // { throw }` RETURNS a rejected promise, an ordinary value, so the receipt
-    // said `executed` and the log never heard about the rejection — and every
-    // real sink is async. A thenable result is wrapped so that an `errored`
-    // receipt is appended when it rejects. The receipt that PRECEDES the
-    // outcome stays as written (it cannot wait for a network), and the
-    // `errored` one TRAILS it; SECURITY.md § Honest limits states the order.
+    // The one place an action runs and is recorded (ADR 0007). The flagged path
+    // used to hold its own copy of this sequence, and the two had drifted
+    // before ("Same hole as the main path (V5)").
     //
-    // THE WRAPPER IS WHAT THE HOST GETS BACK, not its own promise (the flip of
-    // 2026-10-13, chunk 4). The first fix attached `.then(undefined, handler)`
-    // to the host's promise and returned that promise unchanged. Attaching ANY
-    // handler marks a promise handled, so a host that forgot its own catch
-    // silently lost Node's unhandled-rejection crash: the action failed, the
-    // receipt said so, and the process carried on with nobody told. This
-    // returns `Promise.resolve(result).then(v => v, err => { append; throw
-    // err })`: the receipt is written AND the rejection re-raised, so the
-    // promise in the host's hand still rejects with the same error — and still
-    // crashes the process if the host ignores it. `Promise.resolve` adopts a
-    // non-Promise thenable (one `then` call, as before) so the host always
-    // holds a real Promise. The cost, stated in the CHANGELOG: `result` is not
-    // the same object execute() returned. No fulfilment handler beyond the
-    // pass-through: success is what the preceding receipt already says.
-    const trailErrored = (result: R, prefix: string): R => {
-      const thenable =
-        result !== null && (typeof result === "object" || typeof result === "function") && typeof (result as { then?: unknown }).then === "function"
-      if (!thenable) return result
-      return Promise.resolve<unknown>(result).then(
-        (v) => v,
-        (err: unknown) => {
-          cfg.log.append({
-            at: now(),
-            sink: cfg.name,
-            decision: "errored",
-            args: rendered,
-            reason: `${prefix} — then its promise rejected; the action may or may not have taken effect: ${firstLine(err)}`,
-          })
-          throw err
-        },
-      ) as unknown as R // a Promise<X> stands in for the R = Promise<X> the host declared
+    // A throw used to leave NO record at all (adversarial pass V5, 2026-07-25):
+    // the gateway returned 500 on a request that may well have settled, and the
+    // evidence log — the whole product — was silent about it. A log whose only
+    // gap is "everything that went wrong" is worse than no log, because it reads
+    // as complete. The attempt is now always recorded before the error
+    // propagates; the caller still gets its exception.
+    //
+    // ORDER, pinned in the spec (§ 3.2). The receipt is appended the moment
+    // `execute` returns, BEFORE its result is awaited, so a crash during a slow
+    // action still leaves a record. If the result then rejects, an `errored`
+    // receipt TRAILS it, and the sink's own promise rejects with the same error,
+    // so a host that forgets its catch still gets Node's crash (the 2026-10-13
+    // flip, test/gate/audit-2026-10-13.test.ts).
+    const act = async (
+      decision: Receipt["decision"],
+      reason: string | undefined,
+      threw: string,
+      rejected: string,
+    ): Promise<SinkResult<Awaited<R>>> => {
+      let pending: R
+      try {
+        pending = cfg.execute(checked as Args)
+      } catch (err) {
+        cfg.log.append({ at: now(), sink: cfg.name, decision: "errored", args: rendered, reason: `${threw}: ${safely(() => (err instanceof Error ? err.message : String(err)))}` })
+        throw err
+      }
+      let receipt: Receipt
+      try {
+        receipt = cfg.log.append({ at: now(), sink: cfg.name, decision, args: rendered, ...(reason === undefined ? {} : { reason }) })
+      } catch (err) {
+        // The log's failure is what the caller gets. The action is still
+        // running, and nobody can catch its rejection now that this call is
+        // over, so it is observed here rather than left to crash the process.
+        void (async () => {
+          try {
+            await pending
+          } catch {
+            /* the log just failed; there is nowhere left to record this */
+          }
+        })()
+        throw err
+      }
+      try {
+        return { ok: true, result: await pending, receipt }
+      } catch (err) {
+        cfg.log.append({
+          at: now(),
+          sink: cfg.name,
+          decision: "errored",
+          args: rendered,
+          reason: `${rejected} — then its promise rejected; the action may or may not have taken effect: ${safely(() => firstLine(err))}`,
+        })
+        throw err
+      }
     }
 
     // Own-key redaction lookup over the own-key snapshot. `spec.redact?.[key]`
@@ -1433,33 +1629,33 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
 
     // Judgment wall — probabilistic, self-aware. Only runs once tiers are satisfied.
     // Judgment sees RAW values (redaction shapes the durable receipt, never the judge's view).
-    if (cfg.judgment && violations.length === 0) {
+    if (judge !== undefined && violations.length === 0) {
       // Built from `checked`, with a null prototype (#8 of the 2026-10-13 gate
       // audit): a plain `{}` made a declared argument named `__proto__` vanish
       // from the provider's view while it sat on the receipt. Judgment runs
       // only when there are no violations, so every entry here is a branded
       // Sourced that passed its tier.
-      const tierArgs: Record<string, { value: unknown; tier: Tier }> = Object.create(null)
-      for (const k of Object.keys(checked)) tierArgs[k] = { value: checked[k]!.value, tier: checked[k]!.tier }
-      const judge = cfg.judgment
-      const providerName = String(judge.provider.name)
+      const judgedArgs: Record<string, unknown> = Object.create(null)
+      for (const k of Object.keys(checked)) judgedArgs[k] = checked[k]!.value
+      const input = Object.freeze({
+        purpose: judge.granted.purpose,
+        action: Object.freeze({ sink: cfg.name, args: Object.freeze(judgedArgs) }),
+      })
+      const providerName = judge.name
 
-      // The provider is scored inside a try (the 2026-10-13 gate audit). A
-      // provider that throws, or returns something that is not a verdict
-      // object, HAS NOT SCORED — and the wall used to let that exception
-      // escape between the tier wall and the receipt, so the log said nothing
-      // about a call the caller saw as an outage. No verdict is read as a
-      // mismatch with no confidence, which the fail-closed rule below turns
-      // into a block in enforce and a flag in observe/warn, with the failure
-      // written on the receipt.
-      let v: JudgmentVerdict
-      try {
-        const out: unknown = judge.provider.assess(cfg.name, tierArgs)
-        if (typeof out !== "object" || out === null) throw new TypeError(`provider returned ${preview(out)} instead of a verdict`)
-        v = out as JudgmentVerdict
-      } catch (err) {
-        v = { assessment: "mismatch", confidence: NaN, rationale: `provider ${providerName} gave no verdict: ${firstLine(err)}` }
-      }
+      // A provider that throws, rejects, runs out of time or answers with
+      // something that is not a verdict HAS NOT SCORED. The wall used to let
+      // that exception escape between the tier wall and the receipt (the
+      // 2026-10-13 gate audit), and it used to read an unawaited Promise as a
+      // verdict with no assessment and execute (DAN-1382). No verdict is read
+      // as a mismatch with no confidence, which the fail-closed rule below
+      // turns into a block in enforce and a flag in observe/warn, with the
+      // failure written on the receipt.
+      const consulted = readVerdict(await consultJudge((signal) => judge.assess(input, signal), judge.timeoutMs))
+      const v: { assessment: unknown; confidence: unknown; rationale: unknown } =
+        "failure" in consulted
+          ? { assessment: "mismatch", confidence: NaN, rationale: `provider ${providerName} gave no verdict: ${consulted.failure}` }
+          : consulted
       // A confidence that is not a finite number is no confidence. The old
       // test was `confidence >= floor`, which NaN, undefined, null and a
       // string all compare FALSE against — so a "mismatch" the provider could
@@ -1490,24 +1686,9 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
         return { ok: false, refusal: `⚖ ${cfg.name} judgment-blocked (${providerName}, ${confText}): ${rationaleText}`, receipt }
       }
       if (v.assessment !== "match") {
-        // Flagged, not blocked — the honest "unsure defers to human" band. An
-        // assessment outside the three known words lands here too.
+        // Flagged, not blocked — the honest "unsure defers to human" band.
         const note = `⚖ ${cfg.name} judgment-flagged (${preview(v.assessment)}, ${confText}): ${rationale}`
-        let result: R
-        try {
-          result = cfg.execute(checked as Args)
-        } catch (err) {
-          // Same hole as the main path (V5) — a flagged action that throws must
-          // not vanish, and this one is MORE important: it was already doubtful.
-          cfg.log.append({
-            at: now(), sink: cfg.name, decision: "errored", args: rendered,
-            reason: `${note} — then threw; the action may or may not have taken effect: ${err instanceof Error ? err.message : String(err)}`,
-          })
-          throw err
-        }
-        result = trailErrored(result, note)
-        const receipt = cfg.log.append({ at: now(), sink: cfg.name, decision: "judgment-flagged", args: rendered, reason: note })
-        return { ok: true, result, receipt }
+        return act("judgment-flagged", note, `${note} — then threw; the action may or may not have taken effect`, note)
       }
     }
 
@@ -1518,35 +1699,11 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
     // gate audit). The violations are on the receipt's reason either way.
     const decision = cfg.mode === "observe" ? "observed" : violations.length > 0 ? "warned" : "executed"
 
-    // The operation runs before the receipt can describe its outcome, so a
-    // throw used to leave NO record at all (adversarial pass V5, 2026-07-25):
-    // the gateway returned 500 on a request that may well have settled, and the
-    // evidence log — the whole product — was silent about it. A log whose only
-    // gap is "everything that went wrong" is worse than no log, because it
-    // reads as complete. The attempt is now always recorded before the error
-    // propagates; the caller still gets its exception.
-    let result: R
-    try {
-      result = cfg.execute(checked as Args)
-    } catch (err) {
-      cfg.log.append({
-        at: now(),
-        sink: cfg.name,
-        decision: "errored",
-        args: rendered,
-        reason: `${cfg.name} passed the walls and then threw — the action may or may not have taken effect: ${err instanceof Error ? err.message : String(err)}`,
-      })
-      throw err
-    }
-
-    result = trailErrored(result, `${cfg.name} passed the walls and was recorded as ${decision}`)
-    const receipt = cfg.log.append({
-      at: now(),
-      sink: cfg.name,
+    return act(
       decision,
-      args: rendered,
-      ...(violations.length > 0 ? { reason: `mode=${cfg.mode}, violations: ${violations.join(" · ")}` } : {}),
-    })
-    return { ok: true, result, receipt }
+      violations.length > 0 ? `mode=${cfg.mode}, violations: ${violations.join(" · ")}` : undefined,
+      `${cfg.name} passed the walls and then threw — the action may or may not have taken effect`,
+      `${cfg.name} passed the walls and was recorded as ${decision}`,
+    )
   }
 }

@@ -34,4 +34,6 @@ export {
   type JudgmentProvider,
   type EnforcementMode,
   type SinkResult,
+  type Action,
 } from "./trust.ts"
+export type { GrantedPurpose, Purpose } from "../purpose.ts"
