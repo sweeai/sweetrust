@@ -26,7 +26,7 @@
 import { createHash } from "node:crypto"
 // The rail's one canonicalization, from a leaf that imports only node:crypto.
 // This is NOT an import of mandate: the gate still stands alone (src/index.ts).
-import { canonicalJSON } from "../canon.ts"
+import { canonicalJSON, sha256Hex } from "../canon.ts"
 
 // ── Tiers (the lattice) ─────────────────────────────────────────────────────
 // Three rungs. The spec drew a fourth, `asserted`, between untrusted and
@@ -881,6 +881,178 @@ export class ReceiptLog {
     }
     return true
   }
+}
+
+// ── The intent digests (spec § 3.2) ──────────────────────────────────────────
+// Three hashes link a judged action across the gate, the mandate log and the
+// chain. Each must name ONE value, and canonicalJSON is built to match
+// JSON.stringify, which quietly maps several values onto one output: NaN and
+// null, -0 and 0, a Map and {}, a Date and its ISO string, a hole and null, a
+// toJSON carrier and whatever it returns. Two different actions under one
+// digest is an approval that travels. So the copy below accepts only what
+// survives canonicalJSON and JSON.parse unchanged, and throws on the rest,
+// rather than extending canonicalJSON (one canonicalization across the rail).
+//
+// Messages are fixed strings: a key or a value here is caller-controlled, and
+// a refusal string ends up in receipts and in front of models.
+
+interface Action {
+  readonly sink: string
+  readonly args: Readonly<Record<string, unknown>>
+}
+
+interface Payment {
+  readonly network: string
+  readonly asset: string
+  readonly recipient: string
+  readonly amount: bigint | string
+}
+
+interface Verdict {
+  readonly assessment: "match" | "mismatch" | "unsure"
+  readonly confidence: number
+  readonly rationaleHash: string
+  readonly provider: string
+  readonly model: string
+  readonly actionDigest: string
+  readonly paymentDigest: string | null
+  readonly grantHash: string
+  readonly judgedAt: string
+  readonly attestation: null
+}
+
+interface Walk {
+  /** Encode bigints as {"$bigint":"<decimal>"} (and so refuse that key raw), or refuse them. */
+  readonly bigints: boolean
+  /** The containers currently being walked: a repeat is a cycle, a shared reference is not. */
+  readonly path: Set<object>
+}
+
+function assertRecord(value: unknown, what: string): asserts value is object {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new TypeError(`${what} must be a plain object`)
+  }
+  const proto: unknown = Object.getPrototypeOf(value)
+  if (proto !== Object.prototype && proto !== null) throw new TypeError(`${what} must be a plain object`)
+}
+
+/** The one read of an own, enumerable data property. An accessor is refused without being run. */
+const ownValue = (owner: object, key: string): unknown => {
+  const d = Reflect.getOwnPropertyDescriptor(owner, key)
+  if (d === undefined || !("value" in d) || !d.enumerable) {
+    throw new TypeError("not plain JSON: a missing, accessor or non-enumerable property")
+  }
+  return d.value
+}
+
+const copyJSON = (value: unknown, walk: Walk): unknown => {
+  switch (typeof value) {
+    case "string":
+    case "boolean":
+      return value
+    case "number":
+      if (!Number.isFinite(value) || Object.is(value, -0)) throw new TypeError("not plain JSON: a non-finite number or -0")
+      return value
+    case "bigint":
+      if (!walk.bigints) throw new TypeError("not plain JSON: a bigint")
+      // String(), not .toString(): it does not go through BigInt.prototype.
+      return { $bigint: String(value) }
+    case "object": {
+      if (value === null) return null
+      if (walk.path.has(value)) throw new TypeError("not plain JSON: a cycle")
+      walk.path.add(value)
+      const copy = Array.isArray(value) ? copyArray(value, walk) : copyRecord(value, walk)
+      walk.path.delete(value)
+      return copy
+    }
+    default:
+      throw new TypeError("not plain JSON: undefined, a function or a symbol")
+  }
+}
+
+const copyArray = (value: readonly unknown[], walk: Walk): unknown[] => {
+  if (Object.getPrototypeOf(value) !== Array.prototype) throw new TypeError("not plain JSON: an array subclass")
+  const length = value.length
+  // Own keys are the indices plus `length`, so this refuses a hole and an extra
+  // key alike, and refuses new Array(2 ** 32 - 1) without walking it.
+  if (Reflect.ownKeys(value).length !== length + 1) throw new TypeError("not plain JSON: a sparse array or an array with extra keys")
+  const out: unknown[] = []
+  for (let i = 0; i < length; i++) out.push(copyJSON(ownValue(value, String(i)), walk))
+  return out
+}
+
+const copyRecord = (value: object, walk: Walk): Record<string, unknown> => {
+  assertRecord(value, "not plain JSON: a value")
+  const entries: Array<[string, unknown]> = []
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key === "symbol") throw new TypeError("not plain JSON: a symbol key")
+    if (walk.bigints && key === "$bigint") throw new TypeError("a raw $bigint key collides with the bigint encoding")
+    entries.push([key, copyJSON(ownValue(value, key), walk)])
+  }
+  // fromEntries defines own properties, so a "__proto__" key stays data. An
+  // assignment here would set the copy's prototype.
+  return Object.fromEntries(entries)
+}
+
+/** Nesting deeper than the stack is one more malformed input: a TypeError like the rest. */
+const refusingOverflow = <T>(run: () => T): T => {
+  try {
+    return run()
+  } catch (e) {
+    if (e instanceof RangeError) throw new TypeError("not plain JSON: nested too deeply or too large")
+    throw e
+  }
+}
+
+const copyExact = (value: unknown, bigints: boolean): unknown =>
+  refusingOverflow(() => copyJSON(value, { bigints, path: new Set() }))
+
+const digestOf = (value: unknown): string => refusingOverflow(() => sha256Hex(canonicalJSON(value)))
+
+/**
+ * Replace each bigint in an action, at any depth, with {"$bigint":"<decimal>"},
+ * so that canonicalJSON can take it. Returns a fresh copy sharing nothing with
+ * the input. Throws a TypeError on a raw `$bigint` key (it would collide with
+ * the encoding) and on anything that is not plain JSON.
+ */
+export function encodeAction(action: Action): Action {
+  assertRecord(action, "an action")
+  if (Reflect.ownKeys(action).length !== 2) throw new TypeError("an action is exactly { sink, args }")
+  const sink = ownValue(action, "sink")
+  const args = ownValue(action, "args")
+  if (typeof sink !== "string") throw new TypeError("an action's sink must be a string")
+  assertRecord(args, "an action's args")
+  return { sink, args: copyExact(args, true) as Action["args"] }
+}
+
+/** sha256Hex(canonicalJSON(encodeAction(action))). */
+export function actionDigest(action: Action): string {
+  return digestOf(encodeAction(action))
+}
+
+/**
+ * The digest of a payment's four parts; any other field on the argument is
+ * ignored. The kernel has no chain knowledge and normalizes nothing: the
+ * strings are hashed as given, so a non-canonical address or a zero-padded
+ * amount simply fails to match the adapter's own recomputation, which is the
+ * fail-closed path the spec wants. A bigint amount must be non-negative, like
+ * the string form.
+ */
+export function paymentDigest(payment: Payment): string {
+  const { network, asset, recipient, amount } = payment as { [K in keyof Payment]: unknown }
+  if (typeof network !== "string" || typeof asset !== "string" || typeof recipient !== "string") {
+    throw new TypeError("a payment's network, asset and recipient must be strings")
+  }
+  if (typeof amount === "bigint" ? amount < 0n : typeof amount !== "string" || !/^[0-9]+$/.test(amount)) {
+    throw new TypeError("a payment's amount must be a non-negative bigint or decimal-integer string")
+  }
+  return digestOf({ network, asset, recipient, amount: String(amount) })
+}
+
+/** sha256Hex(canonicalJSON(verdict)), over a copy that must be plain JSON. */
+export function verdictDigest(verdict: Verdict): string {
+  assertRecord(verdict, "a verdict")
+  return digestOf(copyExact(verdict, false))
 }
 
 // ── Judgment seam (complement, never compete) ────────────────────────────────

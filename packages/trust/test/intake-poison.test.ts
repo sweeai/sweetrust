@@ -39,10 +39,14 @@ import { describe, expect, test } from "vitest"
 import { poison, readsOf, SecondRead } from "./helpers/poison.ts"
 import { MandateFailure } from "../src/mandate/errors.ts"
 import {
+  actionDigest,
   allowlisted,
   corroborate,
+  encodeAction,
   humanConfirm,
   makeSink,
+  paymentDigest,
+  verdictDigest,
   ReceiptLog,
   Sourced,
   type JudgmentProvider,
@@ -734,5 +738,46 @@ describe("verify + signer: records, options bags, signer configs and sign/preima
       () => makeEd25519SignerLive(poison({ privateKeyPem: pems.privateKeyPem, publicKeyPem: other }, "config")),
       (s) => s.publicKeyHex,
     )
+  })
+})
+
+describe("gate: the intent digests read their argument once", () => {
+  const argsBag = () => ({ amount: { n: 5n }, to: "0xabc" })
+  const action = () => ({ sink: "pay", args: argsBag() })
+  const poisonedAction = () => poison({ sink: "pay", args: poison({ amount: poison({ n: 5n }, "amount"), to: "0xabc" }, "args") }, "action")
+  const ENCODED_ARGS = { amount: { n: { $bigint: "5" } }, to: "0xabc" }
+
+  test("encodeAction and actionDigest — success, and the raw $bigint refusal", () => {
+    expect(encodeAction(poisonedAction())).toEqual({ sink: "pay", args: ENCODED_ARGS })
+    expect(actionDigest(poisonedAction())).toBe(actionDigest(action()))
+    sameVerdict("encodeAction", () => encodeAction(action()), () => encodeAction(poisonedAction()))
+    sameVerdict("actionDigest", () => actionDigest(action()), () => actionDigest(poisonedAction()))
+    const raw = () => ({ sink: "pay", args: { a: { $bigint: "1" } } })
+    sameVerdict("encodeAction ($bigint)", () => encodeAction(raw()), () => encodeAction(poison({ sink: "pay", args: poison({ a: poison({ $bigint: "1" }, "a") }, "args") }, "action")))
+  })
+
+  test("paymentDigest — success, and the malformed-amount refusal", () => {
+    const pay = (amount: bigint | string) => ({ network: "sui:testnet", asset: "0x2::sui::SUI", recipient: "0xabc", amount })
+    expect(paymentDigest(poison(pay(600n), "payment"))).toBe(paymentDigest(pay("600")))
+    sameVerdict("paymentDigest", () => paymentDigest(pay(600n)), () => paymentDigest(poison(pay(600n), "payment")))
+    sameVerdict("paymentDigest (bad amount)", () => paymentDigest(pay("-1")), () => paymentDigest(poison(pay("-1"), "payment")))
+  })
+
+  test("verdictDigest — success, and the malformed-verdict refusal", () => {
+    const v = () => ({
+      assessment: "match" as const,
+      confidence: 0.9,
+      rationaleHash: "a".repeat(64),
+      provider: "p",
+      model: "m@1",
+      actionDigest: "c".repeat(64),
+      paymentDigest: null,
+      grantHash: "b".repeat(64),
+      judgedAt: "2026-01-01T00:00:00.000Z",
+      attestation: null,
+    })
+    expect(verdictDigest(poison(v(), "verdict"))).toBe(verdictDigest(v()))
+    sameVerdict("verdictDigest", () => verdictDigest(v()), () => verdictDigest(poison(v(), "verdict")))
+    sameVerdict("verdictDigest (NaN)", () => verdictDigest({ ...v(), confidence: NaN }), () => verdictDigest(poison({ ...v(), confidence: NaN }, "verdict")))
   })
 })
