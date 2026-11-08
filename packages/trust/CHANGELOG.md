@@ -14,6 +14,106 @@ verified by one version is unaffected by an upgrade; a chain that crosses a vers
 re-verified by the newer code, which may refuse it — each such change is a *Breaking* bullet in the
 release that makes it. A patch version changes none of these.
 
+## [0.6.0] — Unreleased
+
+Not yet on npm. This release adds the intent layer: the owner's purpose is signed into the mandate,
+a judge scores each action against it, and doubt never moves money. The kernel ships no judge.
+`mockJudgmentProvider` is a stand-in for demos and tests, and a real model is a provider you bring.
+
+**Upgrading from 0.5.0.** These call shapes change; each is a *Breaking* bullet below.
+
+```ts
+// 0.5.0: const r = pay(args)
+const r = await pay(args) // every sink call now returns a Promise, judged or not
+```
+
+```ts
+// 0.5.0: a provider's assess answered synchronously with the action alone
+const provider = {
+  name: "my-judge",
+  model: "my-judge@1",
+  assess: async ({ purpose, action }, signal) => ({ assessment: "match", confidence: 0.9, rationale: "fits" }),
+}
+```
+
+```ts
+// A judged sink now needs the purpose its grant recorded.
+const pay = makeSink({ /* … */ judgment: { provider, floor: 0.7, granted: trust.grantedPurpose(scope) } })
+```
+
+Receipts from an unjudged sink hash exactly as they did in 0.5.0, so a 0.5.0 log of them verifies
+unchanged. Only a judged sink's receipts change shape (ADR 0009).
+
+### Security
+
+- **A confident `mismatch` from an async judge no longer executes.** In 0.5.0 the sink read a
+  provider's Promise as if it were the verdict, so an async provider resolving `mismatch` still
+  ran the action, recorded as `judgment-flagged`. TypeScript forbade that provider shape and
+  JavaScript did not, so reaching it took a cast or plain JavaScript. The sink now awaits the
+  provider on its one code path (ADR 0007). Regression: `test/gate/async-sink.test.ts`.
+- **Doubt never moves money.** In `enforce`, a judge that throws, times out, returns a malformed
+  verdict, answers `unsure`, or answers `match` below the floor leaves the action held and
+  `execute` uncalled. A failed judge is recorded as `unsure` with confidence 0. A verdict that
+  arrives after the deadline is discarded, and the abort signal has fired by then.
+- **The judge sees a frozen view with exactly two keys, `purpose` and `action`.** Editing a nested
+  argument during the judge's wait changes nothing that executes. A tier violation is refused
+  before the judge is called, so a judge that always says `match` cannot lift a refusal.
+
+### Added
+
+- **A purpose on the grant.** `issueOrgMandate`, `issueProjectMandate` and `issueAgentMandate` take
+  an optional `purpose: { statement, fields?: { payees?, maxPerAction?, actions? } }`. It is
+  recorded on the grant event and covered by its signature. `trust.grantedPurpose(scope)` returns
+  it with the grant's hash. A delegated mandate may only narrow its parent's fields: a child that
+  widens one, or omits a field its parent set, is refused at issue.
+- **`judgment-held`, a new `Receipt["decision"]`.** It is doubt in `enforce`: nothing ran and the
+  action waits for its owner. The result carries `held: { verdictDigest, actionDigest, grantHash }`,
+  the three digests an approval must name. `judgment-flagged` remains for `observe` and `warn`.
+- **`sink.resume(args, approval)`, the one way a held action runs.** It takes an approval signed by
+  the sink's `approvalKey`, usable once: two overlapping resumes run the action exactly once. An
+  attempt that ends `errored` has used the approval, so an owner decides any retry. A refusal names
+  one of `approval-unsigned`, `approval-mismatch`, `approval-expired` or `approval-replayed`. An
+  altered argument is a different action, so it does not resume.
+- **Every judged receipt carries its verdict**: the assessment, confidence, provider, model, and
+  digests of the rationale, the action, the payment and the grant. `verdictDigest(verdict)`
+  recomputes its digest from the receipt alone. A resumed execution's receipt also carries the
+  owner's `approval`.
+- **`encodeAction`, `actionDigest`, `paymentDigest` and `verdictDigest`** from `sweetrust/gate`.
+  They hash what they are given and normalize nothing, so give them the same canonical address and
+  asset strings your adapter uses. A mismatch fails closed.
+- **`judgment.purposeArgs`** (`{ payee, amount, asset? }`, with `judgment.network` and
+  `judgment.asset`) names which arguments are the payment. The purpose's `fields` then refuse
+  outside payees and amounts before the judge runs, and the verdict binds the payment's digest.
+- **`execute(args, { authorizedBy })`.** A judged sink passes `{ verdictDigest, paymentDigest }` as
+  an optional second argument, so a payment can name the verdict that approved it.
+- **`useCapability({ verdictDigest })`** records that digest on the mandate's invoke event. An
+  invoke without one signs exactly as before.
+- **`reconcile({ gate, sui, chain })`** from `sweetrust/verify` compares a chain's real payments
+  with your records and names each one the judge did not account for: `no-receipt`, `no-verdict`,
+  `double-spend` or `payment-mismatch`. A failed chain transaction is a refusal, never an orphan.
+
+### Changed
+
+- ***Breaking:*** every sink call returns a Promise. `execute` gains the optional second argument
+  above, and a rejected async `execute` rejects the sink's promise.
+- ***Breaking:*** `JudgmentProvider.assess` is async and takes `({ purpose, action }, signal)`.
+  `judgment.timeoutMs` sets its deadline (default 5,000 ms; at most 2^31-1).
+- ***Breaking:*** a judged sink requires `judgment.granted`, and a grant with no purpose is a
+  `TypeError` when the sink is built, never a surprise at runtime.
+- ***Breaking:*** the receipt hash body gains two optional keys, `verdict` and `approval` (ADR
+  0009). Omitting them keeps the 0.5.0 bytes. A raw argument containing a `$bigint` key is now a
+  tier-wall violation, because that key is the action encoding's own marker.
+- A `Receipt["decision"]` consumer must handle `judgment-held`.
+
+### Notes
+
+- **The check is off chain** (ADR 0008). Nothing on Sui refuses a spend no judge saw. `reconcile`
+  finds it afterward, by comparing the chain with your records.
+- **`reconcile` catches bypass and omission, not forgery by the log key's holder.** It also does
+  not surface a verdict that executed at the gate with no payment leaving: that is not a payment.
+- **The first end-to-end run used the stand-in judge.** It proves the records join, not that any
+  model judges well.
+
 ## [0.5.0] — 2026-11-02
 
 **Upgrading from 0.4.0.** These call shapes change; each is a *Breaking* bullet below.
@@ -472,5 +572,6 @@ this repository and is not carried forward.
   protect — in particular that `revokeMandate` writes only to this package's log and stops no
   money a chain already holds.
 
+[0.6.0]: https://github.com/sweeai/sweetrust/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/sweeai/sweetrust/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/sweeai/sweetrust/releases/tag/v0.4.0

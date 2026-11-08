@@ -6,21 +6,39 @@ this package follows [Semantic Versioning](https://semver.org).
 ## Versioning
 
 `sweetrust-sui` is 0.x: **a minor version may break.** Until 1.0 these may change in a minor: the
-receipt shape (`schema: "sweetrust-sui/receipt@1"` names it, and a change bumps it), the
+receipt shape (`schema: "sweetrust-sui/receipt@2"` names it, and a change bumps it), the
 `RefusalCode`, `LimitVerdict` and `HeldBy` unions, and the `enforces` declaration (a limit moves
 from `library` or `nobody` to `chain` when a Sui primitive with a public package can hold it). The
 `why` sentences are written for people and may be reworded in any release: match on `code` and
 `native`, never on `why`.
 
-## [Unreleased]
+## [0.1.0] — Unreleased
 
-The first release, 0.1.0. Not yet on npm. Out of 0.1, so you can plan around it: app-bound
+The first release. Not yet on npm. It needs `sweetrust` 0.6.0, and its first public receipt format
+is receipt@2, so no consumer of receipt@1 exists. Out of 0.1, so you can plan around it: app-bound
 allowances (`allowance::propose_for_app`, the slot a Sui agent product with a public package fills
 later, which is where recipients and a per-payment cap can move on chain); reserve-then-commit
 spends (Sui settles each spend, so `spend` is one step); and mainnet spends (the module is present
 on mainnet; this package has spent only on testnet). Tested against `@mysten/sui` 2.35.0 only.
 
 ### Added
+
+- **Each spend can name the verdict that approved it.** `spend` takes an optional
+  `authorizedBy: { verdictDigest, paymentDigest }`, and every receipt@2 repeats it, `null` when
+  none was given. With `suiAllowances({ requireAuthorization: true })`, the adapter recomputes the
+  payment digest from what it would actually send and refuses, as `not-authorized`, a spend with no
+  `authorizedBy` or a different digest. That check runs first, so a refused payment signs nothing.
+  Like the recipient list, it binds only spends routed through this library.
+- **`chainSpends({ allowanceId, network, graphqlUrl? })`** lists an allowance's real
+  `balance_spend` transactions from the chain's indexer, owing nothing to any receipt of ours. An
+  unreachable indexer, or one that does not know the allowance, throws, so silence never reads as
+  "no spends". The indexer trails the chain by moments: wait for your spend to appear before
+  passing the list to `reconcile`, or a fresh spend reads as missing.
+- **One judged payment, proven end to end on testnet.** `scripts/intent-e2e.ts` issues a mandate
+  with a purpose, runs a judged sink, spends, reads the chain and reconciles. Transaction
+  `8yqHCsi6Ns9pKUE2sHr6iu4s5eLB4MndtVTWub2ZC6gV` is in `test/conformance/intent-e2e.json`: the
+  invoke event, the gate receipt and receipt@2 carry the same verdict digest, with zero orphans.
+  That run used `mockJudgmentProvider`, so it proves the records join, not a model's judgment.
 
 - **`suiAllowances({ client, network, scale?, log?, gasBudget? })`**, SweeTrust's delegated-allowance
   interface (ADR 0003) on Sui's native allowance, `0x2::allowance`, plain path. Four verbs: `open`
