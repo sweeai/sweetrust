@@ -80,6 +80,7 @@ import {
   generateSigningKeypair,
   makeEd25519ReceiptSigner,
   publicKeyHexFromPem,
+  reconcile,
   SignedReceiptLog,
   verifySignedChain,
   type SignedReceipt,
@@ -853,5 +854,68 @@ describe("gate: the intent digests read their argument once", () => {
     expect(verdictDigest(poison(v(), "verdict"))).toBe(verdictDigest(v()))
     sameVerdict("verdictDigest", () => verdictDigest(v()), () => verdictDigest(poison(v(), "verdict")))
     sameVerdict("verdictDigest (NaN)", () => verdictDigest({ ...v(), confidence: NaN }), () => verdictDigest(poison({ ...v(), confidence: NaN }, "verdict")))
+  })
+})
+
+describe("verify: reconcile reads each record, and each nested bag, once", () => {
+  type Rec = Record<string, unknown>
+  const network = "sui:testnet"
+  const asset = "0x2::sui::SUI"
+  const pd = paymentDigest({ network, asset, recipient: "0xabc", amount: "600" })
+  const judgedBy = (): Rec => ({
+    assessment: "match",
+    confidence: 0.9,
+    rationaleHash: "a".repeat(64),
+    provider: "p",
+    model: "m@1",
+    actionDigest: "c".repeat(64),
+    paymentDigest: pd,
+    grantHash: "b".repeat(64),
+    judgedAt: "2026-01-01T00:00:00.000Z",
+    attestation: null,
+  })
+  const vd = verdictDigest(judgedBy() as never)
+  const gateRow = (v: Rec | number = judgedBy(), decision = "executed"): Rec => ({ seq: 0, prevHash: "GENESIS", hash: "h", at: "t", sink: "pay", decision, args: {}, verdict: v })
+  const suiRow = (digest: string, auth: Rec | null = { verdictDigest: vd, paymentDigest: pd }, over: Rec = {}): Rec => ({ schema: "sweetrust-sui/receipt@2", verb: "spend", verdict: "executed", digest, authorizedBy: auth, ...over })
+  const chainRow = (digest: string, over: Rec = {}): Rec => ({ digest, status: "success", sender: "0xs", network, asset, recipient: "0xabc", amount: "600", ...over })
+
+  const poisonRows = (rows: Rec[], label: string, nested: string) =>
+    poison(
+      rows.map((row, i) => {
+        const inner = row[nested]
+        return poison({ ...row, ...(typeof inner === "object" && inner !== null ? { [nested]: poison({ ...(inner as Rec) }, `${label}[${i}].${nested}`) } : {}) }, `${label}[${i}]`)
+      }),
+      label,
+    )
+
+  const plain = (g: Rec[], s: Rec[], c: Rec[]) => () => reconcile({ gate: g, sui: s, chain: c } as never)
+  const poisoned = (g: Rec[], s: Rec[], c: Rec[]) => () =>
+    reconcile(poison({ gate: poisonRows(g, "gate", "verdict"), sui: poisonRows(s, "sui", "authorizedBy"), chain: poisonRows(c, "chain", "") }, "args") as never)
+
+  const cases: Array<[string, () => [Rec[], Rec[], Rec[]]]> = [
+    ["clean", () => [[gateRow()], [suiRow("D1")], [chainRow("D1")]]],
+    ["no-receipt", () => [[gateRow()], [], [chainRow("D1")]]],
+    ["no-verdict", () => [[], [suiRow("D1")], [chainRow("D1")]]],
+    ["payment-mismatch", () => [[gateRow()], [suiRow("D1")], [chainRow("D1", { amount: "601" })]]],
+    ["double-spend", () => [[gateRow()], [suiRow("D1"), suiRow("D2")], [chainRow("D1"), chainRow("D2")]]],
+    ["a chain failure", () => [[], [], [chainRow("F1", { status: "failure", amount: null, recipient: null })]]],
+    ["a receipt the chain does not show", () => [[gateRow()], [suiRow("D1")], []]],
+    ["a duplicated chain digest", () => [[gateRow()], [suiRow("D1")], [chainRow("D1"), chainRow("D1")]]],
+    ["duplicated receipts", () => [[gateRow()], [suiRow("D1"), suiRow("D1")], [chainRow("D1")]]],
+    ["a malformed verdict", () => [[gateRow({ ...judgedBy(), confidence: NaN })], [], []]],
+    ["a non-object verdict", () => [[gateRow(7)], [], []]],
+    ["a null authorizedBy", () => [[gateRow()], [suiRow("D1", null)], [chainRow("D1")]]],
+    ["an other decision", () => [[gateRow(judgedBy(), "judgment-held")], [suiRow("D1")], [chainRow("D1")]]],
+  ]
+
+  test.each(cases)("%s", (label, build) => {
+    const [g, s, c] = build()
+    // Both runs must return: two matching throws would prove nothing here.
+    expect(verdict(plain(g, s, c)).kind).toBe("returned")
+    sameVerdict(`reconcile (${label})`, plain(g, s, c), poisoned(g, s, c))
+  })
+
+  test("a malformed argument bag", () => {
+    sameVerdict("reconcile (no chain)", () => reconcile({ gate: [], sui: [] } as never), () => reconcile(poison({ gate: [], sui: [] }, "args") as never))
   })
 })

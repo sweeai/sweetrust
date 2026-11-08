@@ -44,6 +44,7 @@ export {
   SignedReceiptLog,
   parseJSONL,
   verifySignedChain,
+  reconcile,
   RECEIPT_MEMO_PREFIX,
   ANCHOR_MEMO_PREFIX,
   receiptMemo,
@@ -53,4 +54,10 @@ export {
   type ReceiptSigner,
   type VerifyFailure,
   type VerifyReport,
+  type Orphan,
+  type OrphanReason,
+  type ReconcileArgs,
+  type ReconcileReport,
+  type ReconcileSuiReceipt,
+  type ReconcileChainSpend,
 } from "./verify/index.ts"
