@@ -30,6 +30,8 @@ export type {
   VerifyAuditChainResult,
 } from "./types.ts"
 
+export type { GrantedPurpose, Purpose } from "../purpose.ts"
+
 export {
   makeInMemoryAuditLive,
   makeJsonlAuditLive,

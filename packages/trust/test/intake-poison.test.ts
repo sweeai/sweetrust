@@ -345,6 +345,37 @@ describe("mandate: every exported function reads its args bag, and each capabili
       () => resumeRun((x) => x),
       () => resumeRun(poison),
     )
+    // DAN-1384: the `purpose` bag and its `fields` bag are caller data read
+    // once at issue. The verdicts to pin are an issue, a narrower child, the
+    // widening refusal, and what grantedPurpose then reads back. The hash is
+    // left out because a grant's timestamp differs across the two runs.
+    const purposeRun = (wrap: <T extends object>(x: T) => T) => {
+      const audit = makeInMemoryAuditLive()
+      const trust = createTrust(wrap({ store: audit }))
+      const purpose = (payees: string[], maxPerAction: string) =>
+        wrap({ statement: "pay for research", fields: wrap({ payees, maxPerAction, actions: ["pay"] }) })
+      const org = trust.issueOrgMandate(wrap({ grantor: ARTHUR, capabilities: [Wire] as const, rationale: "org", purpose: purpose(["0xa", "0xb"], "500") }))
+      const project = trust.issueProjectMandate(wrap({ grantor: LEAD, grantorScope: org, capabilities: [Wire] as const, rationale: "project", purpose: purpose(["0xa"], "100") }))
+      const agent = trust.issueAgentMandate(wrap({ grantor: BOT, grantorScope: project, capabilities: [Wire] as const, rationale: "agent", purpose: purpose(["0xa"], "100") }))
+      let widened = "none"
+      try {
+        trust.issueAgentMandate(wrap({ grantor: BOT, grantorScope: project, capabilities: [Wire] as const, rationale: "agent", purpose: purpose(["0xa"], "101") }))
+      } catch (e) {
+        if (MandateFailure.is(e)) widened = e._tag
+        else throw e
+      }
+      return { widened, recorded: [org, project, agent].map((s) => trust.grantedPurpose(s).purpose) }
+    }
+    sameVerdict(
+      "createTrust() with purpose: issue, narrow, refuse a wider child, read it back",
+      () => purposeRun((x) => x),
+      () => purposeRun(poison),
+    )
+    // grantedPurpose takes a scope, whose authority is object identity (this
+    // file's header): a Proxy of one is correctly refused, without a second read.
+    const trust = createTrust({ store: makeInMemoryAuditLive() })
+    const scope = trust.issueOrgMandate({ grantor: ARTHUR, capabilities: [Wire] as const, rationale: "org", purpose: { statement: "s" } })
+    expect(verdict(() => trust.grantedPurpose(poison(scope)))).toEqual({ kind: "threw", tag: "MandateScopeForged" })
   })
 
   test("issueOrgMandate — success, and the injected-rationale refusal", () => {

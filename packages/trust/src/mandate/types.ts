@@ -11,6 +11,8 @@
  * log, signed and hash-chained when a signer is wired. Refusals are the typed
  * `MandateError` union, thrown as `MandateFailure`.
  */
+import type { Purpose } from "../purpose.ts"
+
 /**
  * A capability is identified by a stable string `key`. The compiler tracks
  * the LITERAL key type via the `Id` generic parameter, so two capabilities
@@ -157,7 +159,7 @@ export type MandateError =
   | { readonly _tag: "CapabilityNotInGrantorScope"; readonly capability: string }
   | {
       readonly _tag: "MaliciousMandateMetadata"
-      readonly inputKind: "rationale" | "capability-identifier"
+      readonly inputKind: "rationale" | "capability-identifier" | "purpose"
       readonly matchedPatternId: string
       readonly evidence: string
     }
@@ -241,6 +243,15 @@ export type MandateError =
       readonly grantorMandateId: MandateId
       readonly capability: string
       readonly field: "amount" | "count" | "windowMs" | "unit"
+    }
+  | {
+      // A delegated purpose that would widen its grantor's recorded one, spec
+      // I9 (DAN-1384). A child that omits the purpose or a field the grantor
+      // set is refused too, because omission would widen. `field` names the
+      // first failure.
+      readonly _tag: "PurposeNotNarrowing"
+      readonly grantorMandateId: MandateId
+      readonly field: "purpose" | "statement" | "payees" | "maxPerAction" | "actions"
     }
   | {
       // Raised by `resume` when what the caller declares about the mandate
@@ -327,6 +338,8 @@ export interface MandateGrantEvent {
   readonly triggerSource: TriggerSource
   /** Per-capability limits (DAN-1319). Absent when the grant set none. This is the record enforcement reads. */
   readonly limits?: CapabilityLimits
+  /** What the owner granted this for, signed with the grant (DAN-1384). Absent when the grant set none, so a purposeless grant's bytes do not move. */
+  readonly purpose?: Purpose
 }
 
 /**

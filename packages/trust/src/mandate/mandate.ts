@@ -7,6 +7,8 @@
  * surface the pre-check exists to defend.
  */
 import { randomBytes } from "node:crypto"
+import { canonicalJSON, sha256Hex } from "../canon.ts"
+import type { GrantedPurpose, Purpose } from "../purpose.ts"
 import { constitutionalPreCheck } from "./security.ts"
 import { MandateFailure } from "./errors.ts"
 import type {
@@ -435,6 +437,175 @@ const assertLimitsTighterThan = (
     }
     if (parent.unit !== undefined && child?.unit !== parent.unit) refuse("unit")
   }
+}
+
+// ============================================================================
+// The purpose on a grant (DAN-1384)
+// ============================================================================
+//
+// The owner's sentence and its deterministic fields are written into the grant
+// event and signed with it. The event is the only record anything reads: the
+// narrowing check takes the parent's purpose from the parent's grant event, and
+// a scope has no purpose field at all, so a holder has nothing to alter.
+//
+// The rules mirror limits (ADR 0005): a malformed purpose at issue is a
+// programmer error (a `TypeError`); a child that would widen its parent is a
+// refusal (`PurposeNotNarrowing`). The same parser reads a purpose back from
+// the log, where malformed means no issuer can have written the line, so the
+// verdict there is `DelegationChainBroken`.
+
+const MAX_STATEMENT_LENGTH = 280
+
+/** Decimal base units, one spelling per value: no sign, no fraction, no leading zero. */
+const DECIMAL_INTEGER = /^(?:0|[1-9][0-9]*)$/
+
+const isObjectBag = (x: unknown): x is object =>
+  typeof x === "object" && x !== null && !Array.isArray(x)
+
+/**
+ * Each own key of `raw` read exactly once, into a bag with no prototype (the
+ * intake rule). An unknown key is refused rather than dropped: a misspelled
+ * `payee` silently dropped would be an owner who believes the payee is bound
+ * and a grant that does not bind it. An own `__proto__` (JSON.parse makes one)
+ * is an unknown key like any other.
+ */
+const readOwnFields = (
+  raw: object,
+  allowed: ReadonlyArray<string>,
+  where: string,
+): Record<string, unknown> => {
+  const out: Record<string, unknown> = Object.create(null)
+  for (const key of Object.keys(raw)) {
+    if (!allowed.includes(key)) throw new TypeError(`${where} has an unknown key "${key}"`)
+    out[key] = (raw as Record<string, unknown>)[key]
+  }
+  return out
+}
+
+/** A frozen copy of a list of non-empty strings; undefined stays undefined. */
+const readStringList = (raw: unknown, where: string): ReadonlyArray<string> | undefined => {
+  if (raw === undefined) return undefined
+  // Checked first: a bare string is iterable, and spreading "0xabc" would
+  // record five one-character payees.
+  if (!Array.isArray(raw)) throw new TypeError(`${where} must be an array of strings`)
+  const list: ReadonlyArray<unknown> = [...raw]
+  for (const entry of list) {
+    if (typeof entry !== "string" || entry.length === 0) {
+      throw new TypeError(`${where} must contain only non-empty strings`)
+    }
+  }
+  return Object.freeze(list) as ReadonlyArray<string>
+}
+
+/**
+ * Snapshot and validate a purpose: a deep-frozen copy built from one read of
+ * each own field, sharing nothing with `raw`. Plain objects are safe here
+ * because every key written is one of the fixed names below.
+ */
+const snapshotPurpose = (raw: unknown): Purpose => {
+  if (!isObjectBag(raw)) throw new TypeError("purpose must be an object with a statement")
+  const { statement, fields: rawFields } = readOwnFields(raw, ["statement", "fields"], "purpose")
+  if (typeof statement !== "string" || statement.length === 0 || statement.length > MAX_STATEMENT_LENGTH) {
+    throw new TypeError(`purpose.statement must be a string of 1 to ${MAX_STATEMENT_LENGTH} characters`)
+  }
+  if (rawFields === undefined) return Object.freeze({ statement })
+  if (!isObjectBag(rawFields)) throw new TypeError("purpose.fields must be an object")
+  const { payees: rawPayees, maxPerAction, actions: rawActions } = readOwnFields(
+    rawFields,
+    ["payees", "maxPerAction", "actions"],
+    "purpose.fields",
+  )
+  const payees = readStringList(rawPayees, "purpose.fields.payees")
+  const actions = readStringList(rawActions, "purpose.fields.actions")
+  if (maxPerAction !== undefined && !(typeof maxPerAction === "string" && DECIMAL_INTEGER.test(maxPerAction))) {
+    throw new TypeError("purpose.fields.maxPerAction must be a decimal integer string")
+  }
+  return Object.freeze({
+    statement,
+    fields: Object.freeze({
+      ...(payees === undefined ? {} : { payees }),
+      ...(maxPerAction === undefined ? {} : { maxPerAction: maxPerAction as string }),
+      ...(actions === undefined ? {} : { actions }),
+    }),
+  })
+}
+
+/**
+ * The caller's `purpose`, read once and screened: AGENTS.md, any function that
+ * persists an authored string runs the constitutional pre-check first. The
+ * digits of `maxPerAction` have already matched `DECIMAL_INTEGER`.
+ */
+const capturePurpose = (raw: unknown): Purpose | undefined => {
+  if (raw === undefined) return undefined
+  const purpose = snapshotPurpose(raw)
+  for (const authored of [purpose.statement, ...(purpose.fields?.payees ?? []), ...(purpose.fields?.actions ?? [])]) {
+    const match = constitutionalPreCheck(authored)
+    if (match) {
+      failMandate({
+        _tag: "MaliciousMandateMetadata",
+        inputKind: "purpose",
+        matchedPatternId: match.patternId,
+        evidence: match.evidence,
+      })
+    }
+  }
+  return purpose
+}
+
+/** A grant event's purpose, as a fresh frozen copy; a malformed line names its own id as the break. */
+const recordedPurpose = (subjectId: MandateId, grant: MandateGrantEvent): Purpose | undefined => {
+  const raw: unknown = grant.purpose
+  if (raw === undefined) return undefined
+  try {
+    return snapshotPurpose(raw)
+  } catch {
+    return failMandate({ _tag: "DelegationChainBroken", mandateId: subjectId, brokenAncestorId: grant.mandateId })
+  }
+}
+
+const isSubsetOf = (child: ReadonlyArray<string> | undefined, parent: ReadonlyArray<string>): boolean =>
+  child !== undefined && child.every((entry) => parent.includes(entry))
+
+/**
+ * I9, over two validated purposes: a child may only narrow. With no parent
+ * purpose there is nothing to widen. A child that omits the purpose, or a
+ * field its parent set, is refused, because omission would widen. A field the
+ * parent left open may be set by the child. In v1 the statement must be equal
+ * byte for byte. `maxPerAction` compares as an integer, never as text or a float.
+ */
+const assertPurposeNarrows = (
+  grantorMandateId: MandateId,
+  parent: Purpose | undefined,
+  child: Purpose | undefined,
+): void => {
+  if (parent === undefined) return
+  const refuse = (field: "purpose" | "statement" | "payees" | "maxPerAction" | "actions"): never =>
+    failMandate({ _tag: "PurposeNotNarrowing", grantorMandateId, field })
+  if (child === undefined) return refuse("purpose")
+  if (child.statement !== parent.statement) return refuse("statement")
+  const p = parent.fields
+  const c = child.fields
+  if (p?.payees !== undefined && !isSubsetOf(c?.payees, p.payees)) return refuse("payees")
+  if (
+    p?.maxPerAction !== undefined &&
+    (c?.maxPerAction === undefined || BigInt(c.maxPerAction) > BigInt(p.maxPerAction))
+  ) {
+    return refuse("maxPerAction")
+  }
+  if (p?.actions !== undefined && !isSubsetOf(c?.actions, p.actions)) return refuse("actions")
+}
+
+/** The issue-time half of I9: the parent's purpose comes from its grant event, never from the scope. */
+const assertPurposeWithinGrantor = (
+  audit: MandateAuditService,
+  grantorMandateId: MandateId,
+  childPurpose: Purpose | undefined,
+): void => {
+  const grantEvent = audit.query(grantorMandateId).find((e) => e.type === "grant") as
+    | MandateGrantEvent
+    | undefined
+  const parentPurpose = grantEvent === undefined ? undefined : recordedPurpose(grantorMandateId, grantEvent)
+  assertPurposeNarrows(grantorMandateId, parentPurpose, childPurpose)
 }
 
 /**
@@ -872,6 +1043,8 @@ export const issueOrgMandate = <Caps extends ReadonlyArray<Capability>>(args: {
   readonly triggerSource?: TriggerSource
   /** Per-capability caps, keyed by capability key (DAN-1319). */
   readonly limits?: CapabilityLimits
+  /** What this grant is for, signed into it (DAN-1384). */
+  readonly purpose?: Purpose
 }, audit: MandateAuditService): MandateScope<Caps, "organization", null> => {
   // Every caller-supplied field is read exactly once (the 2026-10-13 mandate audit).
   const { grantor, rationale } = args
@@ -879,6 +1052,7 @@ export const issueOrgMandate = <Caps extends ReadonlyArray<Capability>>(args: {
   const capabilityIds = resolveCapabilityIds(capabilities)
   const limits = captureLimits(args.limits, capabilityIds)
   capabilityIds.forEach(assertCapabilityIdentifierClean)
+  const purpose = capturePurpose(args.purpose)
   const triggerSource: TriggerSource = args.triggerSource ?? "code"
 
   const rationaleCheck = constitutionalPreCheck(rationale)
@@ -919,6 +1093,7 @@ export const issueOrgMandate = <Caps extends ReadonlyArray<Capability>>(args: {
     timestamp: grantTimestamp,
     triggerSource,
     ...(Object.keys(limits).length === 0 ? {} : { limits }),
+    ...(purpose === undefined ? {} : { purpose }),
   }))
 
   return scope
@@ -943,6 +1118,8 @@ export const issueProjectMandate = <
   readonly triggerSource?: TriggerSource
   /** Per-capability caps; at least as tight as the grantor's on every capped capability carried (DAN-1319). */
   readonly limits?: CapabilityLimits
+  /** What this grant is for; may only narrow the grantor's recorded purpose (DAN-1384). */
+  readonly purpose?: Purpose
 }, audit: MandateAuditService): MandateScope<
   ProjectCaps,
   "project",
@@ -954,6 +1131,7 @@ export const issueProjectMandate = <
   const capabilityIds = resolveCapabilityIds(capabilities)
   const limits = captureLimits(args.limits, capabilityIds)
   capabilityIds.forEach(assertCapabilityIdentifierClean)
+  const purpose = capturePurpose(args.purpose)
   const triggerSource: TriggerSource = args.triggerSource ?? "code"
 
   const rationaleCheck = constitutionalPreCheck(rationale)
@@ -988,6 +1166,7 @@ export const issueProjectMandate = <
   // grantor was never actually granted (audit-log-is-truth at issue time).
   assertRequestedCapsBackedByGrantorGrant(audit, grantorScope.id, capabilityIds)
   assertLimitsWithinGrantor(audit, grantorScope.id, capabilityIds, limits)
+  assertPurposeWithinGrantor(audit, grantorScope.id, purpose)
 
   // DAN-1157: an issued grantor, and the runtime half of the tier ladder.
   assertIssued(grantorScope, grantorScope.id, capabilityIds[0] ?? "")
@@ -1026,6 +1205,7 @@ export const issueProjectMandate = <
     timestamp: grantTimestamp,
     triggerSource,
     ...(Object.keys(limits).length === 0 ? {} : { limits }),
+    ...(purpose === undefined ? {} : { purpose }),
   }))
 
   return scope
@@ -1054,6 +1234,8 @@ export const issueAgentMandate = <
   readonly triggerSource?: TriggerSource
   /** Per-capability caps; at least as tight as the grantor's on every capped capability carried (DAN-1319). */
   readonly limits?: CapabilityLimits
+  /** What this grant is for; may only narrow the grantor's recorded purpose (DAN-1384). */
+  readonly purpose?: Purpose
 }, audit: MandateAuditService): MandateScope<
   AgentCaps,
   "agent",
@@ -1065,6 +1247,7 @@ export const issueAgentMandate = <
   const capabilityIds = resolveCapabilityIds(capabilities)
   const limits = captureLimits(args.limits, capabilityIds)
   capabilityIds.forEach(assertCapabilityIdentifierClean)
+  const purpose = capturePurpose(args.purpose)
   const triggerSource: TriggerSource = args.triggerSource ?? "code"
 
   const rationaleCheck = constitutionalPreCheck(rationale)
@@ -1099,6 +1282,7 @@ export const issueAgentMandate = <
   // grantor was never actually granted (audit-log-is-truth at issue time).
   assertRequestedCapsBackedByGrantorGrant(audit, grantorScope.id, capabilityIds)
   assertLimitsWithinGrantor(audit, grantorScope.id, capabilityIds, limits)
+  assertPurposeWithinGrantor(audit, grantorScope.id, purpose)
 
   // DAN-1157: an issued grantor, and the runtime half of the tier ladder. This
   // is what makes agents leaves for a JavaScript caller too: an agent-tier
@@ -1139,6 +1323,7 @@ export const issueAgentMandate = <
     timestamp: grantTimestamp,
     triggerSource,
     ...(Object.keys(limits).length === 0 ? {} : { limits }),
+    ...(purpose === undefined ? {} : { purpose }),
   }))
 
   return scope
@@ -1204,6 +1389,7 @@ export const resumeMandate = <
   // carried the result; a line appended to an unsigned log skipped them. So
   // every link of the rebuilt chain is checked again here, child against
   // parent, before anything is minted (blind review 2026-11-01, finding 2).
+  const purposes = chain.map((g) => recordedPurpose(mandateId, g))
   for (let k = 0; k + 1 < chain.length; k++) {
     const child = chain[k]!
     const parent = chain[k + 1]!
@@ -1214,6 +1400,7 @@ export const resumeMandate = <
       }
     }
     assertLimitsTighterThan(parent.mandateId, parent.limits, child.capabilities, child.limits ?? EMPTY_LIMITS)
+    assertPurposeNarrows(parent.mandateId, purposes[k + 1], purposes[k])
   }
 
   const recorded = Object.freeze([...leaf.capabilities].sort())
@@ -1278,4 +1465,39 @@ export const resumeMandate = <
   }))
 
   return scope as unknown as ResumedScope<Caps, Tier>
+}
+
+/**
+ * grantedPurpose — the purpose a mandate's grant event records, with the hash
+ * that names that grant, for the host to hand a judged sink (DAN-1384).
+ *
+ * The log answers, never the scope. Possession and binding are checked first,
+ * so a copy of a scope is refused as forged and a scope minted against another
+ * store as foreign; a resumed scope is issued and bound like any other. The
+ * purpose returned is a frozen copy, because a JSONL store parses a fresh
+ * object and an in-memory store hands back the one it holds.
+ *
+ * A grant with no purpose is a `TypeError`, not a null: a judged sink cannot
+ * be built without one, and a host that asks has made a programmer error
+ * where it builds the sink (spec § 5), before any authority decision.
+ */
+export const grantedPurpose = (
+  scope: MandateScope<any, any, any>,
+  audit: MandateAuditService,
+): GrantedPurpose => {
+  const presented: unknown = scope
+  // Read once, and only reported until `assertIssued` has passed.
+  const mandateId = (presented as { readonly id?: unknown } | null | undefined)?.id as MandateId
+  assertIssued(presented, mandateId, "")
+  assertBoundTo(audit, presented as object, mandateId)
+
+  const grantEvent = audit.query(mandateId).find((e) => e.type === "grant") as MandateGrantEvent | undefined
+  if (grantEvent === undefined) {
+    return failMandate({ _tag: "MandateNotIssued", mandateId })
+  }
+  const purpose = recordedPurpose(mandateId, grantEvent)
+  if (purpose === undefined) {
+    throw new TypeError(`grantedPurpose: the grant of ${mandateId} carries no purpose`)
+  }
+  return Object.freeze({ purpose, grantHash: sha256Hex(canonicalJSON(grantEvent)) })
 }

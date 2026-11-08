@@ -33,12 +33,14 @@
  */
 import {
   issueAgentMandate as issueAgentMandateImpl,
+  grantedPurpose as grantedPurposeImpl,
   issueOrgMandate as issueOrgMandateImpl,
   issueProjectMandate as issueProjectMandateImpl,
   resumeMandate as resumeMandateImpl,
   revokeMandate as revokeMandateImpl,
   useCapability as useCapabilityImpl,
 } from "./mandate.ts"
+import type { GrantedPurpose, Purpose } from "../purpose.ts"
 import type {
   Capability,
   CapabilityLimits,
@@ -77,6 +79,8 @@ export interface TrustClient {
     readonly triggerSource?: TriggerSource
     /** Per-capability caps, keyed by capability key (DAN-1319). */
     readonly limits?: CapabilityLimits
+    /** What this grant is for, signed into it. The statement is at most 280 characters (DAN-1384). */
+    readonly purpose?: Purpose
   }) => MandateScope<Caps, "organization", null>
 
   /** Derive a project tier from an org scope this client issued; a compile-time subset. */
@@ -91,6 +95,8 @@ export interface TrustClient {
     readonly triggerSource?: TriggerSource
     /** Per-capability caps; at least as tight as the grantor's on every capped capability carried (DAN-1319). */
     readonly limits?: CapabilityLimits
+    /** What this grant is for; only ever narrows the grantor's recorded purpose, and may not be omitted if it has one (DAN-1384). */
+    readonly purpose?: Purpose
   }) => MandateScope<ProjectCaps, "project", MandateScope<OrgCaps, "organization", null>>
 
   /** Derive an agent tier, a leaf, from a project scope this client issued. */
@@ -106,6 +112,8 @@ export interface TrustClient {
     readonly triggerSource?: TriggerSource
     /** Per-capability caps; at least as tight as the grantor's on every capped capability carried (DAN-1319). */
     readonly limits?: CapabilityLimits
+    /** What this grant is for; only ever narrows the grantor's recorded purpose, and may not be omitted if it has one (DAN-1384). */
+    readonly purpose?: Purpose
   }) => MandateScope<
     AgentCaps,
     "agent",
@@ -157,6 +165,14 @@ export interface TrustClient {
     readonly triggerSource?: TriggerSource
   }) => ResumedScope<Caps, Tier>
 
+  /**
+   * The purpose this scope's grant event records and the hash naming that
+   * grant, for the host to hand a judged sink. Read from the log. A copy of a
+   * scope, or a scope from another store, is refused; a grant with no purpose
+   * is a TypeError (DAN-1384).
+   */
+  readonly grantedPurpose: (scope: MandateScope<any, any, any>) => GrantedPurpose
+
   readonly audit: AuditView
 }
 
@@ -197,6 +213,7 @@ export const createTrust = (config: TrustConfig): TrustClient => {
     useCapability: (args) => useCapabilityImpl(args, store),
     revokeMandate: (args) => revokeMandateImpl(args, store),
     resume: (args) => resumeMandateImpl(args, store),
+    grantedPurpose: (scope) => grantedPurposeImpl(scope, store),
     audit,
   }
   return Object.freeze(client)
