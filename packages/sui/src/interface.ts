@@ -91,6 +91,8 @@ export type RefusalCode =
   | "insufficient-funds"
   /** The transaction could not be built or signed, so nothing was sent; the library refused in-process. */
   | "not-submitted"
+  /** spend(): the adapter requires a verdict, and this payment names none, or names one for a different payment. */
+  | "not-authorized"
   /** The chain refused for a reason this library does not classify; `native` and `why` quote it. */
   | "chain-error"
 
@@ -108,6 +110,17 @@ export interface NativeAbort {
    * the refusal is a pre-flight check of the chain's rule.
    */
   readonly rawAbortCode: string | null
+}
+
+/**
+ * The verdict that approved a payment, and the payment it approved. Both are
+ * SweeTrust gate digests (`verdictDigest`, `paymentDigest` from `sweetrust/gate`):
+ * 64 lowercase hex characters.
+ */
+export interface AuthorizedBy {
+  readonly verdictDigest: string
+  /** Null when the judged sink named no payment fields; a null never passes `requireAuthorization`. */
+  readonly paymentDigest: string | null
 }
 
 export interface Refusal {
@@ -167,7 +180,7 @@ export type Verb = "open" | "spend" | "revoke"
  *   read back with `remaining()`, before anything is retried.
  */
 export interface AllowanceReceipt {
-  readonly schema: "sweetrust-sui/receipt@1"
+  readonly schema: "sweetrust-sui/receipt@2"
   readonly verb: Verb
   readonly verdict: "executed" | "refused" | "errored"
   readonly network: Caip2
@@ -191,6 +204,12 @@ export interface AllowanceReceipt {
   readonly amount: string | null
   readonly amountText: string | null
   readonly recipient: string | null
+  /**
+   * Spend only: the verdict this payment named, exactly as supplied, refusals
+   * included; null when it named none. Checked against the payment only when the
+   * adapter requires authorization; otherwise it is the caller's claim, repeated.
+   */
+  readonly authorizedBy: AuthorizedBy | null
   readonly limits: ReadonlyArray<LimitLine>
   readonly refusal: Refusal | null
   /** One plain-English sentence: what happened. */
@@ -236,7 +255,7 @@ export interface AllowanceAdapter<S, H> {
   /** Who holds each limit on this chain. */
   readonly enforces: Enforcement
   open(args: { signer: S; allowance: DelegatedAllowance; name?: string }): Promise<{ receipt: AllowanceReceipt; allowance: H | null }>
-  spend(args: { signer: S; allowance: H; amount: bigint; recipient: string }): Promise<AllowanceReceipt>
+  spend(args: { signer: S; allowance: H; amount: bigint; recipient: string; authorizedBy?: AuthorizedBy }): Promise<AllowanceReceipt>
   revoke(args: { signer: S; allowance: H }): Promise<AllowanceReceipt>
   remaining(args: { allowance: H }): Promise<Remaining>
 }

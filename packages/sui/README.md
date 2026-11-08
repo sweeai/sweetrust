@@ -86,11 +86,11 @@ console.log(first.verdict, second.verdict, second.refusal?.native?.abortName, ve
 console.log(JSON.stringify(second, null, 2))
 ```
 
-It prints `executed refused EExceedsRateLimit true`, then the second spend's receipt. This one is from a real run:
+It prints `executed refused EExceedsRateLimit true`, then the second spend's receipt. This one is from a real run, with the `schema` and `authorizedBy` lines brought up to receipt@2 by hand:
 
 ```json
 {
-  "schema": "sweetrust-sui/receipt@1",
+  "schema": "sweetrust-sui/receipt@2",
   "verb": "spend",
   "verdict": "refused",
   "network": "sui:testnet",
@@ -105,6 +105,7 @@ It prints `executed refused EExceedsRateLimit true`, then the second spend's rec
   "amount": "1000000",
   "amountText": "10.00 testUSD",
   "recipient": "0x16b7c5a22d9ae356215e3d8ee62a946199e1c78bc25a1ae49ef851db233be713",
+  "authorizedBy": null,
   "limits": [
     {
       "limit": "rate",
@@ -169,6 +170,42 @@ console.log(forever.verdict, forever.refusal?.code, forever.refusal?.native?.abo
 ```
 
 The second receipt's `why`: *"Refused at open(); nothing was sent to Sui. Sui's rule (0x2::allowance::ENoExpiration, abort code 15): every allowance has an expiry or a rate, so it can never be unbounded in time. A lifetime cap alone never ends; add an expiry, or a rate."*
+
+## A payment names the verdict that approved it
+
+`spend` takes an optional `authorizedBy: { verdictDigest, paymentDigest }`: the verdict from a SweeTrust gate, and the digest of the payment that verdict judged. An adapter built with `requireAuthorization: true` recomputes the payment digest from what it would actually send (`network`, `normalizeStructTag(asset)`, the normalized recipient, `amount`) and refuses a spend with no `authorizedBy` or a different digest, as `not-authorized`. The check is the first thing `spend` does, before any chain read, so a refused payment signs nothing. This block runs offline:
+
+<!-- readme-check: run - expect refused not-authorized refused not-authorized -->
+```ts
+import { SuiGrpcClient } from "@mysten/sui/grpc"
+import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519"
+import { normalizeStructTag, normalizeSuiAddress } from "@mysten/sui/utils"
+import { paymentDigest } from "sweetrust/gate"
+import { suiAllowances, type SuiAllowance } from "sweetrust-sui"
+
+const agent = Ed25519Keypair.generate()
+const recipient = normalizeSuiAddress("0xabc")
+const sui = suiAllowances({
+  client: new SuiGrpcClient({ network: "testnet", baseUrl: "https://fullnode.testnet.sui.io:443" }),
+  network: "sui:testnet",
+  requireAuthorization: true,
+})
+const allowance: SuiAllowance = {
+  network: "sui:testnet", asset: "0x2::sui::SUI", allowanceId: normalizeSuiAddress("0xa110"), capId: normalizeSuiAddress("0xca9"),
+  funder: normalizeSuiAddress("0x1"), spender: agent.toSuiAddress(), limits: { lifetimeCap: 1_000n, expiry: new Date("2030-01-01") },
+}
+
+// No verdict named at all.
+const unnamed = await sui.spend({ signer: agent, allowance, amount: 30n, recipient })
+console.log(unnamed.verdict, unnamed.refusal?.code)
+
+// A verdict for 3 used on a payment of 30.
+const forThree = paymentDigest({ network: "sui:testnet", asset: normalizeStructTag("0x2::sui::SUI"), recipient, amount: 3n })
+const swapped = await sui.spend({ signer: agent, allowance, amount: 30n, recipient, authorizedBy: { verdictDigest: "d".repeat(64), paymentDigest: forThree } })
+console.log(swapped.verdict, swapped.refusal?.code)
+```
+
+Every spend receipt repeats the `authorizedBy` it was given, refusals included (`null` when none was). Without `requireAuthorization` it is optional and repeated unchecked. Like the recipient list, this check binds only spends routed through this library.
 
 ---
 

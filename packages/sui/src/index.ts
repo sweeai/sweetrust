@@ -11,6 +11,6 @@ export { SUI, baseUnitsOf, defineScale } from "./scale.ts"
 export type { Scale } from "./scale.ts"
 export { ABORTS as SUI_ALLOWANCE_ABORTS } from "./allowance-move.ts"
 export type {
-  AllowanceAdapter, AllowanceLimits, AllowanceReceipt, Caip2, DelegatedAllowance, Enforcement, HeldBy,
+  AllowanceAdapter, AllowanceLimits, AllowanceReceipt, AuthorizedBy, Caip2, DelegatedAllowance, Enforcement, HeldBy,
   LimitLine, LimitName, LimitVerdict, NativeAbort, RateLimit, Refusal, RefusalCode, Remaining, Verb,
 } from "./interface.ts"
