@@ -136,6 +136,8 @@ export interface TrustClient {
     readonly triggerSource?: TriggerSource
     /** What this use spends; required when the grant caps the capability by amount (DAN-1319). */
     readonly amount?: number
+    /** The digest of the verdict that approved this use, recorded on the invoke event: 64 lowercase hex, else a TypeError (DAN-1385). */
+    readonly verdictDigest?: string
   }) => void
 
   /** Revoke a mandate; the revoker proves position by possessing the target or an ancestor. */

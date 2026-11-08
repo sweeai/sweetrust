@@ -474,6 +474,41 @@ describe("mandate: every exported function reads its args bag, and each capabili
     )
   })
 
+  test("useCapability — verdictDigest is read once, accepted and refused alike (DAN-1385)", () => {
+    const digest = "d".repeat(64)
+    const recorded = (audit: ReturnType<typeof chain>["audit"], id: ReturnType<typeof chain>["agent"]["id"]) =>
+      audit.query(id).map((e) => (e.type === "invoke" ? e.verdictDigest : e.type))
+    sameVerdict(
+      "useCapability (verdictDigest)",
+      () => {
+        const { audit, agent } = chain()
+        useCapability({ mandate: agent, capability: Read, verdictDigest: digest }, audit)
+        return recorded(audit, agent.id)
+      },
+      () => {
+        const { audit, agent } = chain()
+        useCapability(poison({ mandate: agent, capability: poison(Read), verdictDigest: digest }), audit)
+        return recorded(audit, agent.id)
+      },
+    )
+    sameVerdict(
+      "useCapability (malformed verdictDigest)",
+      () => {
+        const { audit, agent } = chain()
+        return useCapability({ mandate: agent, capability: Read, verdictDigest: "D".repeat(64) }, audit)
+      },
+      () => {
+        const { audit, agent } = chain()
+        return useCapability(poison({ mandate: agent, capability: poison(Read), verdictDigest: "D".repeat(64) }), audit)
+      },
+    )
+    const { audit, agent } = chain()
+    const bag = poison({ mandate: agent, capability: poison(Read), verdictDigest: digest })
+    useCapability(bag, audit)
+    expect(readsOf(bag).get("verdictDigest")).toBe(1)
+    expect(recorded(audit, agent.id)).toContain(digest)
+  })
+
   test("revokeMandate — success, and the stranger refusal", () => {
     sameVerdict(
       "revokeMandate",

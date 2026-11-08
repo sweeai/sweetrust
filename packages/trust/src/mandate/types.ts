@@ -353,6 +353,8 @@ export interface MandateInvocationEvent {
   readonly triggerSource: TriggerSource
   /** The amount this use spent, when the caller declared one (DAN-1319). Summed by later limit checks. */
   readonly amount?: number
+  /** The digest of the verdict that approved this use, as the host states it: 64 lowercase hex (DAN-1385). Signed with the event, never recomputed or checked against a verdict here. Absent when the host named none, so an unjudged invoke's bytes do not move. */
+  readonly verdictDigest?: string
 }
 
 /**

@@ -804,6 +804,25 @@ const walkChain = (
   return { chain, cyclic: cursorId !== null }
 }
 
+const VERDICT_DIGEST = /^[0-9a-f]{64}$/
+
+/**
+ * The caller's `verdictDigest`: own key only, read once, undefined when absent
+ * (DAN-1385). This is the host's statement of which verdict approved the use;
+ * the mandate module cannot import the gate, so it checks the format and
+ * records the value and never recomputes it. The `typeof` comes first because
+ * a regex test would coerce an array or a `String` object into a pass.
+ */
+const captureVerdictDigest = (args: object): string | undefined => {
+  if (!Object.hasOwn(args, "verdictDigest")) return undefined
+  const raw: unknown = (args as { readonly verdictDigest?: unknown }).verdictDigest
+  if (raw === undefined) return undefined
+  if (typeof raw !== "string" || !VERDICT_DIGEST.test(raw)) {
+    throw new TypeError("useCapability: verdictDigest must be 64 lowercase hex characters")
+  }
+  return raw
+}
+
 /**
  * useCapability — invoke a capability under a mandate.
  *
@@ -828,6 +847,8 @@ export const useCapability = <
   readonly triggerSource?: TriggerSource
   /** What this use spends, in the grant's `unit`. Required when the grant caps the capability by amount (DAN-1319). */
   readonly amount?: number
+  /** The digest of the verdict that approved this use: 64 lowercase hex, else a TypeError (DAN-1385). */
+  readonly verdictDigest?: string
 }, audit: MandateAuditService): void => {
   // Every caller-supplied field is read exactly once, here, and only these
   // locals are used below (the 2026-10-13 mandate audit; the note above
@@ -836,6 +857,9 @@ export const useCapability = <
   const { mandate, capability } = args
   const triggerSource: TriggerSource = args.triggerSource ?? "code"
   const amountRaw: unknown = args.amount
+  // A malformed digest is a programmer error, so it fails here, before any
+  // authority decision, as a malformed purpose does at issue.
+  const verdictDigest = captureVerdictDigest(args)
   const mandateId: MandateId = mandate.id
 
   // The revocation walk, shared with `resume`: see `walkChain` above for why
@@ -907,6 +931,7 @@ export const useCapability = <
     timestamp,
     triggerSource,
     ...(amount === undefined ? {} : { amount }),
+    ...(verdictDigest === undefined ? {} : { verdictDigest }),
   }))
 }
 
