@@ -859,13 +859,13 @@ describe("#7 — the judgment wall fails closed when it cannot score", () => {
   }
   const verdict = (v: unknown): JudgmentProvider => ({ name: "edge", model: "m@1", assess: async () => v as never })
 
-  it("(a) a throwing provider BLOCKS in enforce, with a receipt, and execute never runs", async () => {
+  it("(a) a throwing provider HOLDS in enforce, with a receipt, and execute never runs (blocked before DAN-1386)", async () => {
     const { log, make, ran } = sink({ name: "boom", model: "m@1", assess: () => { throw new Error("scorer down") } })
     const r = await make()({ to: good() })
     expect(r.ok).toBe(false)
     if (!r.ok) expect(r.refusal).toContain("scorer down")
     expect(ran()).toBe(0)
-    expect(log.all().map((x) => x.decision)).toEqual(["judgment-blocked"])
+    expect(log.all().map((x) => x.decision)).toEqual(["judgment-held"])
     expect(log.all()[0]!.reason).toContain("scorer down")
     expect(log.verifyChain()).toBe(true)
   })
@@ -881,22 +881,22 @@ describe("#7 — the judgment wall fails closed when it cannot score", () => {
   })
 
   it.each([NaN, undefined, null, "0.99", Infinity, -Infinity])(
-    "(b) a mismatch with confidence %j BLOCKS in enforce (non-finite confidence fails closed)",
+    "(b) a mismatch with confidence %j HOLDS in enforce (a non-finite confidence is malformed; blocked before DAN-1386)",
     async (confidence) => {
       const { log, make, ran } = sink(verdict({ assessment: "mismatch", confidence, rationale: "payee is NOT intended" }))
       const r = await make()({ to: good() })
       expect(r.ok).toBe(false)
       expect(ran()).toBe(0)
-      expect(log.all().map((x) => x.decision)).toEqual(["judgment-blocked"])
+      expect(log.all().map((x) => x.decision)).toEqual(["judgment-held"])
     },
   )
 
-  it("(b) a provider that returns no verdict object at all blocks in enforce, with a receipt", async () => {
+  it("(b) a provider that returns no verdict object at all holds in enforce, with a receipt (blocked before DAN-1386)", async () => {
     for (const v of [null, undefined, "match", 42]) {
       const { log, make, ran } = sink(verdict(v))
       await expect(make()({ to: good() })).resolves.toMatchObject({ ok: false })
       expect(ran()).toBe(0)
-      expect(log.all().map((x) => x.decision)).toEqual(["judgment-blocked"])
+      expect(log.all().map((x) => x.decision)).toEqual(["judgment-held"])
     }
   })
 
@@ -911,12 +911,12 @@ describe("#7 — the judgment wall fails closed when it cannot score", () => {
     expect(make).toThrow(/assess/)
   })
 
-  it("CONTROL: floor 0 and 1 construct; match executes; a mismatch below the floor and an unsure both flag", async () => {
+  it("CONTROL: floor 0 and 1 construct; match executes; a mismatch below the floor and an unsure both hold (flagged before DAN-1386)", async () => {
     expect(sink(verdict({ assessment: "match", confidence: 1, rationale: "" }), "enforce", 0).make).not.toThrow()
     expect(sink(verdict({ assessment: "match", confidence: 1, rationale: "" }), "enforce", 1).make).not.toThrow()
     expect((await sink(verdict({ assessment: "match", confidence: 0.9, rationale: "" })).make()({ to: good() })).receipt.decision).toBe("executed")
-    expect((await sink(verdict({ assessment: "mismatch", confidence: 0.3, rationale: "" })).make()({ to: good() })).receipt.decision).toBe("judgment-flagged")
-    expect((await sink(verdict({ assessment: "unsure", confidence: 0.99, rationale: "" })).make()({ to: good() })).receipt.decision).toBe("judgment-flagged")
+    expect((await sink(verdict({ assessment: "mismatch", confidence: 0.3, rationale: "" })).make()({ to: good() })).receipt.decision).toBe("judgment-held")
+    expect((await sink(verdict({ assessment: "unsure", confidence: 0.99, rationale: "" })).make()({ to: good() })).receipt.decision).toBe("judgment-held")
     expect((await sink(verdict({ assessment: "mismatch", confidence: 0.95, rationale: "" })).make()({ to: good() })).receipt.decision).toBe("judgment-blocked")
   })
 })
@@ -1076,12 +1076,12 @@ describe("#5 — an async action that rejects leaves an `errored` receipt behind
   const settle = async () => {
     await new Promise((r) => setTimeout(r, 0))
   }
-  const mk = (execute: () => unknown, judgment?: { provider: JudgmentProvider; floor: number; granted: GrantedPurpose }) => {
+  const mk = (execute: () => unknown, judgment?: { provider: JudgmentProvider; floor: number; granted: GrantedPurpose }, mode: "enforce" | "warn" = "enforce") => {
     const log = new ReceiptLog()
     const pay = makeSink<{ to: Sourced<string> }, unknown>({
       name: "pay",
       requires: { to: "verified" },
-      mode: "enforce",
+      mode,
       log,
       ...(judgment ? { judgment } : {}),
       execute,
@@ -1127,7 +1127,7 @@ describe("#5 — an async action that rejects leaves an `errored` receipt behind
     const unsure: JudgmentProvider = { name: "u", model: "m@1", assess: async () => ({ assessment: "unsure", confidence: 0.4, rationale: "near the cap" }) }
     const { log, pay } = mk(async () => {
       throw new Error("rpc timeout")
-    }, { provider: unsure, floor: 0.8, granted: GRANTED })
+    }, { provider: unsure, floor: 0.8, granted: GRANTED }, "warn") // warn: since DAN-1386 an unsure in enforce holds and never runs
     await expect(pay({ to: good() })).rejects.toThrow("rpc timeout")
     await settle()
     expect(log.all().map((x) => x.decision)).toEqual(["judgment-flagged", "errored"])
@@ -1174,12 +1174,12 @@ describe("#5 flip — the sink's promise writes the errored receipt AND re-raise
   const settle = async () => {
     await new Promise((r) => setTimeout(r, 0))
   }
-  const mk = (execute: () => unknown, judgment?: { provider: JudgmentProvider; floor: number; granted: GrantedPurpose }) => {
+  const mk = (execute: () => unknown, judgment?: { provider: JudgmentProvider; floor: number; granted: GrantedPurpose }, mode: "enforce" | "warn" = "enforce") => {
     const log = new ReceiptLog()
     const pay = makeSink<{ to: Sourced<string> }, unknown>({
       name: "pay",
       requires: { to: "verified" },
-      mode: "enforce",
+      mode,
       log,
       ...(judgment ? { judgment } : {}),
       execute,
@@ -1210,7 +1210,7 @@ describe("#5 flip — the sink's promise writes the errored receipt AND re-raise
     const boom = new Error("rpc timeout")
     const { log, pay } = mk(async () => {
       throw boom
-    }, { provider: unsure, floor: 0.8, granted: GRANTED })
+    }, { provider: unsure, floor: 0.8, granted: GRANTED }, "warn") // warn: since DAN-1386 an unsure in enforce holds and never runs
     await expect(pay({ to: good() })).rejects.toBe(boom)
     await settle()
     expect(log.all().map((x) => x.decision)).toEqual(["judgment-flagged", "errored"])

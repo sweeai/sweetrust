@@ -35,5 +35,10 @@ export {
   type EnforcementMode,
   type SinkResult,
   type Action,
+  type Payment,
+  type Verdict,
+  type Approval,
+  type HeldAction,
+  type AuthorizedBy,
 } from "./trust.ts"
 export type { GrantedPurpose, Purpose } from "../purpose.ts"

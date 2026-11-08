@@ -24,7 +24,8 @@ const label = (decision: Receipt["decision"]): string => {
     case "observed": return "observe mode: the violation was recorded, not enforced"
     case "warned": return "warn mode: the violation was recorded and surfaced"
     case "judgment-blocked": return "the judgment wall blocked an in-bounds action"
-    case "judgment-flagged": return "the judgment wall allowed it, with its doubt on the receipt"
+    case "judgment-flagged": return "observe or warn: the judgment wall had doubt, and the action ran with it on the receipt"
+    case "judgment-held": return "enforce: the judgment wall had doubt, so nothing ran and the action waits for an owner"
     case "errored": return "execute() threw after the checks passed"
     case "declassify-refused": return "a declassifier refused to raise a value"
     default: {

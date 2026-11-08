@@ -271,7 +271,7 @@ describe("the deadline", () => {
     expect(ran.count).toBe(0)
     await tick(60) // well past the late match
     expect(ran.count).toBe(0)
-    expect(decisions(log)).toEqual(["judgment-blocked"])
+    expect(decisions(log)).toEqual(["judgment-held"])
     expect(log.verifyChain()).toBe(true)
   })
 
@@ -280,7 +280,7 @@ describe("the deadline", () => {
     const r = await sink({ to: good() })
     expect(r.ok).toBe(false)
     expect(ran.count).toBe(0)
-    expect(decisions(log)).toEqual(["judgment-blocked"])
+    expect(decisions(log)).toEqual(["judgment-held"])
   })
 
   it("a provider answering FROM its abort listener is still late", async () => {
@@ -296,7 +296,7 @@ describe("the deadline", () => {
     const r = await sink({ to: good() })
     expect(r.ok).toBe(false)
     expect(ran.count).toBe(0)
-    expect(decisions(log)).toEqual(["judgment-blocked"])
+    expect(decisions(log)).toEqual(["judgment-held"])
   })
 
   it("an honest provider sees the signal's reason as a timeout", async () => {
@@ -407,19 +407,20 @@ describe("the deadline", () => {
 })
 
 describe("no answer, or an answer that is not a verdict, fails closed", () => {
-  const blockedWith = async (p: JudgmentProvider, text: string | RegExp) => {
+  // DAN-1386: no verdict is doubt, so it holds. It blocked through DAN-1205.
+  const heldWith = async (p: JudgmentProvider, text: string | RegExp) => {
     const { sink, ran, log } = judged(p)
     const r = await sink({ to: good() })
     expect(r.ok).toBe(false)
     expect(ran.count).toBe(0)
-    expect(decisions(log)).toEqual(["judgment-blocked"])
+    expect(decisions(log)).toEqual(["judgment-held"])
     expect(log.all()[0]!.reason).toMatch(text)
   }
 
-  it("a throw before the provider's first await", () => blockedWith({ name: "j", model: "j@1", assess: () => { throw new Error("no socket") } }, /no socket/))
-  it("a rejected promise", () => blockedWith({ name: "j", model: "j@1", assess: async () => { throw new Error("503") } }, /503/))
-  it("a rejection with a reason that cannot be rendered", () => blockedWith({ name: "j", model: "j@1", assess: () => Promise.reject(Object.create(null)) }, /could not be rendered/))
-  it("a thenable whose then throws", () => blockedWith({ name: "j", model: "j@1", assess: () => ({ then() { throw new Error("bad then") } }) as never }, /bad then/))
+  it("a throw before the provider's first await", () => heldWith({ name: "j", model: "j@1", assess: () => { throw new Error("no socket") } }, /no socket/))
+  it("a rejected promise", () => heldWith({ name: "j", model: "j@1", assess: async () => { throw new Error("503") } }, /503/))
+  it("a rejection with a reason that cannot be rendered", () => heldWith({ name: "j", model: "j@1", assess: () => Promise.reject(Object.create(null)) }, /could not be rendered/))
+  it("a thenable whose then throws", () => heldWith({ name: "j", model: "j@1", assess: () => ({ then() { throw new Error("bad then") } }) as never }, /bad then/))
 
   const malformed: Array<[string, unknown]> = [
     ["an empty object", {}],
@@ -433,7 +434,7 @@ describe("no answer, or an answer that is not a verdict, fails closed", () => {
     ["null", null],
     ["a function", () => MATCH],
   ]
-  it.each(malformed)("%s", (_label, answer) => blockedWith(provider(answer), /gave no verdict/))
+  it.each(malformed)("%s", (_label, answer) => heldWith(provider(answer), /gave no verdict/))
 
   it("a verdict's fields are read once: a getter cannot answer the check with one word and the action with another", async () => {
     let reads = 0
@@ -456,7 +457,7 @@ describe("no answer, or an answer that is not a verdict, fails closed", () => {
     Object.defineProperty(Object.prototype, "assessment", { value: "match", configurable: true, enumerable: false })
     Object.defineProperty(Object.prototype, "confidence", { value: 1, configurable: true, enumerable: false })
     try {
-      await blockedWith(provider({}), /gave no verdict/)
+      await heldWith(provider({}), /gave no verdict/)
     } finally {
       delete (Object.prototype as Record<string, unknown>).assessment
       delete (Object.prototype as Record<string, unknown>).confidence
@@ -543,7 +544,8 @@ describe("execute is awaited", () => {
   it("the same order through the judgment-flagged path", async () => {
     const boom = new Error("rpc timeout")
     const unsure = { assessment: "unsure", confidence: 0.4, rationale: "near the cap" }
-    const { sink, log } = judged(provider(unsure), { execute: async () => { throw boom } })
+    // warn, not enforce: since DAN-1386 an unsure in enforce holds and never runs.
+    const { sink, log } = judged(provider(unsure), { mode: "warn", execute: async () => { throw boom } })
     await expect(sink({ to: good() })).rejects.toBe(boom)
     expect(decisions(log)).toEqual(["judgment-flagged", "errored"])
     expect(log.all()[1]!.reason).toContain("near the cap")
@@ -640,19 +642,23 @@ describe("a judged sink is checked at construction", () => {
     const trust = createTrust({ store: makeInMemoryAuditLive() })
     const org = trust.issueOrgMandate({ grantor: "owner" as GrantorId, capabilities: [Pay], rationale: "r", purpose: { statement: "Pay rent", fields: { payees: ["ACME"], maxPerAction: "500" } } })
     let shown = ""
-    const sink = makeSink<{ to: Sourced<string> }, string>({
+    // DAN-1386: this purpose sets payees and maxPerAction, so the sink must name those args.
+    const sink = makeSink<{ to: Sourced<string>; amount: Sourced<string> }, string>({
       name: "pay",
-      requires: { to: "verified" },
+      requires: { to: "verified", amount: "verified" },
       mode: "enforce",
       log: new ReceiptLog(),
       judgment: {
         provider: { name: "j", model: "j@1", assess: async ({ purpose }) => { shown = purpose.statement; return MATCH } },
         floor: 0.8,
         granted: trust.grantedPurpose(org)!,
+        purposeArgs: { payee: "to", amount: "amount" },
+        network: "sui:testnet",
+        asset: "0x2::sui::SUI",
       },
       execute: () => "sent",
     })
-    await expect(sink({ to: good() })).resolves.toMatchObject({ ok: true })
+    await expect(sink({ to: good(), amount: Sourced.fromAuthority("5", "registry") })).resolves.toMatchObject({ ok: true })
     expect(shown).toBe("Pay rent")
   })
 

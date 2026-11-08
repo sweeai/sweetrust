@@ -14,7 +14,7 @@
  *   Rule 3b — corroboration requires disjoint ancestry
  *   Rule 4  — sinks declare appetite, fail closed, refuse with provenance
  *   Rule 5  — adoption ladder observe → warn → enforce; confidence field
- *   Judgment seam — mismatch blocks, unsure flags (defers to human), and the
+ *   Judgment seam — mismatch blocks, unsure holds for a human in enforce, and the
  *             judgment wall only runs AFTER the tier wall passes
  *   Receipts — hash chain verifies; any mutation of a past event breaks it
  */
@@ -468,13 +468,13 @@ describe("makeSink", () => {
     }
   })
 
-  test("judgment wall: unsure FLAGS and defers — it executes with the doubt on the receipt", async () => {
+  test("judgment wall: unsure HOLDS and defers — nothing executes and the doubt is on the receipt (executed before DAN-1386)", async () => {
     const log = new ReceiptLog()
     // amount 1200 with cap 1100: intended payee, slightly over → the mock's honest "unsure" band
     const judgment = { provider: mockJudgmentProvider({ intendedPayees: new Set(["ACME-8817"]), maxAmount: 1100 }), floor: 0.7, granted: GRANTED }
     const r = await paySink(log, "enforce", judgment)({ to: verified(), amount: corroboratedAmount() })
-    expect(r.ok).toBe(true)
-    expect(r.receipt.decision).toBe("judgment-flagged")
+    expect(r.ok).toBe(false)
+    expect(r.receipt.decision).toBe("judgment-held")
     expect(r.receipt.reason).toContain("unsure")
   })
 
