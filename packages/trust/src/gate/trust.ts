@@ -23,7 +23,7 @@
 //   Rule 5  — adoption ladder: observe → warn → enforce
 // ============================================================================
 
-import { createHash } from "node:crypto"
+import { createHash, createPublicKey, verify as verifySignature, type KeyObject } from "node:crypto"
 // The rail's one canonicalization, from a leaf that imports only node:crypto.
 // This is NOT an import of mandate: the gate still stands alone (src/index.ts).
 import { canonicalJSON, sha256Hex } from "../canon.ts"
@@ -757,7 +757,11 @@ export interface Receipt {
    * every other receipt, which is what keeps those hashing as in 0.5.0.
    */
   readonly verdict?: Verdict
-  /** The owner's approval, on the `executed` receipt of a held action that was resumed. Absent otherwise. */
+  /**
+   * The owner's approval, on the receipt of the execution it released: the
+   * `executed` one, and an `errored` one too when that attempt failed. Absent
+   * otherwise.
+   */
   readonly approval?: Approval
   readonly prevHash: string
   readonly hash: string
@@ -943,7 +947,13 @@ export interface Verdict {
   readonly attestation: null
 }
 
-/** An owner's signed answer to a held action, as recorded on the receipt of the execution it released. */
+/**
+ * An owner's signed answer to a held action, as recorded on the receipt of the
+ * execution it released (spec § 3.3, I11). `signature` is 128 lowercase hex,
+ * Ed25519 by the sink's `approvalKey`, over `canonicalJSON` of the other four
+ * fields plus `domain: "sweetrust/approval@1"`. `expiresAt` is exactly
+ * `Date.prototype.toISOString` output.
+ */
 export interface Approval {
   readonly verdictDigest: string
   readonly actionDigest: string
@@ -1100,6 +1110,86 @@ export function paymentDigest(payment: Payment): string {
 export function verdictDigest(verdict: Verdict): string {
   assertRecord(verdict, "a verdict")
   return digestOf(copyExact(verdict, false))
+}
+
+// ── Owner approval (spec § 3.3, I11) ─────────────────────────────────────────
+// The agent already holds the verdict digest from the held result, so anything
+// it could produce cannot release a hold. A signature by a key it never sees can.
+
+const APPROVAL_DOMAIN = "sweetrust/approval@1"
+const APPROVAL_WINDOW_MS = 15 * 60 * 1000
+const HEX_64 = /^[0-9a-f]{64}$/
+const HEX_128 = /^[0-9a-f]{128}$/
+
+/**
+ * Pin the owner's key at construction. Every spelling but the one exact SPKI-DER
+ * hex is refused, so a key that was mistyped is one line from its cause rather
+ * than a sink that can never resume.
+ */
+function bindApprovalKey(where: string, raw: unknown, log: ReceiptLog): KeyObject | undefined {
+  if (raw === undefined) return undefined
+  if (typeof raw !== "string" || raw.length % 2 !== 0 || !/^[0-9a-f]+$/.test(raw)) {
+    throw new TypeError(`${where}: judgment.approvalKey must be lowercase SPKI-DER hex, got ${preview(raw)}`)
+  }
+  let key: KeyObject
+  try {
+    key = createPublicKey({ key: Buffer.from(raw, "hex"), format: "der", type: "spki" })
+  } catch (err) {
+    throw new TypeError(`${where}: judgment.approvalKey is not an SPKI-DER public key (${firstLine(err)})`)
+  }
+  if (key.asymmetricKeyType !== "ed25519" || key.export({ format: "der", type: "spki" }).toString("hex") !== raw) {
+    throw new TypeError(`${where}: judgment.approvalKey must be exactly one Ed25519 public key in SPKI-DER hex`)
+  }
+  // The held receipt is looked up in the log, so a log that cannot be read back
+  // could never honor an approval. That is a misconfiguration, found here.
+  if (typeof (log as { all?: unknown }).all !== "function") {
+    throw new TypeError(`${where}: judgment.approvalKey needs a log with an all() method, to find the held receipt`)
+  }
+  return key
+}
+
+/**
+ * Read an approval once, own data properties only, and refuse the shape of
+ * anything that is not exactly the five fields. An accessor is refused without
+ * being run, so what is verified and what lands on the receipt are the same
+ * values: this fresh object. A field the signature does not cover has nowhere
+ * to ride.
+ */
+function readApproval(raw: unknown): Approval | undefined {
+  try {
+    assertRecord(raw, "an approval")
+    if (Reflect.ownKeys(raw).length !== 5) return undefined
+    const verdictDigest = ownValue(raw, "verdictDigest")
+    const actionDigest = ownValue(raw, "actionDigest")
+    const grantHash = ownValue(raw, "grantHash")
+    const expiresAt = ownValue(raw, "expiresAt")
+    const signature = ownValue(raw, "signature")
+    if (typeof verdictDigest !== "string" || !HEX_64.test(verdictDigest)) return undefined
+    if (typeof actionDigest !== "string" || !HEX_64.test(actionDigest)) return undefined
+    if (typeof grantHash !== "string" || !HEX_64.test(grantHash)) return undefined
+    if (typeof expiresAt !== "string") return undefined
+    if (typeof signature !== "string" || !HEX_128.test(signature)) return undefined
+    return Object.freeze({ verdictDigest, actionDigest, grantHash, expiresAt, signature })
+  } catch {
+    return undefined
+  }
+}
+
+/** The signature, over bytes built here from the snapshot. `domain` is ours, never the caller's. */
+function approvalSigned(approval: Approval, key: KeyObject): boolean {
+  const { verdictDigest, actionDigest, grantHash, expiresAt, signature } = approval
+  const body = canonicalJSON({ domain: APPROVAL_DOMAIN, verdictDigest, actionDigest, grantHash, expiresAt })
+  try {
+    return verifySignature(null, Buffer.from(body), key, Buffer.from(signature, "hex"))
+  } catch {
+    return false
+  }
+}
+
+/** Only the exact form `toISOString` writes. Date.parse alone also accepts "Nov 8 2026" and friends. */
+const strictInstant = (s: string): number | undefined => {
+  const ms = Date.parse(s)
+  return Number.isFinite(ms) && new Date(ms).toISOString() === s ? ms : undefined
 }
 
 // ── Judgment seam (complement, never compete) ────────────────────────────────
@@ -1474,6 +1564,8 @@ interface JudgedRun {
   readonly args: Readonly<Record<string, Sourced<unknown>>>
   readonly verdict: Verdict
   readonly authorizedBy: AuthorizedBy
+  /** Present on a resume: the owner's approval, carried onto every receipt this run leaves. */
+  readonly approval?: Approval
 }
 
 /**
@@ -1557,6 +1649,10 @@ function readVerdict(consulted: Consulted): { readonly assessment: Verdict["asse
  * Every call returns a Promise, judged or not (ADR 0007), and `result` is the
  * settled value of whatever `execute` returned. A caller who forgets `await`
  * reads `.ok` as undefined on the Promise, never true.
+ *
+ * The returned function also has `.resume(args, approval)`, the one way a held
+ * action runs: an owner-signed approval, usable once (spec § 3.3, I11). The
+ * kernel never asks the owner; the broker does, and brings back the signature.
  */
 export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec: {
   readonly name: string
@@ -1589,6 +1685,10 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
    * sink takes `network` (CAIP-2) and, unless an asset argument is named,
    * `asset`, and its verdicts carry a payment digest. A purpose field that is
    * set needs its argument named here, or the sink does not construct.
+   *
+   * `approvalKey` is the owner's Ed25519 public key as SPKI-DER hex (what
+   * `publicKeyHexFromPem` returns), bound here and never per call. It is what
+   * lets `sink.resume` release a hold; without it every resume is refused.
    */
   readonly judgment?: {
     readonly provider: JudgmentProvider
@@ -1598,6 +1698,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
     readonly purposeArgs?: { readonly payee: keyof Args & string; readonly amount: keyof Args & string; readonly asset?: keyof Args & string }
     readonly network?: string
     readonly asset?: string
+    readonly approvalKey?: string
   }
   /**
    * Per-arg receipt-rendering policy. Receipts are signed and potentially
@@ -1651,6 +1752,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
             purposeArgs: judgmentField("purposeArgs"),
             network: judgmentField("network"),
             asset: judgmentField("asset"),
+            approvalKey: judgmentField("approvalKey"),
           }),
     redact: copyOwn<"raw" | "hash" | "truncate" | undefined>(own("redact")),
   })
@@ -1676,8 +1778,14 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
     }
   }
   const judge = cfg.judgment === undefined ? undefined : bindJudge(where, cfg.judgment, cfg.requires)
+  const ownerKey = bindApprovalKey(where, cfg.judgment?.approvalKey, cfg.log)
+  // Verdicts an approval has released in this process (I11). The executed
+  // receipt is written after execute() returns, so the log alone cannot stop
+  // two resumes that overlap. A claim is never released, a failed execute
+  // included: the action may have taken effect, and one approval is one attempt.
+  const claimed = new Set<string>()
 
-  return async (args: Args): Promise<SinkResult<Awaited<R>>> => {
+  const call = async (args: Args, resuming?: { readonly approval: unknown }): Promise<SinkResult<Awaited<R>>> => {
     // `Object.create(null)` rather than `{}`: `rendered` is keyed by ATTACKER-
     // SUPPLIED argument names and then handed to the receipt. A plain object
     // literal inherits `Object.prototype`, so an argument named `__proto__`
@@ -1725,7 +1833,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
       rejected: string,
       run?: JudgedRun,
     ): Promise<SinkResult<Awaited<R>>> => {
-      const evidence = run === undefined ? {} : { verdict: run.verdict }
+      const evidence = run === undefined ? {} : { verdict: run.verdict, ...(run.approval === undefined ? {} : { approval: run.approval }) }
       let pending: R
       try {
         pending = run === undefined ? cfg.execute(checked as Args) : cfg.execute(run.args as Args, { authorizedBy: run.authorizedBy })
@@ -1877,6 +1985,107 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
       violations.push(`${key} was passed but is not declared in requires — the sink has no stated appetite for it`)
     }
 
+    const refuseViolations = (): SinkResult<Awaited<R>> => {
+      const refusal = `⚠ ${cfg.name} refused: ${violations.join(" · ")}`
+      const receipt = cfg.log.append({ at: now(), sink: cfg.name, decision: "refused", args: rendered, reason: refusal })
+      return { ok: false, refusal, receipt }
+    }
+
+    // ── Resuming a held action (spec § 3.3, I11) ───────────────────────────
+    // No `await` from here to execute(), which act() calls synchronously: the
+    // replay check, the claim and the call are one uninterrupted step, so of two
+    // overlapping resumes exactly one gets past the claim.
+    //
+    // The kernel never asks the owner. That is the broker's job; this only
+    // checks what the broker brings back. Refusals name a fixed code and no value.
+    if (resuming !== undefined) {
+      const refuse = (code: string, detail: string): SinkResult<Awaited<R>> => {
+        const refusal = `⚠ ${cfg.name} refused: ${code}: ${detail}`
+        const receipt = cfg.log.append({ at: now(), sink: cfg.name, decision: "refused", args: rendered, reason: refusal })
+        return { ok: false, refusal, receipt }
+      }
+
+      // 1. The owner's signature, before anything the approval says is believed.
+      const approval = readApproval(resuming.approval)
+      if (approval === undefined || ownerKey === undefined || judge === undefined || !approvalSigned(approval, ownerKey)) {
+        return refuse("approval-unsigned", "no valid owner signature over the approval")
+      }
+
+      // 2. The hold, found by recomputing each receipt's digest from the verdict
+      // it stores. A hold exists only in enforce, so an observe or warn sink
+      // sharing this log (and a violation would pass there) can release nothing.
+      let heldReceipt: Receipt | undefined
+      let heldVerdict: Verdict | undefined
+      let attempted = false
+      if (cfg.mode === "enforce") {
+        for (const receipt of cfg.log.all()) {
+          const v = receipt.verdict
+          if (receipt.sink !== cfg.name || v === undefined) continue
+          if (receipt.decision !== "judgment-held" && receipt.decision !== "executed" && receipt.decision !== "errored") continue
+          let digest: string
+          try {
+            digest = verdictDigest(v)
+          } catch {
+            continue
+          }
+          if (digest !== approval.verdictDigest) continue
+          if (receipt.decision !== "judgment-held") attempted = true
+          else if (heldReceipt === undefined) {
+            heldReceipt = receipt
+            heldVerdict = v
+          }
+        }
+      }
+      if (heldReceipt === undefined || heldVerdict === undefined || heldVerdict.grantHash !== judge.granted.grantHash || approval.grantHash !== heldVerdict.grantHash) {
+        return refuse("approval-mismatch", "this approval does not name an action held by this sink")
+      }
+
+      // 3. Expiry, against the receipt's own clock. `!(a <= b)` so that a receipt
+      // whose `at` does not parse refuses instead of comparing false.
+      const expiresAt = strictInstant(approval.expiresAt)
+      if (expiresAt === undefined || Date.now() >= expiresAt || !(expiresAt <= Date.parse(heldReceipt.at) + APPROVAL_WINDOW_MS)) {
+        return refuse("approval-expired", "this approval is expired, or expires more than 15 minutes after the hold")
+      }
+
+      // 4. The args presented now are the action that was held. Any change is a
+      // new action, which goes through the judge by calling the sink again. Only
+      // branded values can name it: `checked` also holds what failed the brand
+      // check, and those are violations, not tiers to re-wrap.
+      const resumed = Object.values(checked).every((arg) => Sourced.is(arg)) ? snapshotAction(cfg.name, checked, []) : undefined
+      if (resumed === undefined || resumed.digest !== approval.actionDigest || approval.actionDigest !== heldVerdict.actionDigest) {
+        return refuse("approval-mismatch", "the resumed arguments are not the action that was held")
+      }
+
+      // 5. Replay: claimed in this process, or an attempt already on the log. An
+      // `errored` receipt counts: it is the only record of an attempt that threw.
+      if (claimed.has(approval.verdictDigest) || attempted) {
+        return refuse("approval-replayed", "this approval has already released its one execution")
+      }
+
+      // Steps 1 and 2 of a judged call, and only the judge is skipped (I1). The
+      // digest above says nothing about pedigree: the same value at a lower tier
+      // digests the same. This refusal spends nothing; the claim comes after it.
+      const paymentOfResume = violations.length === 0 ? checkPurpose(judge.purpose, cfg.name, resumed.values, violations) : null
+      if (violations.length > 0) return refuseViolations()
+      if (paymentOfResume !== heldVerdict.paymentDigest) {
+        return refuse("approval-mismatch", "this sink's payment is not the payment that was held")
+      }
+
+      claimed.add(approval.verdictDigest)
+      return act(
+        "executed",
+        undefined,
+        `${cfg.name} was released by an owner approval and then threw — the action may or may not have taken effect`,
+        `${cfg.name} was released by an owner approval and was recorded as executed`,
+        {
+          args: resumed.sourced,
+          verdict: heldVerdict,
+          authorizedBy: Object.freeze({ verdictDigest: approval.verdictDigest, paymentDigest: heldVerdict.paymentDigest }),
+          approval,
+        },
+      )
+    }
+
     // Snapshot and purpose fields, before the wall they feed. Only a call that
     // is already clean gets this far: a judge never runs on a violation (I1).
     let snapshot: ActionSnapshot | undefined
@@ -1888,11 +2097,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
 
     // Tier wall — hard structural gate (Rule 4). A purpose-field or snapshot
     // failure is a violation too, so it refuses here and the judge never runs.
-    if (violations.length > 0 && cfg.mode === "enforce") {
-      const refusal = `⚠ ${cfg.name} refused: ${violations.join(" · ")}`
-      const receipt = cfg.log.append({ at: now(), sink: cfg.name, decision: "refused", args: rendered, reason: refusal })
-      return { ok: false, refusal, receipt }
-    }
+    if (violations.length > 0 && cfg.mode === "enforce") return refuseViolations()
 
     // Judgment wall — probabilistic, self-aware. Every path out of this block
     // either returns or sets `run`, and enforce sets `run` only on a confident
@@ -1992,4 +2197,19 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
       run,
     )
   }
+
+  // Two wrappers, so `resuming` cannot be reached positionally: a caller who
+  // passes an approval to the sink itself gets an ordinary judged call. Frozen
+  // so that nothing holding the sink can swap what `resume` does.
+  return Object.freeze(
+    Object.assign((args: Args) => call(args), {
+      /**
+       * Release a held action with the owner's approval (spec § 3.3). Runs
+       * the frozen copy of `args` and skips the judge. Refused otherwise with
+       * `approval-unsigned`, `approval-expired`, `approval-mismatch` or
+       * `approval-replayed` in the refusal string and a `refused` receipt.
+       */
+      resume: (args: Args, approval: Approval) => call(args, { approval }),
+    }),
+  )
 }

@@ -34,11 +34,12 @@
  * record; the three declassifiers re-read their `Sourced` arguments into the
  * ascent. Each was watched RED here before its fix.
  */
-import { generateKeyPairSync } from "node:crypto"
+import { generateKeyPairSync, sign } from "node:crypto"
 import { describe, expect, test } from "vitest"
 import { GRANTED } from "./helpers/granted.ts"
 import { poison, readsOf, SecondRead } from "./helpers/poison.ts"
 import { MandateFailure } from "../src/mandate/errors.ts"
+import { canonicalJSON } from "../src/canon.ts"
 import {
   actionDigest,
   allowlisted,
@@ -601,6 +602,31 @@ describe("gate: the sink spec, its nested bags, the call's args bag, the log ent
         },
       )
     }
+  })
+
+  test("sink.resume: the approval, its args bag and the sink's approvalKey are each read once", async () => {
+    const { publicKey, privateKey } = generateKeyPairSync("ed25519")
+    const approvalKey = publicKey.export({ format: "der", type: "spki" }).toString("hex")
+    const run = async (wrap: <T extends object>(o: T, label: string) => T) => {
+      const log = new ReceiptLog()
+      const base = spec(log, true)
+      const pay = makeSink(wrap({ ...base, judgment: wrap({ ...base.judgment!, approvalKey }, "spec.judgment") }, "spec"))
+      const value = good()
+      const h = await pay(wrap({ to: value }, "args"))
+      if (h.ok || h.held === undefined) throw new Error("expected a hold")
+      const fields = { ...h.held, expiresAt: new Date(Date.now() + 60_000).toISOString() }
+      const signature = sign(null, Buffer.from(canonicalJSON({ domain: "sweetrust/approval@1", ...fields })), privateKey).toString("hex")
+      const released = await pay.resume(wrap({ to: value }, "resume.args"), wrap({ ...fields, signature }, "resume.approval"))
+      const replayed = await pay.resume(wrap({ to: value }, "resume.args"), wrap({ ...fields, signature }, "resume.approval"))
+      const forged = await pay.resume(wrap({ to: value }, "resume.args"), wrap({ ...fields, signature: "0".repeat(128) }, "resume.approval"))
+      return {
+        released: [released.ok, released.receipt.decision],
+        replayed: [replayed.ok, replayed.receipt.decision, replayed.ok ? "" : replayed.refusal.includes("approval-replayed")],
+        forged: [forged.ok, forged.receipt.decision, forged.ok ? "" : forged.refusal.includes("approval-unsigned")],
+        chain: log.verifyChain(),
+      }
+    }
+    await sameVerdictAsync("sink.resume", () => run((o) => o), () => run((o, label) => poison(o, label)))
   })
 
   test("makeSink refuses a bad spec at construction with the same TypeError, poisoned or not", () => {
