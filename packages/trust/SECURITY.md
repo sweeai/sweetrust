@@ -52,6 +52,13 @@ With resume, a client holder can resume ANY mandate in the log, act as that hold
 subtree; before resume a leaked client was root over new trees only. Hand an agent its scope,
 never the client (ADR 0006).
 
+### Pass a sink plain values
+
+A receipt records a value when it is rendered, and `execute()` runs the same object. A value with a
+`toJSON`, a getter or a `Proxy` runs code in between, so the receipt can differ from what ran, and
+the chain still verifies. Code that can poison a global such as `Object.prototype.toJSON` is outside
+what this library can defend against. Pass plain JSON values into a sink.
+
 ### A mandate scope is a capability: whoever holds the object holds the authority
 
 Authority in `sweetrust/mandate` is **possession of a scope object this module issued**. A

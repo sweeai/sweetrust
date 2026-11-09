@@ -23,7 +23,7 @@ hand objects to this library in your process, or if a revoke rationale can quote
 
 ### Security
 
-- **A spending cap can no longer be overrun from inside the check.** A capability object with a
+- **A capability object cannot overrun a spending cap from inside the check.** A capability object with a
   `key` getter could run between the limit check and its record, re-enter `useCapability`, and spend
   150 against a cap of 30 on a signed chain that still verified. Every caller value is now read
   before the first log read.
