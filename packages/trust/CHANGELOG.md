@@ -219,6 +219,49 @@ unchanged. Only a judged sink's receipts change shape (ADR 0009).
 - **The first end-to-end run used the stand-in judge.** It proves the records join, not that any
   model judges well.
 
+## [0.5.1] — 2026-11-08
+
+A security patch. No call shape, error union, receipt hash or signed preimage changes, and existing
+logs verify as before. Code that compares capability objects needs one change, described under
+*Changed*.
+
+Upgrade if untrusted code can hand objects to this library in your process, or if a revoke
+rationale can quote untrusted text.
+
+### Security
+
+- **A capability object cannot overrun a spending cap from inside the check.** An object with a
+  `key` getter could run between the log read and the limit check, re-enter `useCapability`, and spend
+  150 against a cap of 30 on a signed chain that still verified. In `useCapability`, every caller value is now
+  read before the first log read.
+- **A quoted injection no longer blocks a revoke.** A rationale that quoted an injection pattern made `revokeMandate`
+  throw and left the mandate live. The record now carries the matched pattern and a hash in place
+  of the text.
+- **Reading the log cannot un-revoke a mandate.** `listAllSigned` returned the live array, so a
+  `.pop()` undid a revoke and the chain still verified. It now returns a copy.
+- **A poisoned field cannot brick the store.** A `triggerSource` carrying a `toJSON` made the signed
+  bytes differ from the file bytes, and every later owner operation threw. A `triggerSource` or
+  rationale that is not what its type says is now refused.
+- **The in-memory test signer checks the key.** Its `verify` ignored the record's key, so a forged
+  record could pass a real pin.
+- **A sink reads every argument before rendering any.** A getter on a later argument could edit an
+  earlier one after its receipt entry was written, so the receipt and `execute()` disagreed.
+- **Smaller fixes.** A child can no longer be issued under a revoked ancestor; `signed()` records
+  are frozen; a store file is created mode 600 (an existing file keeps its mode).
+
+### Changed
+
+- A scope's `capabilities` elements are now its own copies, so `scope.capabilities.includes(cap)`
+  and `=== cap` are false where they were true. Compare `.key`. Extra fields on a capability object
+  are dropped.
+- In plain JavaScript, a `grantor` or `triggerSource` that is not what its type says now throws. That
+  includes `triggerSource: null`.
+
+### Documentation
+
+- `SECURITY.md` now states that a cut log tail refunds spend, that nothing in this package detects
+  a cut tail on a mandate log, and how a torn append fails.
+
 ## [0.5.0] — 2026-11-02
 
 **Upgrading from 0.4.0.** These call shapes change; each is a *Breaking* bullet below.
@@ -678,5 +721,6 @@ this repository and is not carried forward.
   money a chain already holds.
 
 [0.6.0]: https://github.com/sweeai/sweetrust/compare/v0.5.0...v0.6.0
+[0.5.1]: https://github.com/sweeai/sweetrust/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/sweeai/sweetrust/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/sweeai/sweetrust/releases/tag/v0.4.0

@@ -111,7 +111,7 @@ interior hash alone was over insertion-order JSON, and an honest re-sorted file 
 
 ### One writer per store file
 
-The JSONL stores do not lock across processes. Two processes appending to one file can both link
+The JSONL stores do not lock across processes. On the signed store, two processes appending to one file can both link
 to the same predecessor. That forks the chain, and every later read then fails closed as corrupt.
 Give each store file exactly one writing process.
 
@@ -369,7 +369,7 @@ artifact rather than the source, and the findings are recorded rather than quiet
   Also closed: a `triggerSource` carrying a `toJSON` that bricked every owner operation on the store;
   `listAllSigned` handing out the live array, so a `.pop()` un-revoked a mandate; a revoke refused
   because its rationale quoted the injection; the in-memory signer's `verify` ignoring the record's
-  key; `grantedPurpose` answering for a revoked mandate. Every caller value is now a primitive before
+  key; `grantedPurpose` answering for a revoked mandate. In `useCapability`, every caller value except the scope, checked by identity, is a primitive before
   the first log read, and each regression was watched red on the base commit.
 
 🔑 **The lesson we keep relearning, offered because it will apply to your code too:** a check and
