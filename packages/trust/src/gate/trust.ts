@@ -743,9 +743,14 @@ export interface Receipt {
    * `judgment-held` (0.6.0) is doubt in enforce mode: nothing ran, and the
    * action waits for an owner. `judgment-flagged` is the same doubt in observe
    * or warn, where the action runs anyway; enforce never writes it.
+   *
+   * `attempted` (0.6.0, ADR 0010) is a judged enforce action's intent record,
+   * written with the verdict BEFORE `execute`. Its presence means the action
+   * may have run, so a log write that fails afterward cannot make the action,
+   * or the approval that released it, reusable.
    */
   readonly decision:
-    | "executed" | "refused" | "observed" | "warned"
+    | "attempted" | "executed" | "refused" | "observed" | "warned"
     | "judgment-blocked" | "judgment-flagged" | "judgment-held" | "errored"
     | "declassify-refused"
   readonly args: Record<string, { value: unknown; tier: Tier; provenance: string }>
@@ -813,6 +818,21 @@ function deepFreeze<T>(root: T, seen = new WeakSet<object>()): T {
   return root
 }
 
+/** Everything a receipt may hold: `receiptBody`'s nine fields and the hash. A tenth key would sit outside the hash. */
+const RECEIPT_KEYS: ReadonlyArray<string> = ["seq", "prevHash", "at", "sink", "decision", "args", "reason", "verdict", "approval", "hash"]
+
+/** Each row read once and deep-copied, so a loaded log shares nothing with its caller. */
+export function snapshotRows<T>(rows: ReadonlyArray<T>): T[] {
+  return rows.map((row, i) => {
+    if (typeof row !== "object" || row === null || Array.isArray(row)) throw new TypeError(`row ${i} is not a record`)
+    try {
+      return structuredClone({ ...row })
+    } catch {
+      throw new TypeError(`row ${i} is not plain data`)
+    }
+  })
+}
+
 export class ReceiptLog {
   private events: Receipt[] = []
   /**
@@ -875,6 +895,39 @@ export class ReceiptLog {
     return this.commit(this.nextReceipt(entry))
   }
 
+  /**
+   * Load prior receipts into this empty log, after checking them as one chain
+   * from genesis. The rows must already be this log's own snapshots.
+   */
+  protected load(rows: ReadonlyArray<Receipt>): void {
+    if (this.events.length !== 0) throw new TypeError("a log can only be seeded while it is empty")
+    let prevHash = "genesis"
+    rows.forEach((row, i) => {
+      const stray = Object.keys(row).filter((k) => !RECEIPT_KEYS.includes(k))
+      if (stray.length > 0) throw new TypeError(`receipt ${i} carries a key outside its hash`)
+      if (row.seq !== i || row.prevHash !== prevHash || sha256Hex(receiptBody(row)) !== row.hash) {
+        throw new TypeError(`receipt ${i} does not continue the chain`)
+      }
+      prevHash = row.hash
+    })
+    for (const row of rows) this.commit(row)
+  }
+
+  /**
+   * A log that continues from `receipts`, for a process that restarts: without
+   * it a new log is empty, and every block, hold and attempt it held is gone
+   * (ADR 0010). The chain is checked first and any break is a TypeError. Each
+   * row is read once and copied. It proves only that the rows are internally
+   * consistent: a list missing its newest rows loads as a valid shorter chain.
+   * For a signed log use `SignedReceiptLog.fromSigned`.
+   */
+  static fromReceipts<T extends ReceiptLog>(this: new () => T, receipts: ReadonlyArray<Receipt>): T {
+    if (!Array.isArray(receipts)) throw new TypeError("fromReceipts: receipts must be an array")
+    const log = new this()
+    log.load(snapshotRows(receipts))
+    return log
+  }
+
   /** A copy. Handing out the live array let any caller push, splice, or truncate. */
   all(): ReadonlyArray<Receipt> {
     return [...this.events]
@@ -925,6 +978,12 @@ export class ReceiptLog {
 export interface Action {
   readonly sink: string
   readonly args: Readonly<Record<string, unknown>>
+  /**
+   * Set by the host, never by the agent (ADR 0010): what makes a repeat of this
+   * action a new payment rather than a duplicate. Absent, the digest is the
+   * digest of `{ sink, args }` alone.
+   */
+  readonly idempotencyKey?: string
 }
 
 export interface Payment {
@@ -940,9 +999,16 @@ export interface Verdict {
   readonly rationaleHash: string
   readonly provider: string
   readonly model: string
+  /** The action this verdict names and an approval releases, its idempotency key included. */
   readonly actionDigest: string
+  /** The same action as if it carried no key: what a block or a hold sticks to (ADR 0010). */
+  readonly unkeyedActionDigest: string
+  /** False when the judge gave no answer: the `unsure` here is the gate's, and it does not stick (ADR 0010). */
+  readonly scored: boolean
   readonly paymentDigest: string | null
   readonly grantHash: string
+  /** `purposeHash` of the purpose the judge scored: the text, where `grantHash` names the grant (ADR 0010). */
+  readonly purposeHash: string
   readonly judgedAt: string
   readonly attestation: null
 }
@@ -974,6 +1040,64 @@ export interface AuthorizedBy {
   readonly verdictDigest: string
   readonly paymentDigest: string | null
 }
+
+// ── Spend authorization (ADR 0010) ───────────────────────────────────────────
+
+/** The result of `SpendAuthorization.consume`. A failure names why, never a value. */
+export type SpendAuthorizationResult =
+  | { readonly ok: true; readonly authorizedBy: AuthorizedBy }
+  | { readonly ok: false; readonly reason: "not-issued" | "already-consumed" | "wrong-payment" }
+
+const ISSUE_AUTHORIZATION = Symbol("sweetrust/gate: a SpendAuthorization is issued only by a sink")
+let issueAuthorization: (authorizedBy: AuthorizedBy) => SpendAuthorization
+
+/**
+ * One execution's authority to pay, handed to `execute` by the sink and spent
+ * once by whatever moves the money (`spend` in sweetrust-sui). A digest typed
+ * by a caller is not one: a value that did not come through this class's
+ * constructor is refused, the same brand check `Sourced` uses, and a genuine
+ * one works once.
+ *
+ * Issued only to an action that a confident match or an owner's approval let
+ * through, never to a flagged one in warn or observe.
+ *
+ * In-process only, like every other kernel guarantee (SECURITY.md): code that
+ * can import this module and holds an execute context holds the token.
+ */
+export class SpendAuthorization {
+  #spent = false
+  readonly authorizedBy: AuthorizedBy
+
+  private constructor(token: typeof ISSUE_AUTHORIZATION, authorizedBy: AuthorizedBy) {
+    if (token !== ISSUE_AUTHORIZATION) throw new TypeError("a SpendAuthorization is issued by a sink, never constructed")
+    this.authorizedBy = authorizedBy
+    Object.freeze(this)
+  }
+
+  static {
+    issueAuthorization = (authorizedBy) => new SpendAuthorization(ISSUE_AUTHORIZATION, authorizedBy)
+  }
+
+  static is(x: unknown): x is SpendAuthorization {
+    return typeof x === "object" && x !== null && #spent in x
+  }
+
+  /**
+   * Spend the token on the payment named by `paymentDigest`. Exactly one call
+   * for a genuine token and its own payment returns ok; a token presented for
+   * a different payment, or with no payment named, is not spent.
+   */
+  static consume(token: unknown, paymentDigest: string): SpendAuthorizationResult {
+    if (!SpendAuthorization.is(token)) return { ok: false, reason: "not-issued" }
+    if (typeof paymentDigest !== "string" || token.authorizedBy.paymentDigest !== paymentDigest) return { ok: false, reason: "wrong-payment" }
+    if (token.#spent) return { ok: false, reason: "already-consumed" }
+    token.#spent = true
+    return { ok: true, authorizedBy: token.authorizedBy }
+  }
+}
+
+Object.freeze(SpendAuthorization)
+Object.freeze(SpendAuthorization.prototype)
 
 interface Walk {
   /** Encode bigints as {"$bigint":"<decimal>"} (and so refuse that key raw), or refuse them. */
@@ -1074,12 +1198,17 @@ const digestOf = (value: unknown): string => refusingOverflow(() => sha256Hex(ca
  */
 export function encodeAction(action: Action): Action {
   assertRecord(action, "an action")
-  if (Reflect.ownKeys(action).length !== 2) throw new TypeError("an action is exactly { sink, args }")
+  const keyCount = Reflect.ownKeys(action).length
+  if (keyCount !== 2 && keyCount !== 3) throw new TypeError("an action is exactly { sink, args }, with an optional idempotencyKey")
   const sink = ownValue(action, "sink")
   const args = ownValue(action, "args")
   if (typeof sink !== "string") throw new TypeError("an action's sink must be a string")
   assertRecord(args, "an action's args")
-  return { sink, args: copyExact(args, true) as Action["args"] }
+  const encoded = copyExact(args, true) as Action["args"]
+  if (keyCount === 2) return { sink, args: encoded }
+  const idempotencyKey = ownValue(action, "idempotencyKey")
+  if (typeof idempotencyKey !== "string" || idempotencyKey.length === 0) throw new TypeError("an action's idempotencyKey must be a non-empty string")
+  return { sink, args: encoded, idempotencyKey }
 }
 
 /** sha256Hex(canonicalJSON(encodeAction(action))). */
@@ -1112,12 +1241,19 @@ export function verdictDigest(verdict: Verdict): string {
   return digestOf(copyExact(verdict, false))
 }
 
+/** sha256Hex(canonicalJSON(purpose)), over a copy that must be plain JSON. What a verdict's `purposeHash` must equal. */
+export function purposeHash(purpose: Purpose): string {
+  return digestOf(copyExact(purpose, false))
+}
+
 // ── Owner approval (spec § 3.3, I11) ─────────────────────────────────────────
 // The agent already holds the verdict digest from the held result, so anything
 // it could produce cannot release a hold. A signature by a key it never sees can.
 
 const APPROVAL_DOMAIN = "sweetrust/approval@1"
 const APPROVAL_WINDOW_MS = 15 * 60 * 1000
+/** How long a block stands unless the sink says otherwise (ADR 0010): long enough that a retry loop learns nothing. */
+const DEFAULT_BLOCK_WINDOW_MS = 60 * 60 * 1000
 const HEX_64 = /^[0-9a-f]{64}$/
 const HEX_128 = /^[0-9a-f]{128}$/
 
@@ -1268,6 +1404,18 @@ const ASSESSMENTS: ReadonlySet<unknown> = new Set(["match", "mismatch", "unsure"
 /** Name a value in a TypeError without dereferencing it. */
 const preview = (v: unknown): string =>
   typeof v === "string" ? JSON.stringify(v) : typeof v === "symbol" ? v.toString() : v === null ? "null" : typeof v === "object" ? "<object>" : typeof v === "function" ? "<function>" : String(v)
+
+/**
+ * What the host passes beside the arguments. `idempotencyKey` names this call
+ * as a distinct repeat of an action: with one, an action already attempted
+ * under another key runs again. It comes from the HOST, for example a payment's
+ * own invoice id, and must never be derived from anything an agent wrote: a
+ * host that forwards an agent's value hands the agent the decision to repeat a
+ * payment. A key never escapes a block or a hold (ADR 0010).
+ */
+export interface SinkCallOptions {
+  readonly idempotencyKey?: string
+}
 
 export type SinkResult<R> =
   | { readonly ok: true; readonly result: R; readonly receipt: Receipt }
@@ -1458,7 +1606,11 @@ function checkPurpose(bound: BoundPurpose, sink: string, values: Readonly<Record
 interface ActionSnapshot {
   readonly values: Readonly<Record<string, unknown>>
   readonly sourced: Readonly<Record<string, Sourced<unknown>>>
+  /** Names this action and its idempotency key: what runs, and what an approval releases. */
   readonly digest: string
+  /** Names the action alone: what a block or a hold sticks to (ADR 0010). */
+  readonly unkeyed: string
+  readonly keyed: boolean
 }
 
 /**
@@ -1474,7 +1626,12 @@ interface ActionSnapshot {
  * clone error quotes the function it refused, so the violation is a fixed
  * sentence that names only the argument. It can land on a redacting receipt.
  */
-function snapshotAction(sink: string, checked: Readonly<Record<string, Sourced<unknown>>>, violations: string[]): ActionSnapshot | undefined {
+function snapshotAction(
+  sink: string,
+  checked: Readonly<Record<string, Sourced<unknown>>>,
+  violations: string[],
+  idempotencyKey: string | undefined,
+): ActionSnapshot | undefined {
   const values: Record<string, unknown> = Object.create(null)
   const sourced: Record<string, Sourced<unknown>> = Object.create(null)
   const before = violations.length
@@ -1493,7 +1650,14 @@ function snapshotAction(sink: string, checked: Readonly<Record<string, Sourced<u
   if (violations.length > before) return undefined
   try {
     // Over the snapshot, not the original: this digest names what runs.
-    return { values: Object.freeze(values), sourced: Object.freeze(sourced), digest: actionDigest({ sink, args: values }) }
+    const unkeyed = actionDigest({ sink, args: values })
+    return {
+      values: Object.freeze(values),
+      sourced: Object.freeze(sourced),
+      unkeyed,
+      keyed: idempotencyKey !== undefined,
+      digest: idempotencyKey === undefined ? unkeyed : actionDigest({ sink, args: values, idempotencyKey }),
+    }
   } catch {
     violations.push("the action cannot be digested and judged")
     return undefined
@@ -1507,7 +1671,11 @@ interface BoundJudge {
   readonly floor: number
   readonly timeoutMs: number
   readonly granted: GrantedPurpose
+  /** The digest of the purpose the judge sees, on every verdict. */
+  readonly purposeHash: string
   readonly purpose: BoundPurpose
+  readonly blockWindowMs: number
+  readonly rationaleInRefusal: boolean
 }
 
 /** Validate a sink's judgment config and read every field of it once; a misconfigured judged sink never exists. */
@@ -1521,12 +1689,14 @@ function bindJudge(
     readonly purposeArgs?: unknown
     readonly network?: unknown
     readonly asset?: unknown
+    readonly blockWindowMs?: number | undefined
+    readonly rationaleInRefusal?: boolean | undefined
   },
   requires: Readonly<Record<string, Tier>>,
 ): BoundJudge {
   // `floor: undefined` made `confidence >= floor` false forever, so a
   // mismatch at 0.99 never blocked (the 2026-10-13 gate audit).
-  const { provider, floor, timeoutMs = DEFAULT_JUDGMENT_TIMEOUT_MS, granted, purposeArgs, network, asset } = config
+  const { provider, floor, timeoutMs = DEFAULT_JUDGMENT_TIMEOUT_MS, granted, purposeArgs, network, asset, blockWindowMs = DEFAULT_BLOCK_WINDOW_MS, rationaleInRefusal = false } = config
   if (typeof provider !== "object" || provider === null) {
     throw new TypeError(`${where}: judgment.provider must be an object with an assess() method, got ${preview(provider)}`)
   }
@@ -1544,6 +1714,14 @@ function bindJudge(
   if (typeof timeoutMs !== "number" || !Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > MAX_JUDGMENT_TIMEOUT_MS) {
     throw new TypeError(`${where}: judgment.timeoutMs must be a positive number of milliseconds no larger than ${MAX_JUDGMENT_TIMEOUT_MS}, got ${preview(timeoutMs)}`)
   }
+  // A window below the approval window would let a block lapse while a hold on
+  // the same action still could not, and a shorter block is one a retry loop outlasts.
+  if (typeof blockWindowMs !== "number" || !Number.isFinite(blockWindowMs) || blockWindowMs < APPROVAL_WINDOW_MS) {
+    throw new TypeError(`${where}: judgment.blockWindowMs must be a number of milliseconds of at least the ${APPROVAL_WINDOW_MS}ms approval window, got ${preview(blockWindowMs)}`)
+  }
+  if (typeof rationaleInRefusal !== "boolean") {
+    throw new TypeError(`${where}: judgment.rationaleInRefusal must be a boolean, got ${preview(rationaleInRefusal)}`)
+  }
   const pinned = pinGranted(where, granted)
   const bound: BoundJudge = {
     assess: (input, signal) => assess.call(provider, input, signal),
@@ -1552,7 +1730,10 @@ function bindJudge(
     floor,
     timeoutMs,
     granted: pinned,
+    purposeHash: purposeHash(pinned.purpose),
     purpose: bindPurpose(where, pinned.purpose, requires, { purposeArgs, network, asset }),
+    blockWindowMs,
+    rationaleInRefusal,
   }
   return Object.freeze(bound)
 }
@@ -1563,7 +1744,8 @@ type Consulted = { readonly out: unknown } | { readonly failure: string }
 interface JudgedRun {
   readonly args: Readonly<Record<string, Sourced<unknown>>>
   readonly verdict: Verdict
-  readonly authorizedBy: AuthorizedBy
+  /** Absent on a flagged run: doubt is not authority (ADR 0010). */
+  readonly authorizedBy?: AuthorizedBy
   /** Present on a resume: the owner's approval, carried onto every receipt this run leaves. */
   readonly approval?: Approval
 }
@@ -1660,10 +1842,12 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
   readonly mode: EnforcementMode
   readonly log: ReceiptLog
   /**
-   * The second argument names the verdict the action ran under, and is present
-   * whenever a judge was consulted. An unjudged call gets one argument.
+   * The second argument names the verdict that let the action through and
+   * carries the one-shot authorization for it. It is present on a confident
+   * match or an owner's approval. A flagged action in warn or observe runs
+   * without one (doubt is not authority), and so does an unjudged call.
    */
-  readonly execute: (args: Args, context?: { readonly authorizedBy: AuthorizedBy }) => R
+  readonly execute: (args: Args, context?: { readonly authorizedBy: AuthorizedBy; readonly authorization: SpendAuthorization }) => R
   /**
    * Optional judgment wall (the judgment seam). Runs AFTER tier and purpose
    * checks pass — it exists to catch the in-bounds-but-wrong action the tiers
@@ -1689,6 +1873,13 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
    * `approvalKey` is the owner's Ed25519 public key as SPKI-DER hex (what
    * `publicKeyHexFromPem` returns), bound here and never per call. It is what
    * lets `sink.resume` release a hold; without it every resume is refused.
+   *
+   * `blockWindowMs` (default one hour, never below the 15-minute approval
+   * window) is how long a block stands. `rationaleInRefusal` (default false)
+   * puts the judge's assessment, confidence and words back in the refusal
+   * string; the receipt always has them, its `reason` redacted per `redact`, so
+   * a host that wants them kept from the agent must not hand it the receipt
+   * (ADR 0010).
    */
   readonly judgment?: {
     readonly provider: JudgmentProvider
@@ -1699,6 +1890,8 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
     readonly network?: string
     readonly asset?: string
     readonly approvalKey?: string
+    readonly blockWindowMs?: number
+    readonly rationaleInRefusal?: boolean
   }
   /**
    * Per-arg receipt-rendering policy. Receipts are signed and potentially
@@ -1740,7 +1933,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
     requires: copyOwn<Tier>(own("requires")) ?? Object.freeze(Object.create(null) as Record<string, Tier>),
     mode: own("mode") as EnforcementMode,
     log: own("log") as ReceiptLog,
-    execute: own("execute") as (args: Args, context?: { readonly authorizedBy: AuthorizedBy }) => R,
+    execute: own("execute") as (args: Args, context?: { readonly authorizedBy: AuthorizedBy; readonly authorization: SpendAuthorization }) => R,
     judgment:
       ownJudgment === undefined
         ? undefined
@@ -1753,6 +1946,8 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
             network: judgmentField("network"),
             asset: judgmentField("asset"),
             approvalKey: judgmentField("approvalKey"),
+            blockWindowMs: judgmentField("blockWindowMs"),
+            rationaleInRefusal: judgmentField("rationaleInRefusal"),
           }),
     redact: copyOwn<"raw" | "hash" | "truncate" | undefined>(own("redact")),
   })
@@ -1779,13 +1974,53 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
   }
   const judge = cfg.judgment === undefined ? undefined : bindJudge(where, cfg.judgment, cfg.requires)
   const ownerKey = bindApprovalKey(where, cfg.judgment?.approvalKey, cfg.log)
-  // Verdicts an approval has released in this process (I11). The executed
-  // receipt is written after execute() returns, so the log alone cannot stop
-  // two resumes that overlap. A claim is never released, a failed execute
-  // included: the action may have taken effect, and one approval is one attempt.
+  // The action record's durable states live on the log and survive a restart,
+  // so a judged enforce sink has to be able to read it back (ADR 0010). Refused
+  // here, one line from the misconfiguration.
+  if (judge !== undefined && cfg.mode === "enforce" && typeof (cfg.log as { all?: unknown }).all !== "function") {
+    throw new TypeError(`${where}: a judged enforce sink needs a log with an all() method, to read back its blocks, holds and attempts`)
+  }
+  // Verdicts an approval has released in this process (I11). Since ADR 0010 the
+  // `attempted` receipt is written before execute() and read back from the log,
+  // which also stops a second sink; this set stays as the check that needs no
+  // read-back, for a log whose all() lags its append. An entry is added once the
+  // intent record lands and is never removed, a failed execute included: the
+  // action may have taken effect, and one approval is one attempt.
   const claimed = new Set<string>()
+  // Actions a judge is deciding right now, by unkeyed digest: the one state that
+  // cannot be on the log yet, because no receipt exists before the answer. The
+  // claim is taken before the first await and released once the decision's
+  // receipt is on the log, so concurrent identical calls wait and answer from it.
+  const judging = new Map<string, Promise<void>>()
 
-  const call = async (args: Args, resuming?: { readonly approval: unknown }): Promise<SinkResult<Awaited<R>>> => {
+  // What this action already is, read back from the log in one synchronous
+  // walk (ADR 0010). A later receipt moves the state: a judgment sets a block
+  // or a hold, and any attempt resolves it. Receipts under another grant or
+  // purpose are skipped: they are someone else's action, or the owner has
+  // changed what is being judged against. A hold with no real verdict behind it
+  // (`scored: false`) is skipped too: an outage is not an answer.
+  //
+  // Stickiness ignores the idempotency key (`unkeyed`), so no key can escape a
+  // block or a hold. Dedupe keys on it: with a key, only this key's attempt is
+  // a duplicate; with none, any attempt of this action is.
+  const actionState = (action: ActionSnapshot, bound: BoundJudge) => {
+    let standing: { readonly verdict: Verdict; readonly label: "judgment-blocked" | "judgment-held" } | undefined
+    let attempted: Verdict | undefined
+    for (const receipt of cfg.log.all()) {
+      const { verdict, decision } = receipt
+      if (receipt.sink !== cfg.name || verdict === undefined || verdict.unkeyedActionDigest !== action.unkeyed) continue
+      if (verdict.grantHash !== bound.granted.grantHash || verdict.purposeHash !== bound.purposeHash) continue
+      if (decision === "judgment-blocked" || decision === "judgment-held") {
+        if (verdict.scored) standing = { verdict, label: decision }
+      } else if (decision === "attempted" || decision === "executed" || decision === "errored") {
+        standing = undefined
+        if (!action.keyed || verdict.actionDigest === action.digest) attempted = verdict
+      }
+    }
+    return { standing, attempted }
+  }
+
+  const call = async (args: Args, resuming?: { readonly approval: unknown }, options?: unknown): Promise<SinkResult<Awaited<R>>> => {
     // `Object.create(null)` rather than `{}`: `rendered` is keyed by ATTACKER-
     // SUPPLIED argument names and then handed to the receipt. A plain object
     // literal inherits `Object.prototype`, so an argument named `__proto__`
@@ -1834,9 +2069,20 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
       run?: JudgedRun,
     ): Promise<SinkResult<Awaited<R>>> => {
       const evidence = run === undefined ? {} : { verdict: run.verdict, ...(run.approval === undefined ? {} : { approval: run.approval }) }
+      // The intent record, before anything can happen (ADR 0010). A log that
+      // cannot take it stops the action here; once it is written the action
+      // counts as attempted, whatever becomes of the outcome receipt.
+      if (run !== undefined && cfg.mode === "enforce") {
+        cfg.log.append({ at: now(), sink: cfg.name, decision: "attempted", args: rendered, ...evidence })
+        // Only now: if the write above throws nothing ran, and the approval is unspent.
+        if (run.approval !== undefined) claimed.add(run.approval.verdictDigest)
+      }
       let pending: R
       try {
-        pending = run === undefined ? cfg.execute(checked as Args) : cfg.execute(run.args as Args, { authorizedBy: run.authorizedBy })
+        // A token is issued per execution, only for a run that carries authority.
+        const authorized = run?.authorizedBy
+        const context = authorized === undefined ? undefined : { authorizedBy: authorized, authorization: issueAuthorization(authorized) }
+        pending = run === undefined ? cfg.execute(checked as Args) : cfg.execute(run.args as Args, context)
       } catch (err) {
         cfg.log.append({ at: now(), sink: cfg.name, decision: "errored", args: rendered, reason: `${threw}: ${safely(() => (err instanceof Error ? err.message : String(err)))}`, ...evidence })
         throw err
@@ -1890,6 +2136,15 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
     // rendered is recorded as a placeholder and raised as a violation, and the
     // adoption ladder decides as it does for any other: `enforce` refuses before
     // execute(), `observe` and `warn` run it with the gap written down.
+    // The host's idempotency key, read once, own key only. It names a repeat
+    // payment, so a value the sink cannot use is a violation like any other.
+    let idempotencyKey: string | undefined
+    if (options !== undefined) {
+      const raw = typeof options === "object" && options !== null && Object.hasOwn(options, "idempotencyKey") ? (options as { idempotencyKey?: unknown }).idempotencyKey : undefined
+      if (typeof raw === "string" && raw.length > 0) idempotencyKey = raw
+      else if (raw !== undefined || typeof options !== "object" || options === null) violations.push("the idempotencyKey option must be a non-empty string set by the host")
+    }
+
     const record = (key: string, value: unknown): unknown => {
       try {
         return renderForReceipt(value, redactFor(key))
@@ -1955,6 +2210,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
     // Both halves are fixed: it is always RECORDED, and in enforce mode it is a
     // violation. A sink receiving an argument it did not declare is a spec/call
     // mismatch, and fail-closed means refuse rather than guess an appetite.
+    let undeclared = 0
     for (const key of Object.keys(args) as Array<keyof Args & string>) {
       // ── Own-key test, not `in` (2026-08-31) ─────────────────────────────
       // This was `if (key in cfg.requires) continue`. `in` walks the
@@ -1983,6 +2239,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
         ? { value: record(key, arg.value), tier: arg.tier, provenance: `UNDECLARED — ${arg.describe()}` }
         : { value: record(key, arg), tier: "untrusted", provenance: "UNDECLARED — not a Sourced value" }
       violations.push(`${key} was passed but is not declared in requires — the sink has no stated appetite for it`)
+      undeclared += 1
     }
 
     const refuseViolations = (): SinkResult<Awaited<R>> => {
@@ -2021,7 +2278,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
         for (const receipt of cfg.log.all()) {
           const v = receipt.verdict
           if (receipt.sink !== cfg.name || v === undefined) continue
-          if (receipt.decision !== "judgment-held" && receipt.decision !== "executed" && receipt.decision !== "errored") continue
+          if (receipt.decision !== "judgment-held" && receipt.decision !== "attempted" && receipt.decision !== "executed" && receipt.decision !== "errored") continue
           let digest: string
           try {
             digest = verdictDigest(v)
@@ -2036,7 +2293,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
           }
         }
       }
-      if (heldReceipt === undefined || heldVerdict === undefined || heldVerdict.grantHash !== judge.granted.grantHash || approval.grantHash !== heldVerdict.grantHash) {
+      if (heldReceipt === undefined || heldVerdict === undefined || heldVerdict.grantHash !== judge.granted.grantHash || heldVerdict.purposeHash !== judge.purposeHash || approval.grantHash !== heldVerdict.grantHash) {
         return refuse("approval-mismatch", "this approval does not name an action held by this sink")
       }
 
@@ -2051,14 +2308,16 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
       // new action, which goes through the judge by calling the sink again. Only
       // branded values can name it: `checked` also holds what failed the brand
       // check, and those are violations, not tiers to re-wrap.
-      const resumed = Object.values(checked).every((arg) => Sourced.is(arg)) ? snapshotAction(cfg.name, checked, []) : undefined
+      const resumed = Object.values(checked).every((arg) => Sourced.is(arg)) ? snapshotAction(cfg.name, checked, [], idempotencyKey) : undefined
       if (resumed === undefined || resumed.digest !== approval.actionDigest || approval.actionDigest !== heldVerdict.actionDigest) {
         return refuse("approval-mismatch", "the resumed arguments are not the action that was held")
       }
 
-      // 5. Replay: claimed in this process, or an attempt already on the log. An
-      // `errored` receipt counts: it is the only record of an attempt that threw.
-      if (claimed.has(approval.verdictDigest) || attempted) {
+      // 5. Replay: claimed in this process, or an attempt already on the log,
+      // under this verdict (step 2) or under another one for the same action. A
+      // judge failure leaves no standing hold, so a later call can run the action
+      // while the failed hold's approval is still valid; that must not pay twice.
+      if (claimed.has(approval.verdictDigest) || attempted || actionState(resumed, judge).attempted !== undefined) {
         return refuse("approval-replayed", "this approval has already released its one execution")
       }
 
@@ -2071,7 +2330,6 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
         return refuse("approval-mismatch", "this sink's payment is not the payment that was held")
       }
 
-      claimed.add(approval.verdictDigest)
       return act(
         "executed",
         undefined,
@@ -2086,12 +2344,14 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
       )
     }
 
-    // Snapshot and purpose fields, before the wall they feed. Only a call that
-    // is already clean gets this far: a judge never runs on a violation (I1).
+    // Snapshot and purpose fields, before the wall they feed. A judge never
+    // runs on a violation (I1), with one exception that exists only outside
+    // enforce: an undeclared argument never reaches execute or the judge, so it
+    // no longer switches the judge off and erases the verdict (ADR 0010).
     let snapshot: ActionSnapshot | undefined
     let paymentDigestOfCall: string | null = null
-    if (judge !== undefined && violations.length === 0) {
-      snapshot = snapshotAction(cfg.name, checked, violations)
+    if (judge !== undefined && violations.length === undeclared) {
+      snapshot = snapshotAction(cfg.name, checked, violations, idempotencyKey)
       if (snapshot !== undefined) paymentDigestOfCall = checkPurpose(judge.purpose, cfg.name, snapshot.values, violations)
     }
 
@@ -2099,117 +2359,199 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
     // failure is a violation too, so it refuses here and the judge never runs.
     if (violations.length > 0 && cfg.mode === "enforce") return refuseViolations()
 
-    // Judgment wall — probabilistic, self-aware. Every path out of this block
-    // either returns or sets `run`, and enforce sets `run` only on a confident
-    // match: that is I4, and the only way a judged enforce sink reaches execute.
-    let run: JudgedRun | undefined
-    if (judge !== undefined && snapshot !== undefined && violations.length === 0) {
-      const input = Object.freeze({
-        purpose: judge.granted.purpose,
-        action: Object.freeze({ sink: cfg.name, args: snapshot.values }),
-      })
-      const providerName = judge.name
-
-      // A provider that throws, rejects, runs out of time or answers with
-      // something that is not a verdict HAS NOT SCORED. That exception used to
-      // escape between the tier wall and the receipt (the 2026-10-13 gate
-      // audit), and an unawaited Promise once read as a verdict and executed
-      // (DAN-1382). No score is recorded as `unsure` at confidence 0, so the
-      // receipt carries a digestible verdict that states the doubt, and it is
-      // never mistaken for an answer: `scored` keeps a floor of 0 from admitting it.
-      const answer = readVerdict(await consultJudge((signal) => judge.assess(input, signal), judge.timeoutMs))
-      const scored = !("failure" in answer)
-      const rationaleText = !scored
-        ? `provider ${providerName} gave no verdict: ${answer.failure}`
-        : typeof answer.rationale === "string"
-          ? answer.rationale
-          : preview(answer.rationale)
-
-      const verdict: Verdict = Object.freeze({
-        assessment: scored ? answer.assessment : "unsure",
-        confidence: scored ? answer.confidence : 0,
-        rationaleHash: sha256Hex(rationaleText),
-        provider: providerName,
-        model: judge.model,
-        actionDigest: snapshot.digest,
-        paymentDigest: paymentDigestOfCall,
-        grantHash: judge.granted.grantHash,
-        judgedAt: now(),
-        attestation: null,
-      })
-      const digest = verdictDigest(verdict)
-      const evidence = { at: now(), sink: cfg.name, args: rendered, verdict }
-      const confText = scored ? `conf ${verdict.confidence.toFixed(2)}` : "no verdict"
-
-      // Rationale is FREE TEXT from a provider that just saw the raw values
-      // (adversarial pass A4, 2026-07-25). `redact` governed `args` and stopped
-      // there, so a judge that echoed what it judged — the natural way to write
-      // a rationale — republished the redacted value in `reason`, on the same
-      // receipt that gets signed and anchored and can never be redacted after
-      // the fact. Structured fields (assessment, confidence, provider name) are
-      // safe because the provider does not author them; the prose is not.
-      // A failure's text is the provider's too: an error message can echo.
-      const anyRedacted = Object.values(cfg.redact ?? {}).some((p) => p !== undefined && p !== "raw")
-      const rationale = anyRedacted
-        ? `[rationale withheld — this sink redacts arguments; sha256:${createHash("sha256").update(rationaleText).digest("hex").slice(0, 16)}]`
-        : rationaleText
-
-      const confident = scored && verdict.confidence >= judge.floor
-      if (!(confident && verdict.assessment === "match")) {
-        if (cfg.mode === "enforce") {
-          // Only a confident mismatch is a judgment. Everything else is doubt.
-          const label = confident && verdict.assessment === "mismatch" ? "judgment-blocked" : "judgment-held"
-          const receipt = cfg.log.append({ ...evidence, decision: label, reason: `⚖ ${cfg.name} ${label} (${providerName}, ${verdict.assessment}, ${confText}): ${rationale}` })
-          // The caller is in-process and already holds the raw values — it gets
-          // the real rationale. Only the durable receipt is redacted.
-          const refusal = `⚖ ${cfg.name} ${label} (${providerName}, ${verdict.assessment}, ${confText}): ${rationaleText}`
+    const standingAnswer = (action: ActionSnapshot, bound: BoundJudge): SinkResult<Awaited<R>> | undefined => {
+      const { standing, attempted } = actionState(action, bound)
+      if (standing !== undefined) {
+        const { verdict, label } = standing
+        const until = Date.parse(verdict.judgedAt) + (label === "judgment-held" ? APPROVAL_WINDOW_MS : bound.blockWindowMs)
+        // `!(now >= until)` so that a verdict whose time does not parse stands.
+        if (!(Date.now() >= until)) {
+          // A new receipt, because every sink decision lands on the log. It
+          // carries the same verdict and no judge was called: retrying is free
+          // and learns nothing. The receipt's reason names the verdict; the
+          // refusal, which goes to the agent, does so only on the host's opt-in.
+          const detail = ` (${verdict.provider}, ${verdict.assessment}, conf ${verdict.confidence})`
+          const answered = ": this action already has this answer and was not judged again"
+          const reason = `⚖ ${cfg.name} ${label}${detail}${answered}`
+          const refusal = `⚖ ${cfg.name} ${label}${bound.rationaleInRefusal ? detail : ""}${answered}`
+          const receipt = cfg.log.append({ at: now(), sink: cfg.name, decision: label, args: rendered, reason, verdict })
           if (label === "judgment-blocked") return { ok: false, refusal, receipt }
           return {
             ok: false,
             refusal,
             receipt,
-            held: Object.freeze({ verdictDigest: digest, actionDigest: snapshot.digest, grantHash: judge.granted.grantHash }),
+            held: Object.freeze({ verdictDigest: verdictDigest(verdict), actionDigest: verdict.actionDigest, grantHash: verdict.grantHash }),
           }
         }
-        // Observe or warn: nothing is held, the doubt is on the receipt.
-        const note = `⚖ ${cfg.name} judgment-flagged (${verdict.assessment}, ${confText}): ${rationale}`
-        return act("judgment-flagged", note, `${note} — then threw; the action may or may not have taken effect`, note, {
-          args: snapshot.sourced,
-          verdict,
-          authorizedBy: Object.freeze({ verdictDigest: digest, paymentDigest: paymentDigestOfCall }),
-        })
       }
-      run = { args: snapshot.sourced, verdict, authorizedBy: Object.freeze({ verdictDigest: digest, paymentDigest: paymentDigestOfCall }) }
+      if (attempted !== undefined) {
+        const refusal = `⚠ ${cfg.name} refused: duplicate-action: this action has already been attempted, so it will not run again; a deliberate repeat needs a new idempotencyKey from the host`
+        const receipt = cfg.log.append({ at: now(), sink: cfg.name, decision: "refused", args: rendered, reason: refusal, verdict: attempted })
+        return { ok: false, refusal, receipt }
+      }
+      return undefined
     }
 
-    // The decision names the MODE that let the call through. The old order
+    // The one place a call that passed the walls runs and is recorded. The
+    // decision names the MODE that let the call through. The old order
     // (`violations.length > 0 ? "warned" : …`) labelled an observe-mode call
     // WITH violations "warned", so `observed` only ever labelled a clean call
     // and a dirty one read as if the sink were in warn mode (the 2026-10-13
     // gate audit). The violations are on the receipt's reason either way.
-    const decision = cfg.mode === "observe" ? "observed" : violations.length > 0 ? "warned" : "executed"
+    const passWalls = (run: JudgedRun | undefined): Promise<SinkResult<Awaited<R>>> => {
+      const decision = cfg.mode === "observe" ? "observed" : violations.length > 0 ? "warned" : "executed"
+      return act(
+        decision,
+        violations.length > 0 ? `mode=${cfg.mode}, violations: ${violations.join(" · ")}` : undefined,
+        `${cfg.name} passed the walls and then threw — the action may or may not have taken effect`,
+        `${cfg.name} passed the walls and was recorded as ${decision}`,
+        run,
+      )
+    }
 
-    return act(
-      decision,
-      violations.length > 0 ? `mode=${cfg.mode}, violations: ${violations.join(" · ")}` : undefined,
-      `${cfg.name} passed the walls and then threw — the action may or may not have taken effect`,
-      `${cfg.name} passed the walls and was recorded as ${decision}`,
-      run,
-    )
+    // Judgment wall — probabilistic, self-aware. Every path out of this block
+    // either returns or runs on a confident match: that is I4, and the only way
+    // a judged enforce sink reaches execute.
+    if (judge !== undefined && snapshot !== undefined && violations.length === undeclared) {
+      const action = snapshot
+
+      // ── The action's lifecycle (ADR 0010), in enforce only ─────────────────
+      // Observe and warn run the action by definition, so they keep no record.
+      // Up to `judging.set` nothing has been awaited on the first pass, so two
+      // identical calls cannot both be the one deciding.
+      let settled = (): void => {}
+      if (cfg.mode === "enforce") {
+        for (let wait = judging.get(action.unkeyed); wait !== undefined; wait = judging.get(action.unkeyed)) await wait
+        const answer = standingAnswer(action, judge)
+        if (answer !== undefined) return answer
+        let release!: () => void
+        judging.set(action.unkeyed, new Promise<void>((resolve) => { release = resolve }))
+        settled = () => {
+          judging.delete(action.unkeyed)
+          release()
+        }
+      }
+
+      const input = Object.freeze({
+        purpose: judge.granted.purpose,
+        action: Object.freeze({ sink: cfg.name, args: action.values }),
+      })
+      const providerName = judge.name
+
+      try {
+        // A provider that throws, rejects, runs out of time or answers with
+        // something that is not a verdict HAS NOT SCORED. That exception used to
+        // escape between the tier wall and the receipt (the 2026-10-13 gate
+        // audit), and an unawaited Promise once read as a verdict and executed
+        // (DAN-1382). No score is recorded as `unsure` at confidence 0, so the
+        // receipt carries a digestible verdict that states the doubt, and it is
+        // never mistaken for an answer: `scored` keeps a floor of 0 from admitting it.
+        const answer = readVerdict(await consultJudge((signal) => judge.assess(input, signal), judge.timeoutMs))
+
+        // Read the log again. `judging` only covers this sink object, and another
+        // sink over the same log (per-request sinks are supported, ADR 0010) may
+        // have decided or run this action while this judge was out. Nothing
+        // between here and execute() awaits, so the first to get here wins.
+        if (cfg.mode === "enforce") {
+          const decidedElsewhere = standingAnswer(action, judge)
+          if (decidedElsewhere !== undefined) return decidedElsewhere
+        }
+        const scored = !("failure" in answer)
+        const rationaleText = !scored
+          ? `provider ${providerName} gave no verdict: ${answer.failure}`
+          : typeof answer.rationale === "string"
+            ? answer.rationale
+            : preview(answer.rationale)
+
+        const verdict: Verdict = Object.freeze({
+          assessment: scored ? answer.assessment : "unsure",
+          confidence: scored ? answer.confidence : 0,
+          rationaleHash: sha256Hex(rationaleText),
+          provider: providerName,
+          model: judge.model,
+          actionDigest: action.digest,
+          unkeyedActionDigest: action.unkeyed,
+          scored,
+          paymentDigest: paymentDigestOfCall,
+          grantHash: judge.granted.grantHash,
+          purposeHash: judge.purposeHash,
+          judgedAt: now(),
+          attestation: null,
+        })
+        const digest = verdictDigest(verdict)
+        const evidence = { at: now(), sink: cfg.name, args: rendered, verdict }
+        const confText = scored ? `conf ${verdict.confidence.toFixed(2)}` : "no verdict"
+
+        // Rationale is FREE TEXT from a provider that just saw the raw values
+        // (adversarial pass A4, 2026-07-25). `redact` governed `args` and stopped
+        // there, so a judge that echoed what it judged — the natural way to write
+        // a rationale — republished the redacted value in `reason`, on the same
+        // receipt that gets signed and anchored and can never be redacted after
+        // the fact. Structured fields (assessment, confidence, provider name) are
+        // safe because the provider does not author them; the prose is not.
+        // A failure's text is the provider's too: an error message can echo.
+        const anyRedacted = Object.values(cfg.redact ?? {}).some((p) => p !== undefined && p !== "raw")
+        const rationale = anyRedacted
+          ? `[rationale withheld — this sink redacts arguments; sha256:${createHash("sha256").update(rationaleText).digest("hex").slice(0, 16)}]`
+          : rationaleText
+
+        const confident = scored && verdict.confidence >= judge.floor
+        if (!(confident && verdict.assessment === "match")) {
+          if (cfg.mode === "enforce") {
+            // Only a confident mismatch is a judgment. Everything else is doubt.
+            const label = confident && verdict.assessment === "mismatch" ? "judgment-blocked" : "judgment-held"
+            const receipt = cfg.log.append({ ...evidence, decision: label, reason: `⚖ ${cfg.name} ${label} (${providerName}, ${verdict.assessment}, ${confText}): ${rationale}` })
+            // The refusal goes to the agent. The judge's words, its assessment
+            // and its confidence would each teach it what to change, so they come
+            // back only when the host opts in (ADR 0010).
+            const refusal = `⚖ ${cfg.name} ${label}${judge.rationaleInRefusal ? ` (${providerName}, ${verdict.assessment}, ${confText}): ${rationaleText}` : ""}`
+            if (label === "judgment-blocked") return { ok: false, refusal, receipt }
+            return {
+              ok: false,
+              refusal,
+              receipt,
+              held: Object.freeze({ verdictDigest: digest, actionDigest: action.digest, grantHash: judge.granted.grantHash }),
+            }
+          }
+          // Observe or warn: nothing is held, and the doubt is on the receipt.
+          // It carries no `authorizedBy`: a flagged action is not an authorized one.
+          const violationsNote = violations.length > 0 ? ` · violations: ${violations.join(" · ")}` : ""
+          const note = `⚖ ${cfg.name} judgment-flagged (${verdict.assessment}, ${confText}): ${rationale}${violationsNote}`
+          return act("judgment-flagged", note, `${note} — then threw; the action may or may not have taken effect`, note, {
+            args: action.sourced,
+            verdict,
+          })
+        }
+        // A call the sink itself flagged carries no authority, even on a match.
+        return passWalls(
+          violations.length > 0
+            ? { args: action.sourced, verdict }
+            : { args: action.sourced, verdict, authorizedBy: Object.freeze({ verdictDigest: digest, paymentDigest: paymentDigestOfCall }) },
+        )
+      } finally {
+        // Reached with the decision's receipt on the log and, on a run, with
+        // `attempted` written and execute() already called: act() runs to its
+        // first await before returning its promise. Anyone waiting answers from that.
+        settled()
+      }
+    }
+
+    return passWalls(undefined)
   }
 
   // Two wrappers, so `resuming` cannot be reached positionally: a caller who
   // passes an approval to the sink itself gets an ordinary judged call. Frozen
   // so that nothing holding the sink can swap what `resume` does.
   return Object.freeze(
-    Object.assign((args: Args) => call(args), {
+    Object.assign((args: Args, options?: SinkCallOptions) => call(args, undefined, options), {
       /**
        * Release a held action with the owner's approval (spec § 3.3). Runs
        * the frozen copy of `args` and skips the judge. Refused otherwise with
        * `approval-unsigned`, `approval-expired`, `approval-mismatch` or
        * `approval-replayed` in the refusal string and a `refused` receipt.
+       * A held call that named an idempotency key is resumed with the same key.
        */
-      resume: (args: Args, approval: Approval) => call(args, { approval }),
+      resume: (args: Args, approval: Approval, options?: SinkCallOptions) => call(args, { approval }, options),
     }),
   )
 }

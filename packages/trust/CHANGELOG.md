@@ -46,6 +46,24 @@ unchanged. Only a judged sink's receipts change shape (ADR 0009).
 
 ### Security
 
+- **A judged action now has a lifecycle (ADR 0010, the 2026-11-08 audit L1 to L7).** In enforce, a
+  block stands for a window (`blockWindowMs`, default one hour) and a hold stands until it is resolved
+  or expires. A new call on either returns the existing answer without calling the judge, so a
+  retry can no longer resample the judge into a `match`. Execution is claimed synchronously and
+  keyed on the action plus a host-supplied idempotency key, so one approved action runs at most once
+  and five concurrent identical calls run one. An `attempted` receipt is written before `execute`,
+  so a failed log write can no longer make an approval reusable through a second sink. In warn and
+  observe a flagged action no longer carries `authorizedBy`, and an undeclared argument no longer
+  switches the judge off. `reconcile` reports one action executed twice as `duplicate-action`.
+- **`requireAuthorization` now consumes a one-shot `SpendAuthorization`** issued by the sink, so a
+  verdict digest typed by a caller, or the same one three times, no longer passes (L4). `purposeHash`
+  on the verdict binds it to the purpose judged (L3), checked by `verifyVerdictPurpose`.
+- **The refusal string no longer carries the judge's assessment, confidence or rationale** by
+  default, because the refusal goes to the agent. The receipt still holds them, redacted per
+  `redact`. A host can opt back in with `judgment.rationaleInRefusal`.
+- **A judge failure holds the call but does not stick.** The next identical call asks the judge
+  again. Only a real assessment stands. A call with any violation carries no `authorizedBy` or token,
+  even on a match.
 - **A confident `mismatch` from an async judge no longer executes.** In 0.5.0 the sink read a
   provider's Promise as if it were the verdict, so an async provider resolving `mismatch` still
   ran the action, recorded as `judgment-flagged`. TypeScript forbade that provider shape and
@@ -88,6 +106,10 @@ unchanged. Only a judged sink's receipts change shape (ADR 0009).
 
 ### Added
 
+- **`ReceiptLog.fromReceipts` and `SignedReceiptLog.fromSigned`** seed a new log from prior receipts,
+  checking the chain and, for the signed log, every signature under the signer's key. A judged
+  sink's blocks, holds and attempts last only as long as its log, so this is what lets them survive
+  a real restart (ADR 0010).
 - **A purpose on the grant.** `issueOrgMandate`, `issueProjectMandate` and `issueAgentMandate` take
   an optional `purpose: { statement, fields?: { payees?, maxPerAction?, actions? } }`. It is
   recorded on the grant event and covered by its signature. `trust.grantedPurpose(scope)` returns
@@ -120,6 +142,18 @@ unchanged. Only a judged sink's receipts change shape (ADR 0009).
   `double-spend` or `payment-mismatch`. A failed chain transaction is a refusal, never an orphan.
 
 ### Changed
+
+- ***Breaking*** (0.6.0 candidates only): `Verdict` gains `purposeHash` and `unkeyedActionDigest`,
+  so every `verdictDigest` from an earlier 0.6.0 build changes. An unjudged receipt is unchanged.
+- ***Breaking*** (0.6.0 candidates only): a judged enforce sink needs a log with `all()`, to read
+  back its blocks, holds and attempts, and it writes an `attempted` receipt before each run, so a
+  judged enforce run leaves two receipts. `Receipt["decision"]` gains `attempted`.
+- **`execute`'s second argument is `{ authorizedBy, authorization }`, and it is present only on a
+  confident match or an owner's approval.** A flagged run gets no second argument.
+- **The sink's second argument is `{ idempotencyKey? }`, and `resume` takes the same third.** The
+  key comes from the host and must never come from the agent.
+- **`Verdict` also gains `scored`,** and `reconcile` accepts a verdict from `attempted` and clean
+  `observed` receipts as well as `executed` ones.
 
 - ***Breaking:*** every sink call returns a Promise. `execute` gains the optional second argument
   above, and a rejected async `execute` rejects the sink's promise.

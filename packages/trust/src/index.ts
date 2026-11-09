@@ -45,6 +45,7 @@ export {
   parseJSONL,
   verifySignedChain,
   reconcile,
+  verifyVerdictPurpose,
   RECEIPT_MEMO_PREFIX,
   ANCHOR_MEMO_PREFIX,
   receiptMemo,
@@ -60,4 +61,5 @@ export {
   type ReconcileReport,
   type ReconcileSuiReceipt,
   type ReconcileChainSpend,
+  type VerdictPurposeResult,
 } from "./verify/index.ts"

@@ -141,7 +141,8 @@ describe("the judge's contract", () => {
     if (r.ok) return
     expect(ran.count).toBe(0)
     expect(r.refusal).toContain("judgment-blocked")
-    expect(r.refusal).toContain("payee is NOT intended")
+    // The refusal goes to the agent: the rationale stays on the receipt (ADR 0010).
+    expect(r.refusal).not.toContain("payee is NOT intended")
     expect(r.receipt.decision).toBe("judgment-blocked")
     expect(r.receipt.reason).toContain("judgment-blocked")
     expect(r.receipt.reason).toContain("payee is NOT intended")
@@ -161,7 +162,7 @@ describe("the judge's contract", () => {
     const r = await pending
     expect(r).toMatchObject({ ok: true, result: "sent" })
     expect(ran.count).toBe(1)
-    expect(decisions(log)).toEqual(["executed"])
+    expect(decisions(log)).toEqual(["attempted", "executed"])
   })
 
   it("assess receives exactly { purpose, action }, and a signal that has not fired", async () => {
@@ -202,7 +203,7 @@ describe("the judge's contract", () => {
     }
     const { sink } = judged(p)
     await sink({ to: good() })
-    await sink({ to: good() })
+    await sink({ to: Sourced.fromAuthority("0xother", "owner") })
     expect(seen).toEqual([
       { statement: GRANTED.purpose.statement, frozen: true },
       { statement: GRANTED.purpose.statement, frozen: true },
@@ -266,7 +267,8 @@ describe("the deadline", () => {
     const { sink, ran, log } = judged(p, { timeoutMs: 5 })
     const r = await sink({ to: good() })
     expect(r.ok).toBe(false)
-    if (!r.ok) expect(r.refusal).toContain("no verdict within 5ms")
+    if (!r.ok) expect(r.refusal).toBe("⚖ pay judgment-held")
+    expect(r.receipt.reason).toContain("no verdict within 5ms")
     expect(signal.aborted).toBe(true)
     expect(ran.count).toBe(0)
     await tick(60) // well past the late match
@@ -315,7 +317,7 @@ describe("the deadline", () => {
     const unhandled = await unhandledDuring(async () => {
       const { sink } = judged(p, { timeoutMs: 5 })
       const r = await sink({ to: good() })
-      if (!r.ok) expect(r.refusal).toContain("no verdict within 5ms")
+      if (!r.ok) expect(r.refusal).toBe("⚖ pay judgment-held")
     })
     expect((reason as Error).name).toBe("TimeoutError")
     expect(unhandled).toEqual([])
@@ -464,7 +466,7 @@ describe("no answer, or an answer that is not a verdict, fails closed", () => {
     }
   })
 
-  it("a redacting sink withholds the failure text from the receipt, and the caller still gets it", async () => {
+  it("a redacting sink withholds the failure text from the receipt, and the refusal never quotes it", async () => {
     const log = new ReceiptLog()
     const sink = makeSink<{ to: Sourced<string> }, string>({
       name: "pay",
@@ -477,7 +479,7 @@ describe("no answer, or an answer that is not a verdict, fails closed", () => {
     })
     const r = await sink({ to: Sourced.fromAuthority("ACME-SECRET", "registry") })
     expect(r.ok).toBe(false)
-    if (!r.ok) expect(r.refusal).toContain("ACME-SECRET")
+    if (!r.ok) expect(r.refusal).not.toContain("ACME-SECRET")
     expect(JSON.stringify(log.all()[0])).not.toContain("ACME-SECRET")
   })
 })

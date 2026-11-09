@@ -39,7 +39,7 @@ import { describe, expect, test } from "vitest"
 import { GRANTED } from "./helpers/granted.ts"
 import { poison, readsOf, SecondRead } from "./helpers/poison.ts"
 import { MandateFailure } from "../src/mandate/errors.ts"
-import { canonicalJSON } from "../src/canon.ts"
+import { canonicalJSON, sha256Hex } from "../src/canon.ts"
 import {
   actionDigest,
   allowlisted,
@@ -54,6 +54,7 @@ import {
   type JudgmentProvider,
   type Receipt,
   type Tier,
+  purposeHash,
 } from "../src/gate/index.ts"
 import {
   createTrust,
@@ -84,6 +85,7 @@ import {
   reconcile,
   SignedReceiptLog,
   verifySignedChain,
+  verifyVerdictPurpose,
   type SignedReceipt,
 } from "../src/verify/index.ts"
 
@@ -604,6 +606,20 @@ describe("gate: the sink spec, its nested bags, the call's args bag, the log ent
     }
   })
 
+  test("the sink's call options are read once, own keys only", async () => {
+    const run = async (wrap: <T extends object>(o: T, label: string) => T) => {
+      const log = new ReceiptLog()
+      const pay = makeSink(spec(log, true))
+      const a = await pay({ to: good() }, wrap({ idempotencyKey: "invoice-1" }, "options"))
+      const b = await pay({ to: good() }, wrap({ idempotencyKey: "invoice-1" }, "options"))
+      const c = await pay({ to: good() }, wrap({ idempotencyKey: "" } as never, "options"))
+      return { a: [a.ok, a.receipt.decision], b: [b.ok, b.receipt.decision], c: [c.ok, c.receipt.decision], decisions: decisions(log), chain: log.verifyChain() }
+    }
+    await sameVerdictAsync("sink options", () => run((o) => o), () => run((o, label) => poison(o, label)))
+    const inherited = await makeSink(spec(new ReceiptLog(), true))({ to: good() }, Object.create({ idempotencyKey: "from-the-prototype" }) as never)
+    expect(inherited.receipt.verdict?.actionDigest).toBe(inherited.receipt.verdict?.unkeyedActionDigest)
+  })
+
   test("sink.resume: the approval, its args bag and the sink's approvalKey are each read once", async () => {
     const { publicKey, privateKey } = generateKeyPairSync("ed25519")
     const approvalKey = publicKey.export({ format: "der", type: "spki" }).toString("hex")
@@ -737,6 +753,30 @@ describe("verify + signer: records, options bags, signer configs and sign/preima
     return { keys, log, records, pin }
   }
   const poisonRecords = (records: ReadonlyArray<SignedReceipt>) => records.map((r, i) => poison({ ...r }, `records[${i}]`))
+
+  test("ReceiptLog.fromReceipts and SignedReceiptLog.fromSigned read each record once", async () => {
+    const signer = makeEd25519ReceiptSigner(generateSigningKeypair())
+    const log = new SignedReceiptLog(signer)
+    log.append({ at: "2026-01-01T00:00:00.000Z", sink: "s", decision: "refused", args: {} })
+    log.append({ at: "2026-01-01T00:00:01.000Z", sink: "s", decision: "executed", args: {} })
+    const copies = () => JSON.parse(log.exportJSONL().trim().split("\n").map((l) => `[${l}]`).join("").replace(/\]\[/g, ",")) as ReadonlyArray<ReturnType<typeof log.signed>[number]>
+    const heads = (l: ReceiptLog) => [l.head(), l.all().length, l.verifyChain()]
+    expect(heads(ReceiptLog.fromReceipts(log.all()))).toEqual(heads(log))
+    sameVerdict("fromReceipts", () => heads(ReceiptLog.fromReceipts(log.all())), () => heads(ReceiptLog.fromReceipts(log.all().map((r, i) => poison({ ...r }, `row[${i}]`)))))
+    expect(heads(SignedReceiptLog.fromSigned(copies(), signer))).toEqual(heads(log))
+    sameVerdict("fromSigned", () => heads(SignedReceiptLog.fromSigned(copies(), signer)), () => heads(SignedReceiptLog.fromSigned(copies().map((r, i) => poison({ ...r }, `record[${i}]`)), signer)))
+  })
+
+  test("verifyVerdictPurpose — its args bag, the verdict and the grant are read once", () => {
+    const grant = () => ({ type: "grant", purpose: { statement: "Pay rent" } })
+    const verdict = () => ({ grantHash: sha256Hex(canonicalJSON(grant())), purposeHash: purposeHash({ statement: "Pay rent" }) }) as never
+    expect(verifyVerdictPurpose({ verdict: verdict(), grant: grant() })).toEqual({ ok: true })
+    sameVerdict(
+      "verifyVerdictPurpose",
+      () => verifyVerdictPurpose({ verdict: verdict(), grant: grant() }),
+      () => verifyVerdictPurpose(poison({ verdict: poison(verdict() as object, "verdict") as never, grant: poison(grant(), "grant") }, "args")),
+    )
+  })
 
   test("verifySignedChain — valid, with a seal, with a receipt memo, wrong pin, unknown option", async () => {
     const { records, pin, log } = await session()
@@ -872,8 +912,11 @@ describe("gate: the intent digests read their argument once", () => {
       provider: "p",
       model: "m@1",
       actionDigest: "c".repeat(64),
+      unkeyedActionDigest: "c".repeat(64),
+      scored: true,
       paymentDigest: null,
       grantHash: "b".repeat(64),
+      purposeHash: "e".repeat(64),
       judgedAt: "2026-01-01T00:00:00.000Z",
       attestation: null,
     })

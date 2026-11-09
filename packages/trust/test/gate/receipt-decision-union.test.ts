@@ -20,6 +20,7 @@ import type { Receipt } from "../../src/gate/index.ts"
 const label = (decision: Receipt["decision"]): string => {
   switch (decision) {
     case "executed": return "the action ran"
+    case "attempted": return "enforce: the action's intent record, written before it runs"
     case "refused": return "a sink refused an under-tier argument"
     case "observed": return "observe mode: the violation was recorded, not enforced"
     case "warned": return "warn mode: the violation was recorded and surfaced"

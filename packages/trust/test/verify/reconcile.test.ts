@@ -21,8 +21,11 @@ const verdictOf = (over: Partial<Verdict> = {}): Verdict => ({
   provider: "p",
   model: "m@1",
   actionDigest: "c".repeat(64),
+  unkeyedActionDigest: "c".repeat(64),
+  scored: true,
   paymentDigest: pd,
   grantHash: "b".repeat(64),
+  purposeHash: "e".repeat(64),
   judgedAt: "2026-01-01T00:00:00.000Z",
   attestation: null,
   ...over,
@@ -74,7 +77,8 @@ describe("the four reasons", () => {
     }
   })
 
-  test.each(["refused", "observed", "warned", "judgment-blocked", "judgment-flagged", "judgment-held", "errored", "declassify-refused"])(
+  // A clean `observed` and an `attempted` do authorize (ADR 0010, test/gate/action-lifecycle.test.ts).
+  test.each(["refused", "warned", "judgment-blocked", "judgment-flagged", "judgment-held", "errored", "declassify-refused"])(
     "no-verdict: a gate receipt decided %s is not an execution",
     (decision) => {
       expect(pairs(run([gateOf({ decision })], [suiOf("D1")], [chainOf("D1")]))).toEqual([["D1", "no-verdict"]])
@@ -132,8 +136,8 @@ describe("the four reasons", () => {
     expect(pairs(run([gateOf()], [suiOf("D1"), suiOf("D2")], [chainOf("D1", { amount: "601" }), chainOf("D2")]))).toEqual([["D1", "payment-mismatch"], ["D2", "double-spend"]])
   })
 
-  test("two verdicts, one spend each, are not a double-spend", () => {
-    const v2 = verdictOf({ judgedAt: "2026-01-02T00:00:00.000Z" })
+  test("two verdicts for two actions, one spend each, are clean", () => {
+    const v2 = verdictOf({ judgedAt: "2026-01-02T00:00:00.000Z", actionDigest: "9".repeat(64) })
     const b = { verdictDigest: verdictDigest(v2), paymentDigest: pd }
     expect(run([gateOf(), gateOf({ verdict: v2 })], [suiOf("D1"), suiOf("D2", { authorizedBy: b })], [chainOf("D1"), chainOf("D2")])).toEqual({ ok: true, orphans: [] })
   })

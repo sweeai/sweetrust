@@ -147,7 +147,8 @@ describe("an owner-signed approval releases the held action, once", () => {
     const r = await (m.sink as any)(m.a, approve(m.h))
     expect(r.ok).toBe(false)
     expect(r.receipt.decision).toBe("judgment-held")
-    expect(m.provider.calls).toBe(2)
+    // The open hold answered: the second argument is call options, never an approval (ADR 0010).
+    expect(m.provider.calls).toBe(1)
     expect(m.runs).toHaveLength(0)
   })
 
@@ -228,7 +229,7 @@ describe("I11: one approval, one execution", () => {
   it("one approval, one attempt: a rejected action is not retried", async () => {
     const m = await held({ execute: () => Promise.reject(new Error("settled unknown")) })
     await expect(m.sink.resume(m.a, approve(m.h))).rejects.toThrow("settled unknown")
-    expect(m.log.all().map((r) => r.decision)).toEqual(["judgment-held", "executed", "errored"])
+    expect(m.log.all().map((r) => r.decision)).toEqual(["judgment-held", "attempted", "executed", "errored"])
     expect(m.log.all().at(-1)!.approval).toBeDefined()
     refused(await m.sink.resume(m.a, approve(m.h)), "approval-replayed")
     expect(m.runs).toHaveLength(1)
@@ -236,15 +237,15 @@ describe("I11: one approval, one execution", () => {
 
   it("two holds are two verdicts: each approval releases only its own", async () => {
     const m = build({ provider: counting() })
-    const a = args()
+    const a = args("0xabc", "5")
+    const b = args("0xabc", "6")
     const first = await m.sink(a)
-    await new Promise((r) => setTimeout(r, 3))
-    const second = await m.sink(a)
+    const second = await m.sink(b)
     if (first.ok || second.ok || !first.held || !second.held) throw new Error("expected two holds")
     expect(first.held.verdictDigest).not.toBe(second.held.verdictDigest)
     expect((await m.sink.resume(a, approve(first.held))).ok).toBe(true)
     refused(await m.sink.resume(a, approve(first.held)), "approval-replayed")
-    expect((await m.sink.resume(a, approve(second.held))).ok).toBe(true)
+    expect((await m.sink.resume(b, approve(second.held))).ok).toBe(true)
     expect(m.runs).toHaveLength(2)
   })
 })
@@ -492,7 +493,7 @@ describe("steps 1 and 2 re-run: an approval never launders a violation", () => {
     expect(m.runs).toHaveLength(0)
   })
 
-  it("the purpose fields are checked again", async () => {
+  it("a changed purpose under the same grant hash cannot release the hold", async () => {
     const log = new ReceiptLog()
     const fields = (payees: string[]) => ({ purpose: { statement: "s", fields: { payees } }, grantHash: "5".repeat(64) })
     const purposeArgs = { purposeArgs: { payee: "to", amount: "amount" }, network: "sui:testnet", asset: "0x2::sui::SUI" }
@@ -502,7 +503,7 @@ describe("steps 1 and 2 re-run: an approval never launders a violation", () => {
     expect(r.ok).toBe(false)
     if (r.ok) return
     expect(r.receipt.decision).toBe("refused")
-    expect(r.refusal).toContain("not a payee this purpose names")
+    expect(r.refusal).toContain("approval-mismatch")
     expect(b.runs).toHaveLength(0)
   })
 
@@ -543,7 +544,9 @@ describe("the approval key is bound at construction, or the sink does not exist"
   it("an approvalKey needs a log that can be read back", () => {
     const appendOnly = { append: () => ({}) } as unknown as ReceiptLog
     expect(() => build({ log: appendOnly })).toThrow(TypeError)
-    expect(() => build({ log: appendOnly, key: undefined })).not.toThrow()
+    // A judged enforce sink reads its own blocks and attempts back, approval key or not (ADR 0010).
+    expect(() => build({ log: appendOnly, key: undefined })).toThrow(TypeError)
+    expect(() => build({ log: appendOnly, key: undefined, mode: "warn" })).not.toThrow()
   })
 
   it("an inherited approvalKey is not an approvalKey", async () => {

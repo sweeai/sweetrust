@@ -80,10 +80,10 @@ try {
       asset: ASSET,
     },
     execute: async (args, context) => {
-      must(context, "a judged sink must pass authorizedBy to execute")
+      must(context, "a judged sink must pass authorizedBy and an authorization to execute")
       const { authorizedBy } = context as NonNullable<typeof context>
       trust.useCapability({ mandate, capability: Pay, verdictDigest: authorizedBy.verdictDigest })
-      return sui.spend({ signer: agent, allowance, amount: BigInt(args.amount.value), recipient: args.to.value, authorizedBy })
+      return sui.spend({ signer: agent, allowance, amount: BigInt(args.amount.value), recipient: args.to.value, authorization: (context as NonNullable<typeof context>).authorization })
     },
   })
 
