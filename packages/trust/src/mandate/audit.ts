@@ -30,6 +30,14 @@ import type {
 
 type AuditLogCorrupt = Extract<MandateError, { readonly _tag: "AuditLogCorrupt" }>
 
+/**
+ * A store file is created readable by its owner alone (the 2026-11-08 audit,
+ * K9): SECURITY.md tells a host to protect it like a key, and it was created
+ * 644. `mode` applies only when the append creates the file, so an existing
+ * store keeps its mode.
+ */
+const STORE_FILE_OPTIONS = { encoding: "utf-8", mode: 0o600 } as const
+
 const corrupt = (
   storePath: string,
   line: number,
@@ -241,7 +249,7 @@ export const makeJsonlSignedAuditLive = (
     const previousHash =
       existing.length > 0 ? sha256Hex(canonicalJSON(existing[existing.length - 1]!)) : null
     const signed = signer.sign({ payload, previousHash, domain: MANDATE_AUDIT_DOMAIN })
-    appendFileSync(storePath, JSON.stringify(signed) + "\n", "utf-8")
+    appendFileSync(storePath, JSON.stringify(signed) + "\n", STORE_FILE_OPTIONS)
     return signed
   }
 
@@ -283,7 +291,7 @@ export const makeJsonlAuditLive = (storePath: string): MandateAuditService => {
 
   return {
     record: (event) => {
-      appendFileSync(storePath, JSON.stringify(event) + "\n", "utf-8")
+      appendFileSync(storePath, JSON.stringify(event) + "\n", STORE_FILE_OPTIONS)
     },
     query: (mandateId: MandateId) => readEvents().filter((e) => e.mandateId === mandateId),
     isRevoked: (mandateId: MandateId) =>

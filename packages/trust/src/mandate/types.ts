@@ -159,7 +159,7 @@ export type MandateError =
   | { readonly _tag: "CapabilityNotInGrantorScope"; readonly capability: string }
   | {
       readonly _tag: "MaliciousMandateMetadata"
-      readonly inputKind: "rationale" | "capability-identifier"
+      readonly inputKind: "rationale" | "capability-identifier" | "grantor" | "unit" | "resumedBy"
       readonly matchedPatternId: string
       readonly evidence: string
     }
