@@ -18,12 +18,14 @@ release that makes it. A patch version changes none of these.
 
 A security patch. No call shape, error union, receipt hash or signed preimage changes, and existing
 logs verify as before. Code that compares capability objects needs one change, described under
-*Changed*. Upgrade if untrusted code can
-hand objects to this library in your process, or if a revoke rationale can quote untrusted text.
+*Changed*.
+
+Upgrade if untrusted code can hand objects to this library in your process, or if a revoke
+rationale can quote untrusted text.
 
 ### Security
 
-- **A capability object cannot overrun a spending cap from inside the check.** A capability object with a
+- **A capability object cannot overrun a spending cap from inside the check.** An object with a
   `key` getter could run between the limit check and its record, re-enter `useCapability`, and spend
   150 against a cap of 30 on a signed chain that still verified. Every caller value is now read
   before the first log read.
@@ -39,7 +41,7 @@ hand objects to this library in your process, or if a revoke rationale can quote
   record could pass a real pin.
 - **A sink reads every argument before rendering any.** A getter on a later argument could edit an
   earlier one after its receipt entry was written, so the receipt and `execute()` disagreed.
-- **Smaller closes.** A child can no longer be issued under a revoked ancestor; `signed()` records
+- **Smaller fixes.** A child can no longer be issued under a revoked ancestor; `signed()` records
   are frozen; a store file is created mode 600 (an existing file keeps its mode).
 
 ### Changed
