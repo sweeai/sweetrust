@@ -38,6 +38,16 @@ release that makes it. A patch version changes none of these.
   DAN-1443). A log from 0.6.0 in which an unapproved run followed an expired doubt keeps that doubt,
   so the next repeat of that action is held until the owner approves it.
 
+### Added
+
+- **A judge is told the payment the sink resolved.** On a sink that names `purposeArgs`,
+  `JudgmentInput` now has a frozen `payment` (`payee`, `amount`, `asset`, `network`) built from the
+  same values as the verdict's `paymentDigest`, so a provider can read the payment without repeating
+  the sink's `purposeArgs` and can see a sink-level `judgment.asset`. `amount` is the decimal string the digest
+  hashes, even for a bigint argument. The view has a fourth key only on such a sink. On every judged
+  sink `input` no longer inherits from `Object`, so a provider that calls `input.hasOwnProperty` or
+  stringifies `input` must use `Object.hasOwn` instead, or the call has no verdict (DAN-1445).
+
 ## [0.6.0] — 2026-11-08
 
 This release adds the intent layer: the owner's purpose is signed into the mandate,

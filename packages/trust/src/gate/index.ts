@@ -41,6 +41,7 @@ export {
   type Action,
   type ArgumentTrust,
   type JudgmentInput,
+  type JudgmentPayment,
   type Payment,
   type Verdict,
   type Approval,
