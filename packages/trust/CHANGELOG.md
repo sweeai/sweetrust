@@ -61,6 +61,10 @@ release that makes it. A patch version changes none of these.
   hashes, even for a bigint argument. The view has a fourth key only on such a sink. On every judged
   sink `input` no longer inherits from `Object`, so a provider that calls `input.hasOwnProperty` or
   stringifies `input` must use `Object.hasOwn` instead, or the call has no verdict (DAN-1445).
+- **A sink can hold a payment to one spelling.** A block or hold names an action as written, so
+  `0xABC` after a hold on `0xabc` was a new action and got a fresh judge. Set `judgment.spelling` to
+  your rail's canonical form of a payee and an asset, and any other spelling is refused before a
+  judge runs. A sink without it behaves as before, and no digest changes (DAN-1457).
 
 ## [0.6.0] — 2026-11-08
 

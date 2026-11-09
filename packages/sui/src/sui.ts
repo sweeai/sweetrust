@@ -189,6 +189,16 @@ const boundTo = (coinType: string | null, asset: string): boolean => {
   }
 }
 const normAddr = (a: string): string => normalizeSuiAddress(a)
+/**
+ * Sui's canonical spelling of a payee and a coin type, for a judged sink's
+ * `judgment.spelling`. A sink holding its payment to this refuses a respelled
+ * address or a short-form coin type before a judge runs, so spell a sink's
+ * `asset` and a purpose's `payees` in the long form this returns.
+ */
+export const suiPaymentSpelling = Object.freeze({
+  payee: (address: string): string => normalizeSuiAddress(address),
+  asset: (coinType: string): string => normalizeStructTag(coinType),
+})
 /** A full-length address only: normalizing first would pad `""` to the zero address and `0x12` to a real one. */
 const validAddr = (a: string): boolean => typeof a === "string" && isValidSuiAddress(a)
 

@@ -638,6 +638,34 @@ describe("gate: the sink spec, its nested bags, the call's args bag, the log ent
     }
   })
 
+  test("judgment.spelling is read once, own keys only", async () => {
+    const run = async (wrap: <T extends object>(o: T, label: string) => T) => {
+      const log = new ReceiptLog()
+      const lower = (value: string) => value.toLowerCase()
+      const pay = makeSink<{ to: Sourced<string>; amount: Sourced<string> }, string>({
+        name: "pay",
+        requires: { to: "verified", amount: "verified" },
+        mode: "enforce",
+        log,
+        execute: () => "paid",
+        judgment: {
+          provider: unsure,
+          floor: 0.8,
+          granted: GRANTED,
+          purposeArgs: { payee: "to", amount: "amount" },
+          network: "sui:testnet",
+          asset: "0xcoin",
+          spelling: wrap({ payee: lower, asset: lower }, "spec.judgment.spelling"),
+        },
+      })
+      const amount = () => Sourced.fromAuthority("5", "reg")
+      const a = await pay({ to: Sourced.fromAuthority("0xabc", "reg"), amount: amount() })
+      const b = await pay({ to: Sourced.fromAuthority("0xABC", "reg"), amount: amount() })
+      return { a: [a.ok, a.receipt.decision], b: [b.ok, b.receipt.decision], decisions: decisions(log), chain: log.verifyChain() }
+    }
+    await sameVerdictAsync("judgment.spelling", () => run((o) => o), () => run((o, label) => poison(o, label)))
+  })
+
   test("the sink's call options are read once, own keys only", async () => {
     const run = async (wrap: <T extends object>(o: T, label: string) => T) => {
       const log = new ReceiptLog()

@@ -21,6 +21,12 @@ later, which is where recipients and a per-payment cap can move on chain); reser
 spends (Sui settles each spend, so `spend` is one step); and mainnet spends (the module is present
 on mainnet; this package has spent only on testnet). Tested against `@mysten/sui` 2.35.0 only.
 
+### Added
+
+- **`suiPaymentSpelling`, Sui's canonical form of an address and a coin type.** Pass it as a judged
+  sink's `judgment.spelling` so a respelled payee is refused before a judge runs. A sink's `asset`
+  and a purpose's `payees` must then be in the long form it returns (DAN-1457).
+
 ### Security
 
 - **`chainSpends` now finds a spend from what moved, not from the command list.** It lists a

@@ -170,9 +170,12 @@ trying is the purpose's deterministic fields and the chain's own limits.
 
 ### A payee or asset is compared as written
 
-The kernel does not normalize an address or coin type. On a rail that does not normalize them
-either, a respelled payee is a new action that a block does not cover. Set `payees` and `asset` in
-the purpose, and a variant is then refused.
+The kernel does not normalize an address or coin type, so a respelled payee is a new action that a
+block or a hold does not cover. Two settings close this, and a sink with neither compares the string
+it was given. `judgment.spelling` takes your rail's canonical form of a payee and an asset, and any
+other spelling is refused before a judge runs; on Sui, pass `suiPaymentSpelling` from `sweetrust-sui`.
+`payees` and `asset` in the purpose refuse a variant too, because a variant is not on the list. The
+functions in `spelling` run on agent-supplied strings inside the sink, so they must be pure and fast.
 
 ### A judge outage holds the call and leaves nothing behind
 
