@@ -330,8 +330,17 @@ report as a statement about those inputs only.
 object it promotes, and `result.value.value` IS the value object you put in the registry, by
 reference. So that nothing holding the result can rewrite the registry through it,
 `Sourced.fromAuthority` freezes an object or array value **in place, shallowly**, the moment it
-becomes an authority value, and `allowlisted` freezes a row that reached `verified` another way as soon as a lookup finds it. Nested objects are not frozen, and a Map, Set, Date or buffer can still be changed through its own methods, so these are not frozen in effect; typed arrays are
-left alone. If you keep editing a record after wrapping it, wrap a copy.
+becomes an authority value, and `allowlisted` freezes every own field of the row **in place, at every
+depth**, as soon as a lookup finds it and before a candidate's code can run. That includes your own
+nested objects and anything a row points at, so do not hang a shared object off a row, and it happens
+whether or not the candidate matches. `humanConfirm` refuses a value that is not plain JSON, because a
+Map or bytes would not appear in the question as they are. The question shows the first 256
+characters and says when it has cut the rest, so what follows a long field goes unseen. It deep-freezes the private copy it
+confirms, so what a person said yes to stays what they saw. In a registry row, a Map, Set, Date or
+buffer can still be changed through its own methods, so these are not frozen in effect, typed arrays
+are left alone, and a getter still answers however it likes. So a row holding bytes can be rewritten after it is compared.
+`corroborate` returns a claim already at or above `corroborated` as itself, unfrozen. If you keep
+editing a record after wrapping it, wrap a copy.
 
 ### `allowlisted` needs a key your host holds
 
@@ -344,6 +353,8 @@ which can still have come from the message. A key that is not a `Sourced` at all
 
 The row it promotes must be `verified` and the gate's own, and so must the candidate be the gate's
 own value: a row built with `Sourced.fromChannel`, or parsed from JSON that claims a tier, is refused.
+`corroborate` and `humanConfirm` hold their inputs to the same rule: a claim, reference or candidate
+the gate did not mint is refused without being read, and no person is asked about it.
 
 ### The ladder is three tiers
 
