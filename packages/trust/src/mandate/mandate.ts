@@ -1601,6 +1601,11 @@ export const resumeMandate = <
  * purpose returned is a frozen copy, because a JSONL store parses a fresh
  * object and an in-memory store hands back the one it holds.
  *
+ * Refused with `MandateRevoked` or `AncestorMandateRevoked` once the mandate
+ * or any ancestor is revoked. It answers at the moment it is called: a sink
+ * built before the revoke holds its copy, and stopping that one is the
+ * action-lifecycle work, not this function's.
+ *
  * A grant with no purpose is a `TypeError`, not a null: a judged sink cannot
  * be built without one, and a host that asks has made a programmer error
  * where it builds the sink (spec § 5), before any authority decision.
@@ -1615,7 +1620,11 @@ export const grantedPurpose = (
   assertIssued(presented, mandateId, "")
   assertBoundTo(audit, presented as object, mandateId)
 
-  const grantEvent = audit.query(mandateId).find((e) => e.type === "grant") as MandateGrantEvent | undefined
+  // Revocation first, by the walk `useCapability` runs, so a revoked mandate or
+  // ancestor is refused as it would be at use (the 2026-11-08 audit, K6). A
+  // judged sink built from a revoked grant used to execute, and reconcile
+  // reported it clean.
+  const grantEvent = walkChain(audit, mandateId, (presented as MandateScope<any, any, any>).grantor).chain[0]
   if (grantEvent === undefined) {
     return failMandate({ _tag: "MandateNotIssued", mandateId })
   }
