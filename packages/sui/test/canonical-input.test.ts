@@ -50,7 +50,7 @@ describe("spend", () => {
     const lowercasing = vi.spyOn(String.prototype, "toLowerCase")
     try {
       const r = await adapter.spend({ signer: agent, allowance: handle(), amount: 5n, recipient: "İ".repeat(70) })
-      expect(r.refusal?.code).toBe("invalid-address")
+      expect(r.refusal?.code).toBe("not-authorized")
       expect(lowercasing.mock.contexts.some((text) => String(text).includes("İ"))).toBe(false)
     } finally {
       lowercasing.mockRestore()
