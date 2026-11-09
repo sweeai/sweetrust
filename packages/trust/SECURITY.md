@@ -309,8 +309,10 @@ becomes an authority value, and `allowlisted` freezes the row **in place, at eve
 as a lookup finds it and before a candidate's code can run. That includes your own nested objects,
 and it happens whether or not the candidate matches. `humanConfirm` deep-freezes the private copy it
 confirms, so what a person said yes to stays what they saw. A Map, Set, Date or buffer can still be
-changed through its own methods, so these are not frozen in effect, and typed arrays are left alone.
-If you keep editing a record after wrapping it, wrap a copy.
+changed through its own methods, so these are not frozen in effect, typed arrays are left alone, and
+a getter still answers however it likes. So a row holding bytes can be rewritten after it is compared.
+`corroborate` returns a claim already at or above `corroborated` as itself, unfrozen. If you keep
+editing a record after wrapping it, wrap a copy.
 
 ### `allowlisted` needs a key your host holds
 

@@ -499,9 +499,10 @@ export function allowlisted<T>(
   try {
     // Frozen at every depth here, before the candidate's `toJSON` runs below, so
     // the record compared is the record promoted, and so the object the caller
-    // gets back cannot be rewritten through any field (SECURITY.md). A cycle ends
-    // the walk and then fails to serialize, which refuses below.
-    deepFreeze(entryValue)
+    // gets back cannot be rewritten through any field. Bytes and the contents of
+    // a Map or Set are the exception (SECURITY.md). A cycle ends the walk and then
+    // fails to serialize, which refuses below.
+    freezePromoted(entryValue)
     entryJSON = receiptJSON(entryValue)
   } catch (err) {
     return {
@@ -721,7 +722,7 @@ export async function humanConfirm<T>(
   try {
     // Frozen before the question is built: what ascends is the value that was
     // asked about, and a yes cannot be pointed at something else afterward.
-    candidateValue = deepFreeze(structuredClone(liveValue))
+    candidateValue = freezePromoted(structuredClone(liveValue))
   } catch (err) {
     return {
       ok: false,
@@ -880,15 +881,26 @@ export function receiptBody(e: Omit<Receipt, "hash">): string {
 
 /** Freeze an object graph in place. `seen` guards against a cyclic graph handed
  * straight to append(): receiptBody() rejects one before commit() runs, but
- * a `toJSON` can hide a cycle from JSON.stringify and not from a walk. An
- * ArrayBuffer view is skipped because Object.freeze throws on one with elements. */
-function deepFreeze<T>(root: T, seen = new WeakSet<object>()): T {
-  if (typeof root !== "object" || root === null || ArrayBuffer.isView(root) || seen.has(root)) return root
+ * a `toJSON` can hide a cycle from JSON.stringify and not from a walk. Every own
+ * data field is walked, a symbol or non-enumerable one too, and no getter runs. */
+function deepFreeze<T>(root: T, seen = new WeakSet<object>(), skipViews = false): T {
+  if (typeof root !== "object" || root === null || seen.has(root)) return root
+  if (skipViews && ArrayBuffer.isView(root)) return root
   seen.add(root)
   Object.freeze(root)
-  for (const v of Object.values(root)) deepFreeze(v, seen)
+  for (const key of Reflect.ownKeys(root)) {
+    const field = Object.getOwnPropertyDescriptor(root, key)
+    if (field !== undefined && "value" in field) deepFreeze(field.value, seen, skipViews)
+  }
   return root
 }
+
+/**
+ * deepFreeze for a value a declassifier promotes, which can hold bytes. Object.freeze
+ * throws on a typed array with elements, so one is left alone here. Only here: the
+ * receipt log relies on that throw to keep a writable buffer out of a receipt.
+ */
+const freezePromoted = <T>(value: T): T => deepFreeze(value, new WeakSet<object>(), true)
 
 /** Everything a receipt may hold: `receiptBody`'s nine fields and the hash. A tenth key would sit outside the hash. */
 const RECEIPT_KEYS: ReadonlyArray<string> = ["seq", "prevHash", "at", "sink", "decision", "args", "reason", "verdict", "approval", "hash"]

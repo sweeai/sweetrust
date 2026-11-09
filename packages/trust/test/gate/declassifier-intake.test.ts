@@ -1,12 +1,12 @@
 /**
- * All three declassifiers refuse a `Sourced` the gate did not mint, and what they
- * promote cannot be rewritten afterward (DAN-1451). `corroborate` minted a branded
+ * All three declassifiers refuse a `Sourced` the gate did not mint, and what
+ * `humanConfirm` and `allowlisted` promote cannot be rewritten afterward (DAN-1451). `corroborate` minted a branded
  * value from a forged claim, `humanConfirm` showed a person a forgery's own
  * `describe()`, a confirmed value stayed writable after the yes, and a nested
  * registry row could be rewritten through the result or by a candidate's `toJSON`.
  */
 import { describe, expect, it, vi } from "vitest"
-import { Sourced, allowlisted, corroborate, humanConfirm } from "../../src/gate/index.ts"
+import { ReceiptLog, Sourced, allowlisted, corroborate, humanConfirm } from "../../src/gate/index.ts"
 import { poison, readsOf } from "../helpers/poison.ts"
 
 /** Looks like a Sourced and records every field or method anything touches on it. */
@@ -139,5 +139,33 @@ describe("what a declassifier promotes cannot be rewritten, at any depth", () =>
     expect(r.ok).toBe(true)
     const confirmed = await humanConfirm(channel(withBytes()), () => true)
     expect(confirmed.ok).toBe(true)
+  })
+
+  it("a nested object under a symbol or hidden key is frozen too", () => {
+    const hidden = Symbol("hidden")
+    const row = nestedRow() as ReturnType<typeof nestedRow> & { [hidden]?: { n: number }; secret?: { n: number } }
+    row[hidden] = { n: 1 }
+    Object.defineProperty(row, "secret", { value: { n: 1 }, enumerable: false })
+    const r = allowlisted(channel(nestedRow()), registryOf(Sourced.fromAuthority(row, "payee-registry")), hostKey(), "payee-registry")
+    if (!r.ok) throw new Error(r.reason)
+    expect(Object.isFrozen(row[hidden])).toBe(true)
+    expect(Object.isFrozen(row.secret)).toBe(true)
+  })
+
+  it("the freeze walk does not run a getter on a row", () => {
+    const getter = vi.fn(() => ({ n: 1 }))
+    const row = {}
+    Object.defineProperty(row, "live", { get: getter, enumerable: true })
+    allowlisted(channel({}), registryOf(Sourced.fromAuthority(row, "payee-registry")), hostKey(), "payee-registry")
+    // Once, by the comparison's own serialization. The walk must not add a read.
+    expect(getter).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe("the receipt log's freeze is unchanged", () => {
+  it("a receipt holding a typed array is still refused at append", () => {
+    const log = new ReceiptLog()
+    expect(() => log.append({ at: "2026-11-09T00:00:00Z", sink: "pay", decision: "refused", args: { x: { value: new Uint8Array([1]), tier: "verified", provenance: "owner" } } as never, reason: "r" })).toThrow()
+    expect(log.all()).toHaveLength(0)
   })
 })
