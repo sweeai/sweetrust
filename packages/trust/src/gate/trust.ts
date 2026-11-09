@@ -1038,8 +1038,10 @@ export interface Verdict {
   readonly confidence: number
   /**
    * For a scored verdict this attests only the text the provider returned. It
-   * says nothing about the model's reasoning. When the judge gave no answer it
-   * hashes the gate's own "gave no verdict" line.
+   * says nothing about the model's reasoning, and it is an unsigned digest the
+   * gate computes, so it does not prove the provider wrote that text. When the
+   * judge gave no answer it hashes the gate's "gave no verdict" line, which can
+   * include the provider's error text.
    */
   readonly rationaleHash: string
   readonly provider: string
@@ -1401,17 +1403,19 @@ const strictInstant = (s: string): number | undefined => {
 // that still isn't what the principal meant. That gap is judgment's job — a
 // model scoring the action against declared intent. Two rules govern
 // it: (1) judgment is FALLIBLE (it can be fooled), so it must
-// never be the only wall; (2) judgment is SELF-AWARE (it reports a
-// confidence and, crucially, says "unsure") — in enforce mode an unsure verdict
+// never be the only wall; (2) judgment can ABSTAIN (it reports a
+// confidence and, crucially, can say "unsure") — in enforce mode an unsure verdict
 // holds the action for a human; it neither runs it nor confidently blocks it.
 // We CONSUME judgment via this seam; this package does not ship a judgment model.
 
 export interface JudgmentVerdict {
   readonly assessment: "match" | "mismatch" | "unsure"
   /**
-   * In [0,1], and not calibrated unless the provider says so. The sink compares
-   * it with the floor and takes it as given. One provider's number may measure
-   * only how concentrated its answer is, which is not how often it is right.
+   * In [0,1], and not calibrated unless the provider says so in its own
+   * documentation; this interface has no field for that. The sink compares it
+   * with the floor and takes it as given. One provider's number may measure only
+   * how concentrated its answer is, which is not how often it is right, so a
+   * floor set for one provider or pinned model means nothing on another.
    */
   readonly confidence: number
   readonly rationale: string
@@ -1436,7 +1440,9 @@ export interface JudgmentProvider {
   /**
    * Score a proposed action against the owner's purpose. If this throws or
    * rejects, remember that an error message can echo arguments: its first line
-   * reaches the receipt unless the sink redacts an argument (SECURITY.md).
+   * reaches the receipt unless the sink redacts an argument, and a malformed
+   * verdict's fields reach it the same way. `rationaleInRefusal` sends that text
+   * to the agent even on a sink that redacts (SECURITY.md).
    */
   assess(input: JudgmentInput, signal: AbortSignal): Promise<JudgmentVerdict>
 }
@@ -2008,8 +2014,10 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
    * immediately before `execute`, and a grant no longer live is refused in
    * every mode: a revoke is the owner's word, not a tier the ladder can relax. `timeoutMs` (default 5000) is the
    * judge's deadline: at it the provider's signal fires, any later answer is
-   * discarded, and the call has no verdict. The default suits a warm model, and
-   * a provider with a cold start needs a longer timeoutMs or its first call has no verdict.
+   * discarded, and the call has no verdict: enforce holds it for the owner, while
+   * observe and warn run it unscored. Set this from the provider's real latency:
+   * a provider with a cold start needs a longer timeoutMs, and one that cancels
+   * its own load on the signal can miss every call rather than only the first.
    *
    * `purposeArgs` names the arguments that are the payment's parts. With it the
    * sink takes `network` (CAIP-2) and, unless an asset argument is named,

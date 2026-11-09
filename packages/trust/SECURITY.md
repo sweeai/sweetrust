@@ -236,11 +236,17 @@ no verdict: <the first line of the error>`. A receipt cannot be redacted after i
 error message can echo the arguments the provider was handed. An HTTP client that puts the request
 in its message is enough.
 
-If the sink redacts any argument, it withholds that text and a provider's rationale from the receipt
-and leaves a short hash in their place. A sink that redacts nothing records them as written. And
+A provider that returns a malformed verdict reaches the receipt the same way, and not cut to one
+line: the sink quotes the field it could not accept, so an `assessment` built from an argument is
+recorded as written.
+
+If the sink redacts any argument, it withholds that text and a provider's rationale from the reason
+and leaves a short hash in their place. The receipt still carries the text's full `rationaleHash`.
+Neither hash is salted, so anyone holding the receipt who can guess the text can confirm the guess. A
+sink that redacts nothing records the text as written. And on a fresh hold or block,
 `judgment.rationaleInRefusal` returns the same text to the agent, whether or not the sink redacts.
-So keep raw values out of the messages a provider throws, and catch and rewrite the errors of any
-library it calls.
+So keep raw values out of everything a provider throws or returns, and catch and rewrite the errors
+of any library it calls.
 
 ### A sink cannot check that `granted` belongs together
 

@@ -27,6 +27,11 @@ release that makes it. A patch version changes none of these.
 
 ### Security
 
+- **`JudgmentVerdict.confidence` no longer claims to be calibrated.** It is whatever the provider
+  reports, and the sink only compares it with `floor`, so re-examine a floor when the provider or its
+  pinned model changes. `SECURITY.md` now also describes how a provider's error text reaches the
+  receipt, so scrub what a provider throws (DAN-1446).
+
 - **A doubted action needs its owner, however long the agent waits.** A hold expired after 15 minutes
   and a block after its window, and the next identical call was judged afresh, so a `match` ran with
   no approval and an agent could retry until the judge agreed. The judge is still asked, so the owner
