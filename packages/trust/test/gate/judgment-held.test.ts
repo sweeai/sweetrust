@@ -593,14 +593,22 @@ describe("I2: the frozen snapshot the judge saw is the thing that executes", () 
     expect(runs).toHaveLength(0)
   })
 
-  it("an unjudged sink is not snapshotted: a class instance still reaches execute as itself", async () => {
+  it("an unjudged sink takes the same rule: a class instance is refused in enforce and only observe and warn run it (2026-11-08 audit, G2)", async () => {
     class Tool { readonly on = true }
+    const build = (mode: "enforce" | "warn") => {
+      const runs: unknown[] = []
+      const sink = makeSink<any, string>({ name: "x", requires: { to: "verified" }, mode, log: new ReceiptLog(), execute: (a: { to: Sourced<unknown> }) => { runs.push(a.to.value); return "ok" } })
+      return { sink, runs }
+    }
     const tool = new Tool()
-    const log = new ReceiptLog()
-    let got: unknown
-    const sink = makeSink<any, string>({ name: "x", requires: { to: "verified" }, mode: "enforce", log, execute: (a: { to: Sourced<unknown> }) => { got = a.to.value; return "ok" } })
-    expect((await sink({ to: Sourced.fromAuthority(tool, "owner") })).ok).toBe(true)
-    expect(got).toBe(tool)
+    const refused = build("enforce")
+    const r = await refused.sink({ to: Sourced.fromAuthority(tool, "owner") })
+    expect(r.receipt.decision).toBe("refused")
+    expect(r.receipt.reason).toContain("not plain JSON")
+    expect(refused.runs).toHaveLength(0)
+    const warned = build("warn")
+    expect((await warned.sink({ to: Sourced.fromAuthority(tool, "owner") })).receipt.decision).toBe("warned")
+    expect(warned.runs).toEqual([tool])
   })
 })
 

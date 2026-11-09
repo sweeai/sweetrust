@@ -533,12 +533,29 @@ export function corroborate<T>(
 ): DeclassifyResult<T> {
   // Each Sourced is read once, here (AGENTS.md, "Intake"): the independence
   // check, the comparison, the ceiling check and the ascent all use these.
-  const { value: claimValue, tier: claimTier, provenance: claimProvenance } = claim
-  const { value: referenceValue, provenance: referenceProvenance } = reference
+  const { value: liveClaim, tier: claimTier, provenance: claimProvenance } = claim
+  const { value: liveReference, provenance: referenceProvenance } = reference
   for (const a of claimProvenance.ancestors) {
     if (referenceProvenance.ancestors.has(a)) {
       return { ok: false, reason: `sources are NOT independent (shared ancestor: ${a})` }
     }
+  }
+  // The judged path's rule (the 2026-11-08 audit, G2). A value with a `toJSON`
+  // or a getter compared as one thing and was promoted as another, and the
+  // receipt recorded the good one. Plain JSON has no code in it, so what is
+  // compared is what it is, and the frozen copy compared is the copy promoted.
+  // The reasons are fixed strings: what was refused is caller-shaped.
+  let claimValue: T
+  let referenceValue: T
+  try {
+    claimValue = pinPlainJSON(liveClaim)
+  } catch {
+    return { ok: false, reason: `could not compare — the claim is not plain JSON; claim ${claim.describe()}` }
+  }
+  try {
+    referenceValue = pinPlainJSON(liveReference)
+  } catch {
+    return { ok: false, reason: `could not compare — the reference is not plain JSON; reference ${reference.describe()}` }
   }
   // `equals` is caller code over caller values; if it throws it has given no
   // verdict, and no verdict is a refusal, never an exception.
@@ -1185,6 +1202,18 @@ const refusingOverflow = <T>(run: () => T): T => {
 const copyExact = (value: unknown, bigints: boolean): unknown =>
   refusingOverflow(() => copyJSON(value, { bigints, path: new Set() }))
 
+/**
+ * A deep-frozen copy of a value that must be plain JSON, bigints allowed; throws
+ * on anything else. The check reads the ORIGINAL first, because structuredClone
+ * hides what it must refuse: it runs a getter and keeps the answer, and it
+ * flattens a class instance into a plain object. Only a value that is already
+ * plain JSON gets cloned, and structuredClone then throws on a Proxy.
+ */
+function pinPlainJSON<T>(value: T): T {
+  copyExact(value, true)
+  return deepFreeze(structuredClone(value))
+}
+
 /** A decimal-integer amount, as `paymentDigest` and the purpose check both accept it. */
 const DECIMAL_INTEGER = /^[0-9]+$/
 
@@ -1349,17 +1378,33 @@ export interface JudgmentVerdict {
  * A judge. Asynchronous since 0.6.0 (ADR 0007): a judge is a model behind a
  * network call or an inference step, and its answer arrives later.
  *
- * `input` has exactly two keys (spec I5): the owner's purpose and the action,
- * as raw values. No agent prose reaches a judge. The signal fires at the sink's
- * deadline, and an answer that arrives after it is discarded, so a provider
- * that cannot finish should stop rather than keep spending.
+ * `input` has three keys: the owner's purpose, the action as raw values, and
+ * `trust`, each argument's tier and provenance. The agent's own rationale never
+ * reaches a judge, but an argument can hold text an agent wrote, so a judge
+ * must read `action.args` as data and weigh each one by its `trust` entry. The
+ * signal fires at the sink's deadline, and an answer that arrives after it is
+ * discarded, so a provider that cannot finish should stop rather than keep
+ * spending.
  */
 export interface JudgmentProvider {
   readonly name: string
   /** The pinned model version, for example "jev@2026-09-15". Empty is a TypeError at sink construction. */
   readonly model: string
   /** Score a proposed action against the owner's purpose. */
-  assess(input: { readonly purpose: Purpose; readonly action: Action }, signal: AbortSignal): Promise<JudgmentVerdict>
+  assess(input: JudgmentInput, signal: AbortSignal): Promise<JudgmentVerdict>
+}
+
+/** What a judge is told about one argument: the tier and provenance its receipt records. */
+export interface ArgumentTrust {
+  readonly tier: Tier
+  readonly provenance: string
+}
+
+/** A judge's whole view of a call. `trust` has one entry per key of `action.args`. */
+export interface JudgmentInput {
+  readonly purpose: Purpose
+  readonly action: Action
+  readonly trust: Readonly<Record<string, ArgumentTrust>>
 }
 
 /**
@@ -1376,8 +1421,17 @@ export function mockJudgmentProvider(intent: {
     name: "mock-judgment",
     model: "mock-judgment@1",
     async assess({ action }) {
-      const to = String(action.args.to ?? "")
-      const amount = Number(action.args.amount ?? NaN)
+      // No wrong type is coerced: String(["a"]) is "a" and Number("") is 0, so
+      // such a value used to read as an intended payee or a zero amount. Number()
+      // below is a stand-in's shortcut and loses precision past 2^53.
+      const { to, amount: raw } = action.args
+      const amount =
+        (typeof raw === "number" && Number.isFinite(raw) && raw >= 0) || (typeof raw === "bigint" && raw >= 0n) || (typeof raw === "string" && DECIMAL_INTEGER.test(raw))
+          ? Number(raw)
+          : undefined
+      if (typeof to !== "string" || amount === undefined) {
+        return { assessment: "mismatch", confidence: 0.82, rationale: `${action.sink} has no string payee, or no non-negative amount` }
+      }
       if (intent.intendedPayees.has(to) && amount <= intent.maxAmount) {
         return { assessment: "match", confidence: 0.9, rationale: `${action.sink} matches declared intent` }
       }
@@ -1468,6 +1522,10 @@ function pinGranted(where: string, granted: unknown): GrantedPurpose {
   }
   const purposeRaw = Object.hasOwn(granted, "purpose") ? (granted as GrantedPurpose).purpose : undefined
   const grantHash = Object.hasOwn(granted, "grantHash") ? (granted as GrantedPurpose).grantHash : undefined
+  const isLive = Object.hasOwn(granted, "isLive") ? (granted as GrantedPurpose).isLive : undefined
+  if (isLive !== undefined && typeof isLive !== "function") {
+    throw new TypeError(`${where}: judgment.granted.isLive must be a function when set, got ${preview(isLive)}`)
+  }
   if (typeof grantHash !== "string" || !/^[0-9a-f]{64}$/.test(grantHash)) {
     throw new TypeError(`${where}: judgment.granted.grantHash must be 64 lowercase hex, got ${preview(grantHash)}`)
   }
@@ -1480,7 +1538,7 @@ function pinGranted(where: string, granted: unknown): GrantedPurpose {
   if (typeof purpose !== "object" || purpose === null || typeof purpose.statement !== "string" || purpose.statement.length === 0) {
     throw new TypeError(`${where}: judgment.granted.purpose must carry a non-empty statement`)
   }
-  return Object.freeze({ purpose: deepFreeze(purpose), grantHash })
+  return Object.freeze({ purpose: deepFreeze(purpose), grantHash, ...(isLive === undefined ? {} : { isLive }) })
 }
 
 /** The purpose's deterministic fields and the sink's map onto them, checked before any judge runs. */
@@ -1488,6 +1546,7 @@ interface BoundPurpose {
   readonly payees: ReadonlyArray<string> | undefined
   readonly maxPerAction: bigint | undefined
   readonly actions: ReadonlyArray<string> | undefined
+  readonly asset: string | undefined
   readonly payment: { readonly payeeArg: string; readonly amountArg: string; readonly assetArg: string | undefined; readonly asset: string | undefined; readonly network: string } | undefined
 }
 
@@ -1514,6 +1573,10 @@ function bindPurpose(
   const payees = ownOf(fields, "payees")
   const maxPerAction = ownOf(fields, "maxPerAction")
   const actions = ownOf(fields, "actions")
+  const fieldAsset = ownOf(fields, "asset")
+  if (fieldAsset !== undefined && (typeof fieldAsset !== "string" || fieldAsset.length === 0)) {
+    throw new TypeError(`${where}: judgment.granted.purpose.fields.asset must be a non-empty string, got ${preview(fieldAsset)}`)
+  }
   if (payees !== undefined && !isStringList(payees)) throw new TypeError(`${where}: judgment.granted.purpose.fields.payees must be a list of strings`)
   if (actions !== undefined && !isStringList(actions)) throw new TypeError(`${where}: judgment.granted.purpose.fields.actions must be a list of strings`)
   if (maxPerAction !== undefined && !(typeof maxPerAction === "string" && DECIMAL_INTEGER.test(maxPerAction))) {
@@ -1554,10 +1617,24 @@ function bindPurpose(
   if (maxPerAction !== undefined && payment === undefined) {
     throw new TypeError(`${where}: the purpose sets maxPerAction, so judgment.purposeArgs must name the amount argument`)
   }
+  if (fieldAsset !== undefined && payment === undefined) {
+    throw new TypeError(`${where}: the purpose sets asset, so judgment.purposeArgs must name the payment`)
+  }
+  // Base units mean nothing without an asset (the 2026-11-08 audit, K7): one
+  // number would cap 1000 MIST and 1000 of an eight-decimal coin alike. A sink
+  // with a fixed asset settles the unit in host config; an asset argument
+  // leaves it to the call, so the purpose has to name it.
+  if (maxPerAction !== undefined && payment?.assetArg !== undefined && fieldAsset === undefined) {
+    throw new TypeError(`${where}: this sink takes its asset as an argument and the purpose's maxPerAction names no asset; set purpose.fields.asset`)
+  }
+  if (fieldAsset !== undefined && payment?.assetArg === undefined && payment?.asset !== fieldAsset) {
+    throw new TypeError(`${where}: judgment.asset is not the asset the purpose names, so no call could satisfy it`)
+  }
   return Object.freeze({
     payees,
     maxPerAction: maxPerAction === undefined ? undefined : BigInt(maxPerAction),
     actions,
+    asset: fieldAsset as string | undefined,
     payment,
   })
 }
@@ -1598,6 +1675,7 @@ function checkPurpose(bound: BoundPurpose, sink: string, values: Readonly<Record
     if (!within) violations.push(`${payment.amountArg} is over this purpose's maxPerAction`)
   }
   if (typeof asset !== "string") violations.push(`the payment's asset must be a string`)
+  else if (bound.asset !== undefined && asset !== bound.asset) violations.push(`the payment's asset is not the asset this purpose names`)
   if (violations.length > before) return null
   return paymentDigest({ network: payment.network, asset: asset as string, recipient: recipient as string, amount: amount as bigint | string })
 }
@@ -1611,16 +1689,13 @@ interface ActionSnapshot {
   /** Names the action alone: what a block or a hold sticks to (ADR 0010). */
   readonly unkeyed: string
   readonly keyed: boolean
+  /** Each argument's tier and provenance, for the judge. Not part of any digest. */
+  readonly trust: Readonly<Record<string, ArgumentTrust>>
 }
 
 /**
  * Freeze the action before the judge runs (spec § 3.2, I2): nothing can change
  * between judging and acting, because `Sourced` freezes only its first level.
- *
- * encodeAction reads the ORIGINAL first, because structuredClone hides what it
- * must refuse: it runs a getter and keeps the answer, and it flattens a class
- * instance into a plain object. Only a value that is already plain JSON gets
- * cloned, and structuredClone then throws on a Proxy.
  *
  * A caller's Proxy can throw from a trap with any message it likes, and a
  * clone error quotes the function it refused, so the violation is a fixed
@@ -1634,15 +1709,17 @@ function snapshotAction(
 ): ActionSnapshot | undefined {
   const values: Record<string, unknown> = Object.create(null)
   const sourced: Record<string, Sourced<unknown>> = Object.create(null)
+  const trust: Record<string, ArgumentTrust> = Object.create(null)
   const before = violations.length
   for (const key of Object.keys(checked)) {
     const { value, tier, provenance } = checked[key]!
     try {
-      encodeAction({ sink, args: { [key]: value } })
-      const frozen = deepFreeze(structuredClone(value))
+      const frozen = pinPlainJSON(value)
       values[key] = frozen
       // Not an ascent: the tier and provenance it passed the wall with, around the clone.
-      sourced[key] = construct(frozen, tier, provenance)
+      const pinned = construct(frozen, tier, provenance)
+      sourced[key] = pinned
+      trust[key] = Object.freeze({ tier, provenance: pinned.describe() })
     } catch {
       violations.push(`${key} is not plain JSON, or holds a raw $bigint key, so the action cannot be digested and judged`)
     }
@@ -1654,6 +1731,7 @@ function snapshotAction(
     return {
       values: Object.freeze(values),
       sourced: Object.freeze(sourced),
+      trust: Object.freeze(trust),
       unkeyed,
       keyed: idempotencyKey !== undefined,
       digest: idempotencyKey === undefined ? unkeyed : actionDigest({ sink, args: values, idempotencyKey }),
@@ -1790,7 +1868,7 @@ const consultJudge = (ask: (signal: AbortSignal) => unknown, timeoutMs: number):
  * a failure, never a verdict with blanks in it: an object with no assessment
  * used to pass as one, and that is how an unawaited Promise executed.
  */
-function readVerdict(consulted: Consulted): { readonly assessment: Verdict["assessment"]; readonly confidence: number; readonly rationale: unknown } | { readonly failure: string } {
+function readVerdict(consulted: Consulted): { readonly assessment: Verdict["assessment"]; readonly confidence: number; readonly rationale: string } | { readonly failure: string } {
   if ("failure" in consulted) return consulted
   const { out } = consulted
   if (typeof out !== "object" || out === null) return { failure: `provider returned ${preview(out)} instead of a verdict` }
@@ -1802,6 +1880,10 @@ function readVerdict(consulted: Consulted): { readonly assessment: Verdict["asse
     if (!ASSESSMENTS.has(assessment)) return { failure: `provider returned an unknown assessment ${preview(assessment)}` }
     if (typeof confidence !== "number" || !Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
       return { failure: `provider returned confidence ${preview(confidence)}, not a number in [0, 1]` }
+    }
+    // A verdict with no reasons is not evidence of anything (the 2026-11-08 audit, G3).
+    if (typeof rationale !== "string" || rationale.trim().length === 0) {
+      return { failure: `provider returned rationale ${preview(rationale)}, not a non-empty string` }
     }
     // `+ 0` turns -0 into 0: -0 is in range, and verdictDigest refuses it.
     return { assessment: assessment as Verdict["assessment"], confidence: confidence + 0, rationale }
@@ -1825,8 +1907,10 @@ function readVerdict(consulted: Consulted): { readonly assessment: Verdict["asse
  * `execute` receives a SNAPSHOT: a null-prototype object holding only the keys
  * `requires` declares, each read once from the caller's object at check time.
  * An argument the spec never declared is recorded on the receipt and raised as
- * a violation, and does not reach `execute` in any mode. A judged sink goes
- * further: a judged call runs on a deep-frozen copy, the same values the judge saw.
+ * a violation, and does not reach `execute` in any mode. Every value must be
+ * plain JSON (bigints allowed): anything else is a violation, and only observe
+ * and warn run it. A judged call runs on a deep-frozen copy, the same values
+ * the judge saw.
  *
  * Every call returns a Promise, judged or not (ADR 0007), and `result` is the
  * settled value of whatever `execute` returned. A caller who forgets `await`
@@ -1861,7 +1945,10 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
    * runs, flagged, with the verdict on the receipt.
    *
    * `granted` is the owner's purpose and the hash of the grant that signs it,
-   * bound here and never per call (spec I3). `timeoutMs` (default 5000) is the
+   * bound here and never per call (spec I3). When it carries `isLive`, as
+   * `grantedPurpose` provides, the sink asks before judging and again
+   * immediately before `execute`, and a grant no longer live is refused in
+   * every mode: a revoke is the owner's word, not a tier the ladder can relax. `timeoutMs` (default 5000) is the
    * judge's deadline: at it the provider's signal fires, any later answer is
    * discarded, and the call has no verdict.
    *
@@ -1928,6 +2015,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
   const ownJudgment = own("judgment")
   const judgmentField = <K extends keyof NonNullable<typeof ownJudgment>>(k: K): NonNullable<typeof ownJudgment>[K] | undefined =>
     typeof ownJudgment === "object" && ownJudgment !== null && Object.hasOwn(ownJudgment, k) ? ownJudgment[k] : undefined
+  const redactSpec = own("redact")
   const cfg = Object.freeze({
     name: own("name") as string,
     requires: copyOwn<Tier>(own("requires")) ?? Object.freeze(Object.create(null) as Record<string, Tier>),
@@ -1949,7 +2037,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
             blockWindowMs: judgmentField("blockWindowMs"),
             rationaleInRefusal: judgmentField("rationaleInRefusal"),
           }),
-    redact: copyOwn<"raw" | "hash" | "truncate" | undefined>(own("redact")),
+    redact: copyOwn<"raw" | "hash" | "truncate" | undefined>(redactSpec),
   })
 
   // ── Validate at construction: a misconfigured sink never exists ──────────
@@ -1970,6 +2058,19 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
   for (const [key, tier] of Object.entries(cfg.requires)) {
     if (!isTier(tier)) {
       throw new TypeError(`${where}: requires.${key} must be one of ${TIERS.map((t) => `"${t}"`).join(" | ")}, got ${preview(tier)}`)
+    }
+  }
+  // An unknown policy used to record the raw value on a receipt that cannot be
+  // redacted later (the 2026-11-08 audit, G4). A misspelled "hash" is a secret
+  // published on the first call.
+  if (redactSpec !== undefined && (typeof redactSpec !== "object" || redactSpec === null || Array.isArray(redactSpec))) {
+    throw new TypeError(`${where}: redact must be an object of per-argument policies, got ${preview(redactSpec)}`)
+  }
+  for (const [key, policy] of Object.entries(cfg.redact ?? {})) {
+    // A misspelled argument name leaves the real argument raw, the same way.
+    if (!Object.hasOwn(cfg.requires, key)) throw new TypeError(`${where}: redact.${key} names an argument that is not declared in requires`)
+    if (policy !== undefined && policy !== "raw" && policy !== "hash" && policy !== "truncate") {
+      throw new TypeError(`${where}: redact.${key} must be one of "raw" | "hash" | "truncate", got ${preview(policy)}`)
     }
   }
   const judge = cfg.judgment === undefined ? undefined : bindJudge(where, cfg.judgment, cfg.requires)
@@ -2020,6 +2121,19 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
     return { standing, attempted }
   }
 
+  // Whether the grant still stands. No check means a hand-built grant, which
+  // gets no revocation (SECURITY.md). A check that throws or answers anything
+  // but `true` has not said the grant is live.
+  const grantIsLive = (): boolean => {
+    const isLive = judge?.granted.isLive
+    if (isLive === undefined) return true
+    try {
+      return isLive() === true
+    } catch {
+      return false
+    }
+  }
+
   const call = async (args: Args, resuming?: { readonly approval: unknown }, options?: unknown): Promise<SinkResult<Awaited<R>>> => {
     // `Object.create(null)` rather than `{}`: `rendered` is keyed by ATTACKER-
     // SUPPLIED argument names and then handed to the receipt. A plain object
@@ -2040,6 +2154,14 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
     // off the receipt. An undeclared argument is still recorded and still a
     // violation; it no longer reaches execute() in ANY mode.
     const checked: Record<string, Sourced<unknown>> = Object.create(null)
+
+    // `sink(null)` used to reject on the first read, with no receipt (the
+    // 2026-11-08 audit, G4). There is no action to run, so every mode refuses.
+    if (typeof (args as unknown) !== "object" || (args as unknown) === null) {
+      const refusal = `⚠ ${cfg.name} refused: the sink was called without an arguments object`
+      const receipt = cfg.log.append({ at: now(), sink: cfg.name, decision: "refused", args: rendered, reason: refusal })
+      return { ok: false, refusal, receipt }
+    }
 
     // The one place an action runs and is recorded (ADR 0007). The flagged path
     // used to hold its own copy of this sequence, and the two had drifted
@@ -2068,6 +2190,8 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
       rejected: string,
       run?: JudgedRun,
     ): Promise<SinkResult<Awaited<R>>> => {
+      // The second liveness check: nothing is awaited from here to execute().
+      if (run !== undefined && !grantIsLive()) return refuseRevoked(run.verdict)
       const evidence = run === undefined ? {} : { verdict: run.verdict, ...(run.approval === undefined ? {} : { approval: run.approval }) }
       // The intent record, before anything can happen (ADR 0010). A log that
       // cannot take it stops the action here; once it is written the action
@@ -2241,6 +2365,34 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
       violations.push(`${key} was passed but is not declared in requires — the sink has no stated appetite for it`)
       undeclared += 1
     }
+
+    // The judged path's rule, for every value snapshotAction will not reach: an
+    // unjudged call, or a judged one that already has a violation (the 2026-11-08
+    // audit, G2). A `toJSON` otherwise puts one value on the receipt and another
+    // in execute(). Only the check: plain JSON runs no code, and nothing is
+    // awaited between here and execute(), so the argument needs no copy.
+    if (judge === undefined || violations.length !== undeclared) {
+      for (const key of Object.keys(checked)) {
+        const arg: unknown = checked[key]
+        if (!Sourced.is(arg)) continue
+        try {
+          pinPlainJSON(arg.value)
+        } catch {
+          violations.push(`${key} is not plain JSON, so its receipt may not record what runs`)
+        }
+      }
+    }
+
+    // "Not live" covers a revoke and a check that could not confirm the grant, so
+    // the receipt says that much and no more.
+    const refuseRevoked = (verdict?: Verdict): SinkResult<Awaited<R>> => {
+      const refusal = `⚠ ${cfg.name} refused: grant-not-live: the grant behind this sink is revoked, or could not be confirmed live`
+      const receipt = cfg.log.append({ at: now(), sink: cfg.name, decision: "refused", args: rendered, reason: refusal, ...(verdict === undefined ? {} : { verdict }) })
+      return { ok: false, refusal, receipt }
+    }
+
+    // The first liveness check, before a resume or a judge can do anything.
+    if (!grantIsLive()) return refuseRevoked()
 
     const refuseViolations = (): SinkResult<Awaited<R>> => {
       const refusal = `⚠ ${cfg.name} refused: ${violations.join(" · ")}`
@@ -2435,6 +2587,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
       const input = Object.freeze({
         purpose: judge.granted.purpose,
         action: Object.freeze({ sink: cfg.name, args: action.values }),
+        trust: action.trust,
       })
       const providerName = judge.name
 
@@ -2457,11 +2610,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
           if (decidedElsewhere !== undefined) return decidedElsewhere
         }
         const scored = !("failure" in answer)
-        const rationaleText = !scored
-          ? `provider ${providerName} gave no verdict: ${answer.failure}`
-          : typeof answer.rationale === "string"
-            ? answer.rationale
-            : preview(answer.rationale)
+        const rationaleText = scored ? answer.rationale : `provider ${providerName} gave no verdict: ${answer.failure}`
 
         const verdict: Verdict = Object.freeze({
           assessment: scored ? answer.assessment : "unsure",

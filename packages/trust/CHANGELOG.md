@@ -46,6 +46,36 @@ unchanged. Only a judged sink's receipts change shape (ADR 0009).
 
 ### Security
 
+- **A judge is now told which values are untrusted (the 2026-11-08 audit, G1).** `assess` receives a
+  third key, `trust`, with each argument's tier and provenance. `action.args` still holds the raw
+  values, which can include text an agent wrote.
+- **`corroborate` promotes only what it compared (G2; published in 0.5.0).** A claim or reference
+  that is not plain JSON is refused, so a `toJSON` or a getter can no longer compare as one value and
+  promote as another, and what ascends is a deep-frozen copy. **Breaking:** a `Date`, `Map`, class
+  instance or other non-JSON value no longer corroborates, even with a custom `equals`. An unjudged
+  sink applies the same rule to every `Sourced` value: `enforce` refuses a non-plain value, and
+  `observe` and `warn` run it with the violation on the receipt. **Breaking:** an `enforce` sink no
+  longer accepts one. That includes an object with a property set to `undefined`, and `NaN`,
+  `±Infinity` and `-0`, which the judged path already refused.
+- **A cap now carries an asset (K7).** `purpose.fields.asset` is optional, is narrowed by delegation
+  and is checked against the payment. A sink with an asset argument and a `maxPerAction` with no
+  asset refuses construction, so on that sink `1000` cannot cover every asset's decimals. A sink with
+  a fixed `judgment.asset` needs no field, because the host settles the unit (`SECURITY.md`). A grant
+  with no asset hashes as before.
+- **A revoke reaches a judged sink built before it (the gap K6 left).** `grantedPurpose` also returns
+  `isLive`, which the sink calls before judging and again immediately before `execute`. A grant no
+  longer live, or one the check cannot confirm, is refused with a receipt, in every mode. A hand-built `granted` has no check and gets
+  no revocation (`SECURITY.md`).
+- **A verdict with a non-string, empty or whitespace-only rationale is a failed verdict (G3).** It holds the action
+  and does not stick. **Breaking** for a provider that returned an empty rationale with a `match`.
+- **An invalid `redact` policy refuses construction (G4).** A misspelled `"hash"`, or a policy for an
+  argument `requires` does not declare, used to leave the value raw on a receipt that cannot be
+  redacted later.
+- **`sink(null)` records a refusal (G4).** It used to reject with no receipt.
+- **`mockJudgmentProvider` no longer coerces (G4).** A payee in an array or an empty-string amount is
+  a mismatch.
+- **Two provider behaviours the sink cannot catch are now documented (G5).** A throwing abort
+  listener and a synchronously blocking provider are stated as limits in `SECURITY.md` and ADR 0007.
 - **A judged action now has a lifecycle (ADR 0010, the 2026-11-08 audit L1 to L7).** In enforce, a
   block stands for a window (`blockWindowMs`, default one hour) and a hold stands until it is resolved
   or expires. A new call on either returns the existing answer without calling the judge, so a

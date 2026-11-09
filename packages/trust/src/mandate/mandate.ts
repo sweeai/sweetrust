@@ -612,9 +612,9 @@ const snapshotPurpose = (raw: unknown): Purpose => {
   }
   if (rawFields === undefined) return Object.freeze({ statement })
   if (!isObjectBag(rawFields)) throw new TypeError("purpose.fields must be an object")
-  const { payees: rawPayees, maxPerAction, actions: rawActions } = readOwnFields(
+  const { payees: rawPayees, maxPerAction, actions: rawActions, asset } = readOwnFields(
     rawFields,
-    ["payees", "maxPerAction", "actions"],
+    ["payees", "maxPerAction", "actions", "asset"],
     "purpose.fields",
   )
   const payees = readStringList(rawPayees, "purpose.fields.payees")
@@ -622,12 +622,17 @@ const snapshotPurpose = (raw: unknown): Purpose => {
   if (maxPerAction !== undefined && !(typeof maxPerAction === "string" && DECIMAL_INTEGER.test(maxPerAction))) {
     throw new TypeError("purpose.fields.maxPerAction must be a decimal integer string")
   }
+  if (asset !== undefined && (typeof asset !== "string" || asset.length === 0)) {
+    throw new TypeError("purpose.fields.asset must be a non-empty string")
+  }
   return Object.freeze({
     statement,
     fields: Object.freeze({
       ...(payees === undefined ? {} : { payees }),
       ...(maxPerAction === undefined ? {} : { maxPerAction: maxPerAction as string }),
       ...(actions === undefined ? {} : { actions }),
+      // Omitted when unset, so a grant with no asset hashes as it always did.
+      ...(asset === undefined ? {} : { asset: asset as string }),
     }),
   })
 }
@@ -640,7 +645,8 @@ const snapshotPurpose = (raw: unknown): Purpose => {
 const capturePurpose = (raw: unknown): Purpose | undefined => {
   if (raw === undefined) return undefined
   const purpose = snapshotPurpose(raw)
-  for (const authored of [purpose.statement, ...(purpose.fields?.payees ?? []), ...(purpose.fields?.actions ?? [])]) {
+  const asset = purpose.fields?.asset
+  for (const authored of [purpose.statement, ...(purpose.fields?.payees ?? []), ...(purpose.fields?.actions ?? []), ...(asset === undefined ? [] : [asset])]) {
     const match = constitutionalPreCheck(authored)
     if (match) {
       failMandate({
@@ -674,6 +680,7 @@ const isSubsetOf = (child: ReadonlyArray<string> | undefined, parent: ReadonlyAr
  * field its parent set, is refused, because omission would widen. A field the
  * parent left open may be set by the child. In v1 the statement must be equal
  * byte for byte. `maxPerAction` compares as an integer, never as text or a float.
+ * `asset` names one value, so a child of a parent that set it must keep it.
  */
 const assertPurposeNarrows = (
   grantorMandateId: MandateId,
@@ -681,7 +688,7 @@ const assertPurposeNarrows = (
   child: Purpose | undefined,
 ): void => {
   if (parent === undefined) return
-  const refuse = (field: "purpose" | "statement" | "payees" | "maxPerAction" | "actions"): never =>
+  const refuse = (field: "purpose" | "statement" | "payees" | "maxPerAction" | "actions" | "asset"): never =>
     failMandate({ _tag: "PurposeNotNarrowing", grantorMandateId, field })
   if (child === undefined) return refuse("purpose")
   if (child.statement !== parent.statement) return refuse("statement")
@@ -695,6 +702,7 @@ const assertPurposeNarrows = (
     return refuse("maxPerAction")
   }
   if (p?.actions !== undefined && !isSubsetOf(c?.actions, p.actions)) return refuse("actions")
+  if (p?.asset !== undefined && c?.asset !== p.asset) return refuse("asset")
 }
 
 /** The issue-time half of I9: the parent's purpose comes from its grant event, never from the scope. */
@@ -1617,9 +1625,10 @@ export const resumeMandate = <
  * object and an in-memory store hands back the one it holds.
  *
  * Refused with `MandateRevoked` or `AncestorMandateRevoked` once the mandate
- * or any ancestor is revoked. It answers at the moment it is called: a sink
- * built before the revoke holds its copy, and stopping that one is the
- * action-lifecycle work, not this function's.
+ * or any ancestor is revoked. That answers at the moment it is called, and a
+ * sink built before the revoke holds its copy, so the result carries `isLive`:
+ * the same walk, re-run against the store each time a judged sink asks. Any
+ * failure of the walk reads as not live.
  *
  * A grant with no purpose is a `TypeError`, not a null: a judged sink cannot
  * be built without one, and a host that asks has made a programmer error
@@ -1639,7 +1648,8 @@ export const grantedPurpose = (
   // ancestor is refused as it would be at use (the 2026-11-08 audit, K6). A
   // judged sink built from a revoked grant used to execute, and reconcile
   // reported it clean.
-  const grantEvent = walkChain(audit, mandateId, (presented as MandateScope<any, any, any>).grantor).chain[0]
+  const grantor = (presented as MandateScope<any, any, any>).grantor
+  const grantEvent = walkChain(audit, mandateId, grantor).chain[0]
   if (grantEvent === undefined) {
     return failMandate({ _tag: "MandateNotIssued", mandateId })
   }
@@ -1647,5 +1657,13 @@ export const grantedPurpose = (
   if (purpose === undefined) {
     throw new TypeError(`grantedPurpose: the grant of ${mandateId} carries no purpose`)
   }
-  return Object.freeze({ purpose, grantHash: sha256Hex(canonicalJSON(grantEvent)) })
+  const isLive = (): boolean => {
+    try {
+      // An empty chain is a grant the log no longer shows: not confirmed, so not live.
+      return walkChain(audit, mandateId, grantor).chain.length > 0
+    } catch {
+      return false
+    }
+  }
+  return Object.freeze({ purpose, grantHash: sha256Hex(canonicalJSON(grantEvent)), isLive })
 }
