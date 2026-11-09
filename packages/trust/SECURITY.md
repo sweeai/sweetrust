@@ -309,7 +309,8 @@ becomes an authority value, and `allowlisted` freezes every own field of the row
 depth**, as soon as a lookup finds it and before a candidate's code can run. That includes your own
 nested objects and anything a row points at, so do not hang a shared object off a row, and it happens
 whether or not the candidate matches. `humanConfirm` refuses a value that is not plain JSON, because a
-Map or bytes would not appear in full in the question, and it deep-freezes the private copy it
+Map or bytes would not appear in the question as they are. The question shows the first 256
+characters and says when it has cut the rest, so what follows a long field goes unseen. It deep-freezes the private copy it
 confirms, so what a person said yes to stays what they saw. In a registry row, a Map, Set, Date or
 buffer can still be changed through its own methods, so these are not frozen in effect, typed arrays
 are left alone, and a getter still answers however it likes. So a row holding bytes can be rewritten after it is compared.

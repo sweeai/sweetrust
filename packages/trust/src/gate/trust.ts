@@ -624,7 +624,8 @@ export function corroborate<T>(
       reason: `could not compare — equals threw (${safely(() => firstLine(err))}); claim ${claim.describe()} vs reference ${reference.describe()}`,
     }
   }
-  if (!agree) {
+  // `!== true`, as in humanConfirm: an `async` equals returns a Promise, which is truthy.
+  if (agree !== true) {
     return {
       ok: false,
       reason: `values disagree — claim ${show(claimValue)} (${claim.describe()}) vs reference ${show(referenceValue)} (${reference.describe()})`,
@@ -682,7 +683,8 @@ const HUMAN_CONFIRM_VALUE_CHARS = 256
  *   Map, a Set, bytes, a Date, named keys on an array), because the question
  *   could not show all of it. A class instance does NOT throw: it ascends
  *   as a plain object of its own enumerable fields, and its methods and
- *   `#private` fields are dropped silently.
+ *   `#private` fields are dropped silently, unless a field holds `undefined`,
+ *   which is not plain JSON and is refused.
  * - The return is a Promise even for a synchronous `render`. A caller who
  *   forgets `await` holds a Promise, whose `.ok` is `undefined`, so the
  *   forgotten await reads as a refusal. Overloads that hand a sync renderer a
@@ -728,9 +730,9 @@ export async function humanConfirm<T>(
   // lives in private state should be confirmed as an explicit data object.
   let candidateValue: T
   try {
-    // Plain JSON only, checked on the copy, so the question shows all of what
-    // ascends: a Map renders as {}, and bytes over shared memory can change during
-    // the wait. Frozen before the question is built, so a yes cannot be pointed at
+    // Plain JSON only, checked on the copy, so what the question renders is what
+    // ascends, up to its declared cut: a Map renders as {}, and bytes over shared
+    // memory can change during the wait. Frozen before the question is built, so a yes cannot be pointed at
     // something else afterward.
     const copy = structuredClone(liveValue)
     copyExact(copy, true)

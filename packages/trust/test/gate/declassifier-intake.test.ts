@@ -105,6 +105,12 @@ describe("humanConfirm and corroborate take only what the gate minted", () => {
     refusal(await humanConfirm(channel(getter), () => true))
   })
 
+  it("corroborate takes only a literal true from equals", () => {
+    for (const equals of [async () => false, () => "no", () => 1]) {
+      expect(refusal(corroborate(channel("ACME"), channel("EVIL", "erp-export"), equals as never))).toContain("disagree")
+    }
+  })
+
   it("fromLLM refuses an input the gate did not mint", () => {
     const { forged, touched } = forgery()
     expect(() => Sourced.fromLLM("ACME", "Extract", [forged])).toThrow(TypeError)
