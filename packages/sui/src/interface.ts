@@ -86,8 +86,12 @@ export type RefusalCode =
   | "invalid-address"
   | "wrong-network"
   | "not-spender"
-  /** The allowance no longer exists: revoked, or never opened. */
-  | "allowance-gone"
+  /**
+   * Nothing was sent, and explicit reads after retries did not find the
+   * allowance. Not proof of why: never opened, deleted, or a node that is behind
+   * all answer the same way. A revoke with this code did NOT run.
+   */
+  | "allowance-not-found"
   | "insufficient-funds"
   /** The transaction could not be built or signed, so nothing was sent; the library refused in-process. */
   | "not-submitted"
@@ -144,10 +148,11 @@ export interface Refusal {
  * - `held`: in force (an executed open, a `remaining()` read).
  * - `within`: this spend was inside it.
  * - `outside`: this spend (or this open request) was outside it.
- * - `unchecked`: not evaluated, because an earlier check refused first or
- *   nothing was sent.
+ * - `unchecked`: not evaluated, because an earlier check refused first,
+ *   nothing was sent, or the chain could not be read.
  * - `unheld`: nobody can hold it, so the open was refused.
- * - `revoked`: the allowance was revoked; nothing is held any more.
+ * - `revoked`: an executed revoke deleted the allowance. Only that receipt
+ *   carries it; a read that finds nothing is `unchecked`.
  */
 export type LimitVerdict = "held" | "within" | "outside" | "unchecked" | "unheld" | "revoked"
 
@@ -170,9 +175,11 @@ export type Verb = "open" | "spend" | "revoke"
  * `verdict` is a RETRY CONTRACT, not just a label:
  * - `executed`: it happened. The chain finalized the transaction.
  * - `refused`: it provably did NOT happen — nothing moved. Either the library
- *   refused in-process before sending, or the chain rejected it (a failed
- *   transaction, or an input that no longer exists). Safe to act on and, where
- *   the refusal was transient, safe to retry.
+ *   refused in-process before anything was signed, or the chain finalized a
+ *   failed transaction. Safe to act on and, where the refusal was transient,
+ *   safe to retry. A signed transaction whose outcome is unknown is never
+ *   `refused`, even when the allowance is gone: the spend may have landed before
+ *   whatever removed it. A `refused` revoke did NOT run; it never means done.
  * - `errored`: UNKNOWN. The transaction was signed and may have reached the
  *   chain, but this adapter could not read its outcome. It MAY have executed.
  *   Do not retry blindly — a blind retry can pay twice or open a second
@@ -188,9 +195,9 @@ export interface AllowanceReceipt {
   /** The allowance object, or null when an open was refused or could not be confirmed before anything was sent. */
   readonly allowanceId: string | null
   /**
-   * The transaction digest, or null when nothing was sent. A refused spend that
-   * reached the chain has one; an `errored` receipt carries the digest derived
-   * from the signed transaction, so the real outcome can be looked up on chain.
+   * The digest of the signed transaction bytes, or null when nothing was sent;
+   * never a digest a node reported. A refused spend that reached the chain has
+   * one, and an `errored` receipt has one so the outcome can be looked up on chain.
    */
   readonly digest: string | null
   /** A public explorer page for the digest, or null. */
@@ -220,31 +227,36 @@ export interface AllowanceReceipt {
 export interface Remaining {
   readonly network: Caip2
   readonly allowanceId: string
-  /** False when the allowance object no longer exists (revoked). */
-  readonly exists: boolean
-  /** The chain's clock when this was read, ISO. */
-  readonly at: string
+  /**
+   * True when the object was read. False when explicit reads after retries did
+   * not find it, which does not say why. Null when the read could not say.
+   */
+  readonly exists: boolean | null
+  /** The chain's clock when this was read, ISO, or null when it could not be read. Never this machine's clock. */
+  readonly at: string | null
   /** Lifetime cap minus everything spent so far, or null when there is no cap. */
   readonly lifetime: { readonly cap: string; readonly spent: string; readonly remaining: string } | null
   /** Rate limit minus what was spent in the current window, or null when there is no rate. */
   readonly rate: {
     readonly limit: string
     readonly windowMs: number | null
-    readonly spentInWindow: string
-    readonly remainingInWindow: string
+    /** Null, like the next field, when the chain's clock could not be read: which window is current depends on it. */
+    readonly spentInWindow: string | null
+    readonly remainingInWindow: string | null
     /** The current window's bounds, or null before the first charge opens one (or for calendar windows). */
     readonly windowStart: string | null
     readonly windowEnd: string | null
   } | null
   readonly start: string | null
   readonly expiry: string | null
-  /** Whether a spend now would pass the start and expiry checks. */
-  readonly active: boolean
+  /** Whether a spend now would pass the start and expiry checks, or null when that could not be determined. */
+  readonly active: boolean | null
   /**
    * The most one spend could move right now under the chain-held amount limits
-   * (0 when inactive). It does not read the funder's balance, which can be lower.
+   * (0 when inactive or not found, null when that could not be determined). It
+   * does not read the funder's balance, which can be lower.
    */
-  readonly spendableNow: string
+  readonly spendableNow: string | null
   readonly limits: ReadonlyArray<LimitLine>
   readonly summary: string
 }

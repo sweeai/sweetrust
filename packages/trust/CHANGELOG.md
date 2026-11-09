@@ -104,6 +104,8 @@ unchanged. Only a judged sink's receipts change shape (ADR 0009).
   0009). Omitting them keeps the 0.5.0 bytes. A raw argument containing a `$bigint` key is now a
   tier-wall violation, because that key is the action encoding's own marker.
 - A `Receipt["decision"]` consumer must handle `judgment-held`.
+- `reconcile` reports a failed chain transaction as `payment-mismatch` when a receipt@2 claimed it
+  `executed`: the record contradicts the chain, so it is not read as a clean refusal.
 
 ### Notes
 

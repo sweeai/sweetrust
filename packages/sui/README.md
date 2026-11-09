@@ -50,7 +50,7 @@ const principal = Ed25519Keypair.fromSecretKey(keys.principal) // funds the allo
 const agent = Ed25519Keypair.fromSecretKey(keys.agent)         // spends under it
 const merchant = Ed25519Keypair.fromSecretKey(keys.merchant).toSuiAddress()
 
-const testUSD = defineScale({ unit: "testUSD", baseUnitsPerUnit: 100_000n, decimals: 2 })
+const testUSD = defineScale({ unit: "testUSD", baseUnitsPerUnit: 100_000n, decimals: 2, coinType: "0x2::sui::SUI" })
 const receiptSigner = makeEd25519ReceiptSigner(generateSigningKeypair())
 const log = new SignedReceiptLog(receiptSigner) // every receipt lands here too, signed
 

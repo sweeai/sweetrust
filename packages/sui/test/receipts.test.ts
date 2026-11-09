@@ -7,13 +7,14 @@
  * phrases elsewhere.
  */
 import { describe, expect, it, vi } from "vitest"
+import { ObjectError } from "@mysten/sui/client"
 import { Transaction } from "@mysten/sui/transactions"
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519"
 import { normalizeStructTag, normalizeSuiAddress } from "@mysten/sui/utils"
 import { paymentDigest } from "sweetrust/gate"
 import { SignedReceiptLog, generateSigningKeypair, makeEd25519ReceiptSigner, verifySignedChain } from "sweetrust/verify"
 import { defineScale, enforces, suiAllowances, type AllowanceReceipt, type SuiAllowance } from "../src/index.ts"
-import { ALLOWANCE_ID, CAP_ID, DIGEST, MAINNET_GENESIS, TESTNET_GENESIS, allowanceState, mockChain, targetsOf, type MockChain } from "./helpers/mock-chain.ts"
+import { ALLOWANCE_ID, CAP_ID, DIGEST, MAINNET_GENESIS, TESTNET_GENESIS, allowanceState, mockChain, signedDigest, targetsOf, type MockChain } from "./helpers/mock-chain.ts"
 
 const principal = Ed25519Keypair.generate()
 const agent = Ed25519Keypair.generate()
@@ -23,7 +24,7 @@ const MERCHANT = normalizeSuiAddress("0x5e11e5")
 const STRANGER = normalizeSuiAddress("0xbad")
 
 /** Basecamp's scale: 1 cent = 1,000 MIST, so 1.00 testUSD = 100,000 MIST. */
-const testUSD = defineScale({ unit: "testUSD", baseUnitsPerUnit: 100_000n, decimals: 2 })
+const testUSD = defineScale({ unit: "testUSD", baseUnitsPerUnit: 100_000n, decimals: 2, coinType: "0x2::sui::SUI" })
 const DAY = 86_400_000
 const T = (iso: string): number => Date.parse(iso)
 const LOCAL_NOW = T("2026-11-06T17:00:00Z")
@@ -149,8 +150,8 @@ describe("open(): executed", () => {
     expect(targetsOf(chain.executed[0].bytes)).toEqual(["0x2::allowance::periodic_rate_limit", "0x1::option::some", "0x2::allowance::new"])
     expect(allowance).toMatchObject({ allowanceId: ALLOWANCE_ID, capId: CAP_ID, funder: normalizeSuiAddress(P), spender: normalizeSuiAddress(A), network: "sui:testnet" })
     expect(receipt).toMatchObject({
-      verb: "open", verdict: "executed", digest: DIGEST(0), allowanceId: ALLOWANCE_ID, at: "2026-11-06T18:00:00.000Z", atSource: "chain",
-      explorer: `https://suiscan.xyz/testnet/tx/${DIGEST(0)}`, refusal: null,
+      verb: "open", verdict: "executed", digest: signedDigest(chain), allowanceId: ALLOWANCE_ID, at: "2026-11-06T18:00:00.000Z", atSource: "chain",
+      explorer: `https://suiscan.xyz/testnet/tx/${signedDigest(chain)}`, refusal: null,
     })
     expect(receipt.limits.map((l) => [l.limit, l.heldBy, l.verdict])).toEqual([
       ["lifetimeCap", "chain", "held"], ["rate", "chain", "held"], ["expiry", "chain", "held"], ["recipients", "library", "held"],
@@ -185,14 +186,14 @@ describe("spend(): executed", () => {
     const r = await adapter(chain).spend({ signer: agent, allowance: handle({ lifetimeCap: testUSD.of(100), rate: RATE, recipients: [MERCHANT] }), amount: testUSD.of(24), recipient: MERCHANT })
     expect(chain.simulated).toHaveLength(0)
     expect(targetsOf(chain.executed[0].bytes)).toEqual(["0x2::allowance::balance_spend", "0x2::coin::from_balance", "TransferObjects"])
-    expect(r).toMatchObject({ verb: "spend", verdict: "executed", digest: DIGEST(1), amount: "2400000", amountText: "24.00 testUSD", recipient: MERCHANT, refusal: null, atSource: "chain" })
+    expect(r).toMatchObject({ verb: "spend", verdict: "executed", digest: signedDigest(chain), amount: "2400000", amountText: "24.00 testUSD", recipient: MERCHANT, refusal: null, atSource: "chain" })
     expect(lineOf(r, "lifetimeCap")).toMatchObject({ heldBy: "chain", verdict: "within", why: "Sui checked it: 24.00 testUSD of the 100.00 testUSD cap is now spent, 76.00 testUSD left." })
     expect(lineOf(r, "rate").why).toBe(
       "Sui checked it: the current window now holds 24.00 testUSD of 30.00 testUSD. " +
       "This spend opened the first window (Sui anchors windows at the first charge, 2026-11-06 18:02:00 UTC). The window resets at 2026-11-07 18:02:00 UTC.")
     expect(lineOf(r, "recipients")).toMatchObject({ heldBy: "library", verdict: "within" })
     expect(lineOf(r, "recipients").why).toContain("was checked against the allowed list before sending")
-    expect(r.summary).toBe(`Sent 24.00 testUSD to ${MERCHANT} under allowance ${ALLOWANCE_ID} on sui:testnet (tx ${DIGEST(1)}).`)
+    expect(r.summary).toBe(`Sent 24.00 testUSD to ${MERCHANT} under allowance ${ALLOWANCE_ID} on sui:testnet (tx ${signedDigest(chain)}).`)
   })
 })
 
@@ -203,7 +204,7 @@ describe("spend(): refused by Sui validators, a result with a digest", () => {
     chain.script.push({ kind: "abort", digest: DIGEST(2), timestampMs: T("2026-11-06T19:00:00Z"), abortName: "EExceedsRateLimit", errorCode: 4 })
     const r = await adapter(chain).spend({ signer: agent, allowance: handle({ lifetimeCap: testUSD.of(100), rate: RATE, recipients: [MERCHANT] }), amount: testUSD.of(10), recipient: MERCHANT })
     expect(chain.simulated).toHaveLength(0)
-    expect(r).toMatchObject({ verdict: "refused", digest: DIGEST(2), explorer: `https://suiscan.xyz/testnet/tx/${DIGEST(2)}`, at: "2026-11-06T19:00:00.000Z", atSource: "chain" })
+    expect(r).toMatchObject({ verdict: "refused", digest: signedDigest(chain), explorer: `https://suiscan.xyz/testnet/tx/${signedDigest(chain)}`, at: "2026-11-06T19:00:00.000Z", atSource: "chain" })
     expect(r.refusal).toEqual({
       code: "rate-exceeded",
       refusedBy: "chain",
@@ -323,13 +324,15 @@ describe("spend(): the library-held limit", () => {
 })
 
 describe("spend(): rejected before execution", () => {
-  it("a revoked allowance is `allowance-gone`, with no digest", async () => {
+  it("nothing signed and the allowance not found is `allowance-not-found`, with no digest", async () => {
     const chain = mockChain(null, 0n)
-    chain.script.push({ kind: "throw", message: "The following input objects are invalid: deleted" })
+    chain.breakBuild = true
     const r = await adapter(chain).spend({ signer: agent, allowance: handle({ rate: RATE }), amount: 1n, recipient: MERCHANT })
+    expect(chain.executed).toHaveLength(0)
     expect(r).toMatchObject({ verdict: "refused", digest: null })
-    expect(r.refusal).toMatchObject({ code: "allowance-gone", refusedBy: "chain", native: null })
-    expect(r.refusal?.why).toContain(`allowance ${ALLOWANCE_ID} no longer exists on sui:testnet`)
+    expect(r.refusal).toMatchObject({ code: "allowance-not-found", refusedBy: "library", native: null })
+    expect(r.refusal?.why).toContain(`Allowance ${ALLOWANCE_ID} was not found on sui:testnet`)
+    expect(`${r.summary} ${r.limits.map((l) => l.why).join(" ")}`).not.toMatch(/revoked/i)
   })
 })
 
@@ -341,7 +344,7 @@ describe("revoke()", () => {
     chain.script.push({ kind: "executed", digest: DIGEST(3), timestampMs: ANCHOR, after: null })
     const r = await adapter(chain).revoke({ signer: principal, allowance: handle({ rate: RATE, recipients: [MERCHANT] }) })
     expect(targetsOf(chain.executed[0].bytes)).toEqual(["0x2::allowance::revoke"])
-    expect(r).toMatchObject({ verb: "revoke", verdict: "executed", digest: DIGEST(3), refusal: null })
+    expect(r).toMatchObject({ verb: "revoke", verdict: "executed", digest: signedDigest(chain), refusal: null })
     expect(r.limits.map((l) => [l.limit, l.heldBy, l.verdict])).toEqual([["rate", "chain", "revoked"], ["recipients", "library", "revoked"]])
     expect(r.summary).toContain("Sui refuses every later spend against it")
   })
@@ -377,6 +380,135 @@ describe("remaining(): read from the chain's object and clock", () => {
     chain.state = null
     const gone = await adapter(chain).remaining({ allowance: handle({ lifetimeCap: 10n }) })
     expect(gone).toMatchObject({ exists: false, active: false, spendableNow: "0" })
+    expect(gone.summary).toContain("was not found on sui:testnet")
+    expect(`${gone.summary} ${gone.limits.map((l) => l.why).join(" ")}`).not.toMatch(/revoked/i)
+    expect(gone.limits.map((l) => l.verdict)).toEqual(["unchecked"])
+  })
+})
+
+// ── What a read can and cannot say (audit 2026-11-08: R2, R7, R8, R9) ─────────
+
+describe("absence and unknowns are never read as facts", () => {
+  const live = () => mockChain(allowanceState({ funder: P, spender: A, lifetimeCap: 1000n, expiryMs: BigInt(ANCHOR + DAY) }), BigInt(ANCHOR))
+  const limits = { lifetimeCap: 1000n, expiry: new Date(ANCHOR + DAY) }
+  const core = (chain: MockChain) => chain.client.core as unknown as Record<string, unknown>
+  const fails = async () => { throw new Error("rpc down") }
+
+  it("a not-found answer that is not an ObjectError is no absence: remaining says it could not be determined", async () => {
+    const chain = live()
+    core(chain).getObjects = async () => ({ objects: [new Error("Object not found")] })
+    const rem = await adapter(chain).remaining({ allowance: handle(limits) })
+    expect(rem).toMatchObject({ exists: null, active: null, spendableNow: null })
+    expect(rem.summary).toContain("Could not determine")
+    expect(rem.limits.map((l) => l.verdict)).toEqual(["unchecked", "unchecked"])
+  })
+
+  it("an empty answer is no absence", async () => {
+    const chain = live()
+    core(chain).getObjects = async () => ({ objects: [] })
+    expect((await adapter(chain).remaining({ allowance: handle(limits) })).exists).toBeNull()
+  })
+
+  it("an ObjectError of another reason is no absence", async () => {
+    const chain = live()
+    core(chain).getObjects = async () => ({ objects: [new ObjectError("unavailable", "try later", { reason: "unknown" })] })
+    expect((await adapter(chain).remaining({ allowance: handle(limits) })).exists).toBeNull()
+  })
+
+  it("absence takes more than one answer: one stale not-found, then a live read, is live", async () => {
+    const chain = live()
+    const real = core(chain).getObjects as (a: { objectIds: Array<string> }) => Promise<unknown>
+    let calls = 0
+    core(chain).getObjects = async (a: { objectIds: Array<string> }) => {
+      if (a.objectIds[0] !== ALLOWANCE_ID || ++calls > 1) return real(a)
+      return { objects: [new ObjectError("notFound", "not found", { reason: "notFound" })] }
+    }
+    expect(await adapter(chain).remaining({ allowance: handle(limits) })).toMatchObject({ exists: true, active: true, spendableNow: "1000" })
+    expect(calls).toBeGreaterThan(1)
+  })
+
+  it("an unreadable clock leaves the time unknown instead of borrowing this machine's", async () => {
+    const chain = live()
+    const real = core(chain).getObjects as (a: { objectIds: Array<string> }) => Promise<unknown>
+    core(chain).getObjects = async (a: { objectIds: Array<string> }) => (a.objectIds[0] === "0x6" ? fails() : real(a))
+    const a = suiAllowances({ client: chain.client, network: "sui:testnet", now: () => ANCHOR + 400 * DAY })
+    const rem = await a.remaining({ allowance: handle(limits) })
+    expect(rem).toMatchObject({ exists: true, at: null, active: null, spendableNow: null, lifetime: { remaining: "1000" } })
+    expect(rem.summary).toContain("Could not determine")
+    expect(lineOf(rem, "expiry").verdict).toBe("unchecked")
+  })
+
+  it("an unreadable clock leaves the rate window unknown, not empty", async () => {
+    const chain = mockChain(allowanceState({ funder: P, spender: A, rate: windowed(0n, null) }), BigInt(ANCHOR))
+    const real = core(chain).getObjects as (a: { objectIds: Array<string> }) => Promise<unknown>
+    core(chain).getObjects = async (a: { objectIds: Array<string> }) => (a.objectIds[0] === "0x6" ? fails() : real(a))
+    const rem = await adapter(chain).remaining({ allowance: handle({ rate: RATE }) })
+    expect(rem.rate).toMatchObject({ spentInWindow: null, remainingInWindow: null })
+    expect(lineOf(rem, "rate").verdict).toBe("unchecked")
+  })
+
+  it.each([["", "empty"], ["0x12", "short"], ["0xnot-hex", "malformed"]])("recipient %j (%s) is refused with a receipt and signs nothing", async (recipient) => {
+    const chain = live()
+    const r = await adapter(chain).spend({ signer: agent, allowance: handle(limits), amount: 1n, recipient })
+    expect(chain.executed).toHaveLength(0)
+    expect(r).toMatchObject({ verdict: "refused", digest: null, recipient })
+    expect(r.refusal?.code).toBe("invalid-address")
+  })
+
+  it("a short spender is refused at open(), since padding it would name a different address", async () => {
+    const chain = mockChain(null, 0n)
+    const { receipt } = await adapter(chain).open({ signer: principal, allowance: { network: "sui:testnet", asset: "0x2::sui::SUI", spender: "0x12", limits: { rate: { amount: 1n, windowMs: DAY } } } })
+    expect(receipt.refusal?.code).toBe("invalid-address")
+  })
+
+  it("the receipt carries the digest of the signed bytes when the node answers with another, confirmed on chain", async () => {
+    const chain = live()
+    chain.script.push({ kind: "executed", digest: DIGEST(1), timestampMs: ANCHOR, after: chain.state })
+    const r = await adapter(chain).spend({ signer: agent, allowance: handle(limits), amount: 1n, recipient: MERCHANT })
+    expect(signedDigest(chain)).not.toBe(DIGEST(1))
+    expect(r).toMatchObject({ verdict: "executed", digest: signedDigest(chain) })
+  })
+
+  it("a node answering with another digest, and the signed one unconfirmed, is `errored`: its success was not about this transaction", async () => {
+    const chain = live()
+    chain.script.push({ kind: "executed", digest: DIGEST(1), timestampMs: ANCHOR, after: chain.state, unconfirmable: true })
+    const a = suiAllowances({ client: chain.client, network: "sui:testnet", scale: testUSD, confirmTimeoutMs: 0 })
+    const r = await a.spend({ signer: agent, allowance: handle(limits), amount: 1n, recipient: MERCHANT })
+    expect(r).toMatchObject({ verdict: "errored", digest: signedDigest(chain), refusal: null })
+    expect(r.summary).toContain("not the digest of the transaction this adapter signed")
+  })
+
+  it("a scale reads only its own coin type; another asset reads in base units", async () => {
+    const chain = live()
+    const usdc = "0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC"
+    const a = suiAllowances({ client: chain.client, network: "sui:testnet", scale: testUSD })
+    const r = await a.spend({ signer: agent, allowance: { ...handle({ ...limits, recipients: [STRANGER] }), asset: usdc }, amount: 1_000_000n, recipient: MERCHANT })
+    expect(r.amountText).toBe(`1,000,000 base units of ${usdc}`)
+  })
+
+  it("a scale with no coin type is refused when the adapter is built, so it cannot silently label the wrong coin", () => {
+    const unbound = defineScale({ unit: "X", baseUnitsPerUnit: 10n, decimals: 1 })
+    expect(unbound.coinType).toBeNull()
+    expect(() => suiAllowances({ client: live().client, network: "sui:testnet", scale: unbound })).toThrow(/bound to a coin type/)
+  })
+
+  it("defineScale refuses a coin type that is not a Move type", () => {
+    expect(() => defineScale({ unit: "X", baseUnitsPerUnit: 10n, decimals: 1, coinType: "nope" })).toThrow(TypeError)
+  })
+
+  it("a transport whose ObjectError is another copy's class still counts as absence", async () => {
+    const chain = live()
+    class ForeignObjectError extends Error { reason = "deleted" }
+    core(chain).getObjects = async () => ({ objects: [new ForeignObjectError("deleted")] })
+    expect((await adapter(chain).remaining({ allowance: handle(limits) })).exists).toBe(false)
+  })
+
+  it("the clock read retries one dropped answer instead of blanking the status", async () => {
+    const chain = live()
+    const real = core(chain).getObjects as (a: { objectIds: Array<string> }) => Promise<unknown>
+    let clockCalls = 0
+    core(chain).getObjects = async (a: { objectIds: Array<string> }) => (a.objectIds[0] === "0x6" && ++clockCalls === 1 ? fails() : real(a))
+    expect(await adapter(chain).remaining({ allowance: handle(limits) })).toMatchObject({ exists: true, active: true, at: new Date(ANCHOR).toISOString() })
   })
 })
 
@@ -399,7 +531,7 @@ describe("receipts on a SweeTrust SignedReceiptLog", () => {
     expect(all[0]).toMatchObject({ sink: "sweetrust-sui.spend", decision: "refused", reason: refused.refusal?.why })
     expect(all[0].args.receipt.value).toBe(refused)
     expect(all[0].args.receipt.tier).toBe("untrusted")
-    expect(all[0].args.receipt.provenance).toBe(`sweetrust-sui on sui:testnet, tx ${DIGEST(2)}`)
+    expect(all[0].args.receipt.provenance).toBe(`sweetrust-sui on sui:testnet, tx ${signedDigest(chain)}`)
     expect(all[1]).toMatchObject({ decision: "refused", reason: offList.refusal?.why })
     expect(all[1].args.receipt.provenance).toBe("sweetrust-sui on sui:testnet, nothing sent")
     const report = verifySignedChain(log.signed(), { trustedSignerPublicKeyHex: signer.publicKeyHex })
@@ -440,12 +572,33 @@ describe("a thrown submit is resolved by digest, never guessed to be a refusal",
     expect(r.refusal).toMatchObject({ code: "not-submitted", refusedBy: "library", native: null })
   })
 
-  it("spend: the response is lost and the allowance is gone → `allowance-gone`, because a spend cannot execute against a deleted object", async () => {
-    const chain = mockChain(null, 0n)
-    chain.script.push({ kind: "throw", message: "The following input objects are invalid: deleted" })
+  it("spend: signed, unconfirmed, and the allowance is gone → `errored` with its digest, because the spend may have landed before the allowance went", async () => {
+    const chain = mockChain(allowanceState({ funder: P, spender: A, rate: windowed(0n, null) }), BigInt(ANCHOR))
+    chain.script.push({ kind: "throw", message: "The following input objects are invalid: deleted", after: null })
     const r = await adapter(chain).spend({ signer: agent, allowance: handle({ rate: RATE }), amount: 1n, recipient: MERCHANT })
+    expect(chain.state).toBeNull()
+    expect(r).toMatchObject({ verdict: "errored", digest: signedDigest(chain), refusal: null })
+    expect(r.summary).toContain("MAY or MAY NOT have moved")
+    expect(r.limits.map((l) => l.why).join(" ")).not.toMatch(/nothing was spent/i)
+  })
+
+  it("revoke: signed, unconfirmed, and the allowance is gone → `errored` with its digest", async () => {
+    const chain = mockChain(allowanceState({ funder: P, spender: A, rate: windowed(0n, null) }), BigInt(ANCHOR))
+    chain.script.push({ kind: "throw", message: "fetch failed: socket hang up", after: null })
+    const r = await adapter(chain).revoke({ signer: principal, allowance: handle({ rate: RATE }) })
+    expect(r).toMatchObject({ verdict: "errored", digest: signedDigest(chain), refusal: null })
+    expect(r.summary).toContain("MAY or MAY NOT still be live")
+  })
+
+  it("revoke: not sent and not found is never read as done: `allowance-not-found`, and it says it did not run", async () => {
+    const chain = mockChain(null, 0n)
+    chain.breakBuild = true
+    const r = await adapter(chain).revoke({ signer: principal, allowance: handle({ rate: RATE }) })
     expect(r).toMatchObject({ verdict: "refused", digest: null })
-    expect(r.refusal).toMatchObject({ code: "allowance-gone", refusedBy: "chain" })
+    expect(r.refusal?.code).toBe("allowance-not-found")
+    expect(r.summary).toContain("it did NOT run")
+    expect(r.summary).toContain("was not found on sui:testnet")
+    expect(r.summary).not.toMatch(/already revoked/i)
   })
 
   it("open: the response is lost but the allowance WAS created → the real allowance, not a false refusal (no double-open)", async () => {
@@ -598,10 +751,10 @@ describe("the client must be on the network the adapter names, checked before th
     expect(r.refusal).toMatchObject({ code: "recipient-not-allowed" })
   })
 
-  it("remaining() will not answer from the wrong chain, where the allowance would look revoked", async () => {
+  it("remaining() will not answer from the wrong chain, where the allowance would come back not found", async () => {
     const chain = mockChain(null, 0n)
     const a = adapter(chain)
-    await expect(a.remaining({ allowance: { ...handle({ rate: RATE }), network: "sui:mainnet" } })).rejects.toThrow(/would look revoked/)
+    await expect(a.remaining({ allowance: { ...handle({ rate: RATE }), network: "sui:mainnet" } })).rejects.toThrow(/would come back not found/)
     chain.chainIdentifier = MAINNET_GENESIS
     await expect(a.remaining({ allowance: handle({ rate: RATE }) })).rejects.toThrow(/connected to sui:mainnet/)
   })
@@ -624,7 +777,7 @@ describe("nothing that runs after the chain has moved may throw the receipt away
     chain.script.push({ kind: "executed", digest: DIGEST(1), timestampMs: ANCHOR, after: { ...before, rate: windowed(testUSD.of(1), ANCHOR) } })
     const a = suiAllowances({ client: chain.client, network: "sui:testnet", scale: testUSD, now: () => LOCAL_NOW, explorer: () => { throw new Error("explorer down") } })
     const r = await a.spend({ signer: agent, allowance: handle({ rate: RATE }), amount: testUSD.of(1), recipient: MERCHANT })
-    expect(r).toMatchObject({ verdict: "executed", digest: DIGEST(1), explorer: null })
+    expect(r).toMatchObject({ verdict: "executed", digest: signedDigest(chain), explorer: null })
   })
 
   it("an explorer or scale of the wrong shape is refused when the adapter is made, not after a send", () => {
@@ -695,7 +848,7 @@ describe("no host-supplied or chain-supplied oddity can lose a receipt after a s
       allowance: { network: "sui:testnet", asset: "0x2::sui::SUI", spender: A, limits: { rate: RATE } },
     })
     expect(allowance).toBeNull()
-    expect(receipt).toMatchObject({ verdict: "errored", digest: DIGEST(0), refusal: null })
+    expect(receipt).toMatchObject({ verdict: "errored", digest: signedDigest(chain), refusal: null })
     expect(receipt.summary).toContain("SECOND allowance")
   })
 
@@ -802,15 +955,22 @@ describe("spend(): authorizedBy binds a payment to the verdict that approved it"
     chain.script.push({ kind: "executed", digest: DIGEST(1), timestampMs: ANCHOR, after: { ...before, currentSpend: AMOUNT, rate: windowed(AMOUNT, ANCHOR) } })
     const r = await pay(chain, proof())
     expect(targetsOf(chain.executed[0].bytes)).toEqual(["0x2::allowance::balance_spend", "0x2::coin::from_balance", "TransferObjects"])
-    expect(r).toMatchObject({ schema: "sweetrust-sui/receipt@2", verdict: "executed", digest: DIGEST(1), refusal: null, authorizedBy: proof() })
+    expect(r).toMatchObject({ schema: "sweetrust-sui/receipt@2", verdict: "executed", digest: signedDigest(chain), refusal: null, authorizedBy: proof() })
   })
 
-  it("digests its own normalized recipient: a short-form payee passes against the canonical digest", async () => {
+  it("digests its own normalized recipient: a full-length mixed-case payee passes against the canonical digest", async () => {
     const before = allowanceState({ funder: P, spender: A, rate: windowed(0n, null) })
     const chain = mockChain(before, 0n)
     chain.script.push({ kind: "executed", digest: DIGEST(1), timestampMs: ANCHOR, after: before })
-    const r = await pay(chain, proof(), { recipient: "0x5E11E5" })
+    const r = await pay(chain, proof(), { recipient: `0x${MERCHANT.slice(2).toUpperCase()}` })
     expect(r).toMatchObject({ verdict: "executed", recipient: MERCHANT })
+  })
+
+  it("a short-form payee is refused even when the verdict's digest matches its padded form", async () => {
+    const chain = mockChain(allowanceState({ funder: P, spender: A, rate: windowed(0n, null) }), 0n)
+    const r = await pay(chain, proof(), { recipient: "0x5E11E5" })
+    expect(chain.executed).toHaveLength(0)
+    expect(r.refusal?.code).toBe("invalid-address")
   })
 
   it("a verdict judged over a non-canonical recipient or asset fails closed", async () => {
@@ -875,7 +1035,7 @@ describe("spend(): authorizedBy binds a payment to the verdict that approved it"
     const abort = live()
     abort.script.push({ kind: "abort", digest: DIGEST(2), timestampMs: ANCHOR, abortName: "EExceedsRateLimit", errorCode: 4 })
     const refused = await pay(abort, proof())
-    expect(refused).toMatchObject({ verdict: "refused", digest: DIGEST(2), authorizedBy: proof() })
+    expect(refused).toMatchObject({ verdict: "refused", digest: signedDigest(abort), authorizedBy: proof() })
     expect(refused.refusal).toMatchObject({ code: "rate-exceeded", refusedBy: "chain" })
 
     const broken = live()
@@ -885,9 +1045,9 @@ describe("spend(): authorizedBy binds a payment to the verdict that approved it"
     expect(notSubmitted.authorizedBy).toEqual(proof())
 
     const gone = mockChain(null, 0n)
-    gone.script.push({ kind: "throw", message: "The following input objects are invalid: deleted" })
+    gone.breakBuild = true
     const goneReceipt = await pay(gone, proof())
-    expect(goneReceipt.refusal?.code).toBe("allowance-gone")
+    expect(goneReceipt.refusal?.code).toBe("allowance-not-found")
     expect(goneReceipt.authorizedBy).toEqual(proof())
 
     const lost = live()

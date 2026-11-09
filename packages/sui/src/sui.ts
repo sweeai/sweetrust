@@ -96,7 +96,11 @@ export interface SuiAllowancesOptions {
   readonly client: SuiAllowanceClient
   /** `sui:testnet`, `sui:mainnet` or `sui:devnet`: must be the network the client talks to. */
   readonly network: Caip2
-  /** How amounts read on receipts. Default: SUI for `0x2::sui::SUI`, raw base units otherwise. */
+  /**
+   * How amounts read on receipts. Applied only to the coin type the scale is
+   * bound to (`defineScale({ coinType })`); every other asset reads in base units.
+   * Default: SUI for `0x2::sui::SUI`, raw base units otherwise.
+   */
   readonly scale?: Scale
   /** Every receipt is also appended here, so `verifySignedChain` re-checks it. */
   readonly log?: ReceiptAppender
@@ -125,10 +129,17 @@ export interface SuiAllowancesOptions {
 
 export type SuiAllowances = AllowanceAdapter<Signer, SuiAllowance>
 
-const SUI_TYPE = "0x2::sui::SUI"
 const DEFAULT_GAS_BUDGET = 10_000_000n
 const DEFAULT_CONFIRM_TIMEOUT_MS = 30_000
 const SCHEMA = "sweetrust-sui/receipt@2" as const
+/**
+ * How a read of the allowance decides it is absent. A single "not found" can be
+ * a node one transaction behind, so absence takes this many explicit
+ * `ObjectError` answers in a row, READ_BACKOFF_MS apart; a live read stops at once.
+ */
+const ABSENT_READS = 3
+const READ_ATTEMPTS = 8
+const READ_BACKOFF_MS = 400
 /** The shape of a SweeTrust gate digest. */
 const GATE_DIGEST = /^[0-9a-f]{64}$/
 /** What a `not-authorized` receipt says about who held the rule: this check is the library's, not Sui's. */
@@ -169,8 +180,17 @@ const deepFreeze = <T>(v: T): T => {
   return v
 }
 const minBig = (a: bigint, b: bigint): bigint => (a < b ? a : b)
+/** Is `asset` the coin a scale is bound to? A malformed asset is not, and never throws here. */
+const boundTo = (coinType: string | null, asset: string): boolean => {
+  try {
+    return coinType !== null && coinType === normalizeStructTag(asset)
+  } catch {
+    return false
+  }
+}
 const normAddr = (a: string): string => normalizeSuiAddress(a)
-const validAddr = (a: string): boolean => typeof a === "string" && isValidSuiAddress(normAddr(a))
+/** A full-length address only: normalizing first would pad `""` to the zero address and `0x12` to a real one. */
+const validAddr = (a: string): boolean => typeof a === "string" && isValidSuiAddress(a)
 
 /** The six limit names, as a set: anything else on a limits object is a typo, and a typo is refused, never dropped. */
 const LIMIT_KEYS: ReadonlySet<string> = new Set(["lifetimeCap", "rate", "start", "expiry", "recipients", "perSpendMax"])
@@ -282,6 +302,7 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
   if (options.now !== undefined && typeof options.now !== "function") throw typeErr("suiAllowances", "now must be a function returning epoch milliseconds, e.g. Date.now (not Date.now())")
   if (explorerOpt !== undefined && explorerOpt !== null && typeof explorerOpt !== "function") throw typeErr("suiAllowances", "explorer must be a function (network, digest) => string | null, or null")
   if (scaleOpt !== undefined && (typeof scaleOpt !== "object" || scaleOpt === null || typeof scaleOpt.format !== "function")) throw typeErr("suiAllowances", "scale must be a Scale from defineScale()")
+  if (scaleOpt !== undefined && typeof scaleOpt.coinType !== "string") throw typeErr("suiAllowances", "scale must be bound to a coin type: defineScale({ ..., coinType: \"0x2::sui::SUI\" })")
   if (requireAuthorization !== undefined && typeof requireAuthorization !== "boolean") throw typeErr("suiAllowances", "requireAuthorization must be a boolean")
   const explorer = explorerOpt === undefined ? defaultExplorer : explorerOpt
   /**
@@ -299,7 +320,11 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
   }
   const core = client.core
 
-  const scaleFor = (asset: string): Scale => scaleOpt ?? (normalizeStructTag(asset) === normalizeStructTag(SUI_TYPE) ? SUI : baseUnitsOf(asset))
+  /** A scale reads only the coin type it is bound to; every other asset reads in base units, never a wrong unit. */
+  const scaleFor = (asset: string): Scale => {
+    const s = scaleOpt ?? SUI
+    return boundTo(s.coinType, asset) ? s : baseUnitsOf(asset)
+  }
   const balanceType = (asset: string): string => `0x2::balance::Balance<${asset}>`
 
   // ── Receipts ──
@@ -372,28 +397,38 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
 
   // ── Chain I/O ──
 
-  /** Read the allowance. null = it does not exist (revoked or never opened); undefined = the read failed. */
+  /**
+   * Only the SDK's `ObjectError` saying deleted or not found counts as absence.
+   * Read by its `reason`, not `instanceof`: a host may build its client from
+   * another copy of @mysten/sui, whose class would fail the check and hide every absence.
+   */
+  const saysAbsent = (o: unknown): boolean => {
+    const reason: unknown = o instanceof Error ? (o as { reason?: unknown }).reason : undefined
+    return reason === "notFound" || reason === "deleted"
+  }
+
+  /**
+   * Read the allowance. null = explicitly not found, ABSENT_READS times in a row;
+   * undefined = the read could not say (it failed, came back empty, or never
+   * reached minVersion). A read never says why an object is missing, so callers
+   * report null as "not found", never as revoked.
+   */
   const readAllowance = async (id: string, minVersion: bigint | null): Promise<AllowanceState | null | undefined> => {
-    for (let attempt = 0; attempt < 8; attempt++) {
+    let absent = 0
+    for (let attempt = 0; attempt < READ_ATTEMPTS; attempt++) {
+      if (attempt > 0) await sleep(READ_BACKOFF_MS)
       const res = await core.getObjects({ objectIds: [id], include: { content: true } }).catch(() => null)
-      if (res === null) {
-        await sleep(400)
-        continue
-      }
-      const obj = res.objects[0]
+      const obj = res?.objects?.[0]
       if (obj === undefined || obj instanceof Error) {
-        const msg = obj instanceof Error ? obj.message : ""
-        if (/not ?found|deleted|does ?not ?exist|notexists/i.test(msg) || obj === undefined) return null
-        await sleep(400)
+        absent = saysAbsent(obj) ? absent + 1 : 0
+        if (absent >= ABSENT_READS) return null
         continue
       }
-      // A load-balanced fullnode can answer from a replica one transaction
-      // behind; wait until the read reflects the transaction just executed.
-      if (minVersion !== null && BigInt(obj.version) < minVersion) {
-        await sleep(400)
-        continue
-      }
+      absent = 0
       try {
+        // A load-balanced fullnode can answer from a replica one transaction
+        // behind; wait until the read reflects the transaction just executed.
+        if (minVersion !== null && BigInt(obj.version) < minVersion) continue
         return decodeAllowance(obj.content)
       } catch {
         return undefined
@@ -402,15 +437,19 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
     return undefined
   }
 
+  /** The chain's clock, or null when it could not be read: a caller says so, it never substitutes this machine's. */
   const readClockMs = async (): Promise<bigint | null> => {
-    try {
-      const res = await core.getObjects({ objectIds: [CLOCK_OBJECT_ID], include: { content: true } })
-      const obj = res.objects[0]
-      if (obj === undefined || obj instanceof Error) return null
-      return decodeClockMs(obj.content)
-    } catch {
-      return null
+    for (let attempt = 0; attempt < ABSENT_READS; attempt++) {
+      if (attempt > 0) await sleep(READ_BACKOFF_MS)
+      try {
+        const res = await core.getObjects({ objectIds: [CLOCK_OBJECT_ID], include: { content: true } })
+        const obj = res.objects[0]
+        if (obj !== undefined && !(obj instanceof Error)) return decodeClockMs(obj.content)
+      } catch {
+        // the next attempt
+      }
     }
+    return null
   }
 
   /** When the transaction reached the chain: its checkpoint's time, else the chain clock, else this machine. */
@@ -443,6 +482,8 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
 
   /** Who said why nothing was sent: the client's error, or the adapter's own stop. */
   const notSentWords = (o: NotSent): string => o.own === true ? `sweetrust-sui stopped before signing: ${o.message}` : `The Sui client said: ${o.message}`
+  /** How a missing allowance is worded everywhere: not found, never revoked, and never more than a read can know. */
+  const notFoundWords = (id: string): string => `Allowance ${id} was not found on ${network} after ${ABSENT_READS} reads. A read cannot say why, and a node that is behind answers the same way, so this does not prove the allowance is dead.`
   const clip = (e: unknown): string => (e instanceof Error ? e.message : String(e)).replace(/\s+/g, " ").slice(0, 400)
 
   /**
@@ -535,6 +576,10 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
    * been forwarded and may finalize — the adapter re-reads that exact digest
    * instead of guessing. Only when the chain cannot confirm it is the outcome
    * `unknown`; a thrown submit is never reported as a definite refusal.
+   *
+   * The receipt always carries the digest of the signed bytes. A node that
+   * answers with any other digest has not answered about this transaction, so
+   * its answer is dropped and the signed digest is asked for instead.
    */
   const execute = async (tx: Transaction, signer: Signer): Promise<Outcome> => {
     let bytes: Uint8Array
@@ -550,8 +595,9 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
     const digest = TransactionDataBuilder.getDigestFromBytes(bytes)
     try {
       const res = await core.signAndExecuteTransaction({ transaction: bytes, signer, include: { effects: true, objectTypes: true } })
-      if (res.$kind === "Transaction") return { kind: "executed", digest: res.Transaction.digest, tx: res.Transaction }
-      return { kind: "failed", digest: res.FailedTransaction.digest, tx: res.FailedTransaction }
+      const answered = res.$kind === "Transaction" ? res.Transaction : res.FailedTransaction
+      if (answered.digest === digest) return { kind: res.$kind === "Transaction" ? "executed" : "failed", digest, tx: answered }
+      return (await resolveDigest(digest)) ?? { kind: "unknown", digest, message: `the node answered with digest ${answered.digest}, which is not the digest of the transaction this adapter signed` }
     } catch (e) {
       return (await resolveDigest(digest)) ?? { kind: "unknown", digest, message: clip(e) }
     }
@@ -876,35 +922,31 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
     const recipientsWithin = (): LimitLine => recipientsLine("within",
       `Held by the library, in-process: the payee ${shortAddress(recipient)} was checked against the allowed list before sending. ${RECIPIENTS_SUCCESSOR}`)
 
-    if (out.kind === "not-sent" || out.kind === "unknown") {
-      // Re-read the allowance first: if it is gone, a spend against it cannot have
-      // executed (its input object no longer exists), so nothing moved — a safe refusal.
-      const state = await readAllowance(h.allowanceId, null)
-      if (state === null) {
-        const why = `Refused: allowance ${h.allowanceId} no longer exists on ${network}, so there was nothing to spend against. It was revoked (revoke deletes it), or it never existed. No transaction was recorded.`
-        return finish(receiptOf({
-          ...base, recipient, verdict: "refused", digest: null, ...localAt(),
-          limits: present.map((l) => l === "recipients" ? recipientsWithin()
-            : line(l, limitValue(l, h.limits, scale), holder(l), "unchecked", "Not evaluated: the allowance is gone, so nothing was spent.")),
-          refusal: refusal("allowance-gone", "chain", null, why), summary: why,
-        }))
-      }
-      if (out.kind === "not-sent") {
-        const why = `Refused in-process; nothing was sent to Sui. The transaction could not be built or signed, so nothing was spent. ${notSentWords(out)}`
-        return finish(receiptOf({
-          ...base, recipient, verdict: "refused", digest: null, ...localAt(),
-          limits: present.map((l) => l === "recipients" ? recipientsWithin()
-            : line(l, limitValue(l, h.limits, scale), holder(l), "unchecked", "Not evaluated: nothing was sent to Sui.")),
-          refusal: refusal("not-submitted", "library", null, why), summary: why,
-        }))
-      }
-      // Signed, submitted, and the chain could not confirm the digest: the outcome is unknown.
+    // Signed, and the chain could not confirm the digest: the outcome is unknown,
+    // whatever the allowance looks like now. It can be gone BECAUSE this spend
+    // landed before a revoke, so a read of it settles nothing.
+    if (out.kind === "unknown") {
       const why = `Could not confirm the spend: the transaction was signed and may have reached ${network}, but sweetrust-sui could not read its outcome within ${confirmTimeoutMs} ms. The ${amountText} MAY or MAY NOT have moved, so do not retry blindly — a retry could pay twice. Look up ${out.digest} on ${network}, or call remaining(), before retrying. The Sui client said: ${out.message}`
       return finish(receiptOf({
         ...base, recipient, verdict: "errored", digest: out.digest, ...localAt(),
         limits: present.map((l) => l === "recipients" ? recipientsWithin()
           : line(l, limitValue(l, h.limits, scale), holder(l), "unchecked", "Not confirmed: the spend's outcome is unknown.")),
         refusal: null, summary: why,
+      }))
+    }
+
+    if (out.kind === "not-sent") {
+      // Nothing was signed, so the refusal is true whatever the read says. The read
+      // only sharpens the reason, and it says "not found": it cannot say why.
+      const missing = (await readAllowance(h.allowanceId, null)) === null
+      const why = missing
+        ? `Refused in-process; nothing was sent to Sui. ${notFoundWords(h.allowanceId)} ${notSentWords(out)}`
+        : `Refused in-process; nothing was sent to Sui. The transaction could not be built or signed, so nothing was spent. ${notSentWords(out)}`
+      return finish(receiptOf({
+        ...base, recipient, verdict: "refused", digest: null, ...localAt(),
+        limits: present.map((l) => l === "recipients" ? recipientsWithin()
+          : line(l, limitValue(l, h.limits, scale), holder(l), "unchecked", missing ? "Not evaluated: the allowance was not found, and nothing was sent to Sui." : "Not evaluated: nothing was sent to Sui.")),
+        refusal: refusal(missing ? "allowance-not-found" : "not-submitted", "library", null, why), summary: why,
       }))
     }
 
@@ -988,18 +1030,18 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
     const byValue = (objectId: string) => tx.object({ $kind: "UnresolvedObject", UnresolvedObject: { objectId, mutable: true } })
     tx.moveCall({ target: "0x2::allowance::revoke", typeArguments: [balanceType(h.asset)], arguments: [byValue(h.capId), byValue(h.allowanceId)] })
     const out = await execute(tx, signer)
-    if (out.kind === "not-sent" || out.kind === "unknown") {
-      const state = await readAllowance(h.allowanceId, null)
-      if (state === null) {
-        const why = `Refused: allowance ${h.allowanceId} no longer exists on ${network}; it was already revoked, so there is nothing to revoke. No transaction was recorded.`
-        return finish(receiptOf({ ...base, verdict: "refused", digest: null, ...localAt(), limits: [], refusal: refusal("allowance-gone", "chain", null, why), summary: why }))
-      }
-      if (out.kind === "not-sent") {
-        const why = `Refused in-process; nothing was sent to Sui. The revoke could not be built or signed. Only the funder ${h.funder}, who holds the AllowanceCap ${h.capId}, can revoke. ${notSentWords(out)}`
-        return finish(receiptOf({ ...base, verdict: "refused", digest: null, ...localAt(), limits: [], refusal: refusal("not-submitted", "library", null, why), summary: why }))
-      }
+    // A kill switch has one honest "done": an executed revoke. Unknown is `errored`
+    // whatever a read says, since a signed revoke may yet land.
+    if (out.kind === "unknown") {
       const why = `Could not confirm the revoke: the transaction was signed and may have reached ${network}, but sweetrust-sui could not read its outcome within ${confirmTimeoutMs} ms. The allowance MAY or MAY NOT still be live. Look up ${out.digest} on ${network}, or call remaining(), before relying on it. The Sui client said: ${out.message}`
       return finish(receiptOf({ ...base, verdict: "errored", digest: out.digest, ...localAt(), limits: [], refusal: null, summary: why }))
+    }
+    if (out.kind === "not-sent") {
+      // The same refusal either way: a revoke that did not run must not read as already done.
+      const missing = (await readAllowance(h.allowanceId, null)) === null
+      const cause = missing ? notFoundWords(h.allowanceId) : `Only the funder ${h.funder}, who holds the AllowanceCap ${h.capId}, can revoke.`
+      const why = `Refused in-process; nothing was sent to Sui. The revoke could not be built or signed, so it did NOT run. ${cause} ${notSentWords(out)}`
+      return finish(receiptOf({ ...base, verdict: "refused", digest: null, ...localAt(), limits: [], refusal: refusal(missing ? "allowance-not-found" : "not-submitted", "library", null, why), summary: why }))
     }
     const when = await chainTime(out.digest)
     const at = { at: new Date(Number(when.ms)).toISOString(), atSource: when.source }
@@ -1023,23 +1065,30 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
   const remaining: SuiAllowances["remaining"] = async (args) => {
     if (typeof args !== "object" || args === null) throw typeErr("remaining", "arguments must be an object")
     const h = snapshotHandle("remaining", args.allowance)
-    // Read on the wrong chain, the allowance would not be found and would be
-    // reported as revoked: a confident false answer, so this read refuses to answer.
-    if (h.network !== network) throw typeErr("remaining", `the allowance is on ${h.network}, and this adapter is connected to ${network}; read there, it would look revoked`)
+    // Read on the wrong chain, the allowance would not be found: a confident
+    // false answer, so this read refuses to answer.
+    if (h.network !== network) throw typeErr("remaining", `the allowance is on ${h.network}, and this adapter is connected to ${network}; read there, it would come back not found`)
     const offChain = await wrongChain()
     if (offChain !== null) throw new Error(`sweetrust-sui remaining: ${offChain.reason}`)
     const scale = scaleFor(h.asset)
     const fmt = scale.format
-    const [state, clock] = await Promise.all([readAllowance(h.allowanceId, null), readClockMs()])
-    const nowMs = clock ?? BigInt(nowLocal())
-    const at = new Date(Number(nowMs)).toISOString()
-    if (state === undefined) throw new Error(`sweetrust-sui remaining: could not read allowance ${h.allowanceId} on ${network}`)
-    if (state === null) {
+    // The chain's clock or nothing: this machine's clock must not be labeled chain time.
+    const [state, nowMs] = await Promise.all([readAllowance(h.allowanceId, null), readClockMs()])
+    const at = nowMs === null ? null : new Date(Number(nowMs)).toISOString()
+    const NO_CLOCK = "Could not be determined: the chain's clock could not be read, and sweetrust-sui does not substitute this machine's clock for it."
+    if (state === undefined || state === null) {
+      const facts = state === undefined
+        ? { exists: null, active: null, spendableNow: null,
+            why: "Could not be determined: the allowance could not be read.",
+            summary: `Could not determine the state of allowance ${h.allowanceId} on ${network}: the read failed or came back empty, so this says nothing about whether it still exists or what can be spent.` }
+        : { exists: false, active: false, spendableNow: "0",
+            why: `Not found on chain after ${ABSENT_READS} reads, so nothing here was checked.`,
+            summary: `${notFoundWords(h.allowanceId)} By this node nothing can be spent against it; only an executed revoke proves it is dead.` }
       return deepFreeze({
-        network, allowanceId: h.allowanceId, exists: false, at, lifetime: null, rate: null, start: null, expiry: null,
-        active: false, spendableNow: "0",
-        limits: presentLimits(h.limits).map((l) => line(l, limitValue(l, h.limits, scale), holder(l), "revoked", "The allowance no longer exists on chain (revoked), so nothing can be spent.")),
-        summary: `Allowance ${h.allowanceId} no longer exists on ${network}: it was revoked, so nothing can be spent.`,
+        network, allowanceId: h.allowanceId, exists: facts.exists, at, lifetime: null, rate: null, start: null, expiry: null,
+        active: facts.active, spendableNow: facts.spendableNow,
+        limits: presentLimits(h.limits).map((l) => line(l, limitValue(l, h.limits, scale), holder(l), "unchecked", facts.why)),
+        summary: facts.summary,
       })
     }
     const lines: Array<LimitLine> = []
@@ -1054,46 +1103,56 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
     }
     let rate: Remaining["rate"] = null
     if (state.rate !== null) {
-      const w = currentWindow(state.rate, nowMs)
-      const left = state.rate.limit > w.spent ? state.rate.limit - w.spent : 0n
       const windowMs = state.rate.window.kind === "periodic" ? Number(state.rate.window.periodMs) : null
-      rate = {
-        limit: state.rate.limit.toString(), windowMs, spentInWindow: w.spent.toString(), remainingInWindow: left.toString(),
-        windowStart: w.startMs === null ? null : new Date(Number(w.startMs)).toISOString(),
-        windowEnd: w.endMs === null ? null : new Date(Number(w.endMs)).toISOString(),
-      }
-      spendable = spendable === null ? left : minBig(spendable, left)
       const period = state.rate.window.kind === "periodic" ? periodPhrase(state.rate.window.periodMs) : `${state.rate.window.months}-month window`
-      const where = !w.anchored
-        ? "No charge yet: the first spend opens the first window."
-        : w.endMs === null ? "Calendar-month windows, counted from the first charge." : `The current window opened at ${fmtTime(w.startMs ?? 0n)} and resets at ${fmtTime(w.endMs)}.`
-      lines.push(line("rate", `${fmt(state.rate.limit)} per ${period}`, "chain", left > 0n ? "held" : "outside",
-        `Read from the chain: ${fmt(w.spent)} spent in the current window, ${fmt(left)} of ${fmt(state.rate.limit)} left. ${where}`))
+      if (nowMs === null) {
+        // Which window is current depends on the time, so the spend inside it is unknown too.
+        rate = { limit: state.rate.limit.toString(), windowMs, spentInWindow: null, remainingInWindow: null, windowStart: null, windowEnd: null }
+        lines.push(line("rate", `${fmt(state.rate.limit)} per ${period}`, "chain", "unchecked", NO_CLOCK))
+      } else {
+        const w = currentWindow(state.rate, nowMs)
+        const left = state.rate.limit > w.spent ? state.rate.limit - w.spent : 0n
+        rate = {
+          limit: state.rate.limit.toString(), windowMs, spentInWindow: w.spent.toString(), remainingInWindow: left.toString(),
+          windowStart: w.startMs === null ? null : new Date(Number(w.startMs)).toISOString(),
+          windowEnd: w.endMs === null ? null : new Date(Number(w.endMs)).toISOString(),
+        }
+        spendable = spendable === null ? left : minBig(spendable, left)
+        const where = !w.anchored
+          ? "No charge yet: the first spend opens the first window."
+          : w.endMs === null ? "Calendar-month windows, counted from the first charge." : `The current window opened at ${fmtTime(w.startMs ?? 0n)} and resets at ${fmtTime(w.endMs)}.`
+        lines.push(line("rate", `${fmt(state.rate.limit)} per ${period}`, "chain", left > 0n ? "held" : "outside",
+          `Read from the chain: ${fmt(w.spent)} spent in the current window, ${fmt(left)} of ${fmt(state.rate.limit)} left. ${where}`))
+      }
     }
-    const started = state.startMs === null || nowMs >= state.startMs
-    const unexpired = state.expiryMs === null || nowMs < state.expiryMs
+    const started = nowMs === null || state.startMs === null || nowMs >= state.startMs
+    const unexpired = nowMs === null || state.expiryMs === null || nowMs < state.expiryMs
     if (state.startMs !== null) {
-      lines.push(line("start", `from ${fmtTime(state.startMs)}`, "chain", started ? "held" : "outside",
+      if (nowMs === null) lines.push(line("start", `from ${fmtTime(state.startMs)}`, "chain", "unchecked", NO_CLOCK))
+      else lines.push(line("start", `from ${fmtTime(state.startMs)}`, "chain", started ? "held" : "outside",
         started ? `Started at ${fmtTime(state.startMs)}.` : `Not started: it starts at ${fmtTime(state.startMs)}, in ${fmtDuration(state.startMs - nowMs)}.`))
     }
     if (state.expiryMs !== null) {
-      lines.push(line("expiry", `until ${fmtTime(state.expiryMs)} (exclusive)`, "chain", unexpired ? "held" : "outside",
+      if (nowMs === null) lines.push(line("expiry", `until ${fmtTime(state.expiryMs)} (exclusive)`, "chain", "unchecked", NO_CLOCK))
+      else lines.push(line("expiry", `until ${fmtTime(state.expiryMs)} (exclusive)`, "chain", unexpired ? "held" : "outside",
         unexpired ? `Expires at ${fmtTime(state.expiryMs)}, in ${fmtDuration(state.expiryMs - nowMs)}.` : `Expired at ${fmtTime(state.expiryMs)}, ${fmtDuration(nowMs - state.expiryMs)} ago.`))
     }
     if (h.limits.recipients !== undefined) {
       lines.push(line("recipients", limitValue("recipients", h.limits, scale), "library", "held",
         `Held by the library, in-process, from this handle (the chain object has no recipient list). ${RECIPIENTS_SUCCESSOR}`))
     }
-    const active = started && unexpired
-    const spendableNow = active ? (spendable ?? 0n) : 0n
-    const summary = !active
+    const active = nowMs === null ? null : started && unexpired
+    const spendableNow = active === null ? null : active ? (spendable ?? 0n) : 0n
+    const summary = active === null
+      ? `Could not determine what can be spent now: the chain's clock could not be read, and sweetrust-sui does not substitute this machine's clock for it.`
+      : !active
       ? `Nothing can be spent now: the allowance ${started ? "has expired" : "has not started"}.`
-      : `Up to ${fmt(spendableNow)} can be spent now under the limits Sui holds (the funder's address balance may be lower).`
+      : `Up to ${fmt(spendable ?? 0n)} can be spent now under the limits Sui holds (the funder's address balance may be lower).`
     return deepFreeze({
       network, allowanceId: h.allowanceId, exists: true, at, lifetime, rate,
       start: state.startMs === null ? null : new Date(Number(state.startMs)).toISOString(),
       expiry: state.expiryMs === null ? null : new Date(Number(state.expiryMs)).toISOString(),
-      active, spendableNow: spendableNow.toString(), limits: lines, summary,
+      active, spendableNow: spendableNow === null ? null : spendableNow.toString(), limits: lines, summary,
     })
   }
 

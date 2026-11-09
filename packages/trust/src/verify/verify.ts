@@ -678,7 +678,9 @@ function chainPayment(event: ChainEvent): string | null {
  *   (null amount or recipient), or the verdict has a null `paymentDigest`, which
  *   cannot be proven to be this payment.
  *
- * A chain `failure` moved nothing and is a refusal, never an orphan.
+ * A chain `failure` moved nothing and is a refusal, never an orphan, unless a
+ * receipt@2 claimed that transaction `executed`: then the record contradicts
+ * the chain, and it is a `payment-mismatch`.
  *
  * Two cases have no spend to name, and are reported rather than skipped, because
  * an absence must not read as clean. An `executed` receipt@2 whose transaction
@@ -772,7 +774,10 @@ export function reconcile(args: ReconcileArgs): ReconcileReport {
   }
   const spent = new Set<string>()
   for (const [digest, { event, conflict }] of events) {
-    if (!conflict && event.status === "failure") continue
+    if (!conflict && event.status === "failure") {
+      if (claimedExecuted.has(digest)) report(digest, "payment-mismatch")
+      continue
+    }
     if (conflict || event.status !== "success") {
       report(digest, "payment-mismatch") // never read an unknown status as a refusal
       continue

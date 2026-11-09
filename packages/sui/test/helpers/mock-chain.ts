@@ -8,6 +8,7 @@
  * simulated refusal leaves no digest.
  */
 import type { ClientWithCoreApi } from "@mysten/sui/client"
+import { ObjectError } from "@mysten/sui/client"
 import { Transaction, TransactionDataBuilder } from "@mysten/sui/transactions"
 import { normalizeSuiAddress } from "@mysten/sui/utils"
 import { encodeAllowance, encodeClock, type AllowanceState } from "../../src/allowance-move.ts"
@@ -16,6 +17,9 @@ export const DIGEST = (n: number): string =>
   // Real base58 32-byte digests (any valid one serializes); the suffix keeps them distinct in assertions.
   ["6BrnPQbLBLF864PuGvXJhjuqYHMiv12iKBpgtMwCQ4Kv", "BsoVKz4XUcau1HjHjPiM2bQyQ3Nchbm4W8jNBLchktHg",
     "2SYSrkFnaLtr2y4h4jujzMWZs9ietZKYc6EdSGWSpkGQ", "5f16mfCinZSEWAUff5T4vjn68pT76bUCB4LLfbN29BNE"][n % 4]
+
+/** The digest of the nth transaction this chain was asked to execute: what a receipt must carry. */
+export const signedDigest = (chain: MockChain, n = 0): string => TransactionDataBuilder.getDigestFromBytes(chain.executed[n]!.bytes)
 
 export const ALLOWANCE_ID = normalizeSuiAddress("0xa110")
 export const CAP_ID = normalizeSuiAddress("0xca9")
@@ -28,7 +32,12 @@ export type Finalization =
   | { kind: "failed"; timestampMs: number; error: Record<string, unknown> }
 
 export type Scripted =
-  | ({ digest: string } & Finalization)
+  /**
+   * The node answers with `digest`. The transaction also finalizes under the
+   * digest of its bytes, as on a real chain, unless `unconfirmable` is set: then
+   * only the node's answer exists, and asking for the true digest finds nothing.
+   */
+  | ({ digest: string; unconfirmable?: boolean } & Finalization)
   /**
    * signAndExecuteTransaction throws. `after` sets the state the throw leaves
    * behind; `finalizes` makes the signed transaction ALSO land on chain under
@@ -107,7 +116,8 @@ export function mockChain(initial: AllowanceState | null, clockMs: bigint): Mock
     if (nid === CAP_ID) {
       return { objectId: nid, version: "9", digest: DIGEST(2), owner: { $kind: "AddressOwner", AddressOwner: normalizeSuiAddress("0x1") }, type: "0x2::allowance::AllowanceCap<0x2::balance::Balance<0x2::sui::SUI>>", content: new Uint8Array() }
     }
-    return new Error(`Object ${nid} not found`)
+    // The GraphQL transport's own answer for an object it cannot find.
+    return new ObjectError("notFound", `Object ${nid} not found`, { reason: "notFound", objectId: nid })
   }
 
   const core = {
@@ -156,6 +166,7 @@ export function mockChain(initial: AllowanceState | null, clockMs: bigint): Mock
       }
       const res = buildResult(next, next.digest)
       register(res, next.digest, next.timestampMs)
+      if (next.unconfirmable !== true) register(res, TransactionDataBuilder.getDigestFromBytes(transaction), next.timestampMs)
       if (next.kind === "executed" && next.after !== undefined) chain.state = next.after
       return res
     },
