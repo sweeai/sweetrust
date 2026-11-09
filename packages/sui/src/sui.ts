@@ -180,18 +180,27 @@ const deepFreeze = <T>(v: T): T => {
   return v
 }
 const minBig = (a: bigint, b: bigint): bigint => (a < b ? a : b)
+/** Far above a real coin type: an address, two 128-character identifiers, and room for a few type arguments. */
+const MAX_COIN_TYPE_CHARS = 1024
+const MAX_COIN_TYPE_GENERICS = 16
+/**
+ * `normalizeStructTag`, bounded. The SDK's parser is superlinear in nesting, and
+ * a coin type can come from an agent: 15 KB of nested generics blocked the event
+ * loop for 43 s, and 640 KB ended the process out of memory. Every call in this file goes through here.
+ */
+const parseCoinType = (coinType: string): string => {
+  if (coinType.length > MAX_COIN_TYPE_CHARS || coinType.split("<").length - 1 > MAX_COIN_TYPE_GENERICS) throw new TypeError("not a plausible Sui coin type")
+  return normalizeStructTag(coinType)
+}
 /** Is `asset` the coin a scale is bound to? A malformed asset is not, and never throws here. */
 const boundTo = (coinType: string | null, asset: string): boolean => {
   try {
-    return coinType !== null && coinType === normalizeStructTag(asset)
+    return coinType !== null && coinType === parseCoinType(asset)
   } catch {
     return false
   }
 }
 const normAddr = (a: string): string => normalizeSuiAddress(a)
-/** Far above a real coin type: an address, two 128-character identifiers, and room for a few type arguments. */
-const MAX_COIN_TYPE_CHARS = 1024
-const MAX_COIN_TYPE_GENERICS = 16
 /** `0x` and 64 hex digits, the longest a canonical address can be. */
 const SUI_ADDRESS_CHARS = 66
 /**
@@ -213,11 +222,7 @@ export const suiPaymentSpelling = Object.freeze({
     return canonical
   },
   asset: (coinType: string): string => {
-    // Before the SDK sees it: its parser is superlinear in nesting and runs on
-    // the agent's string, synchronously. 15 KB of nested generics blocked the
-    // event loop for 43 s, and 640 KB ended the process out of memory.
-    if (coinType.length > MAX_COIN_TYPE_CHARS || coinType.split("<").length - 1 > MAX_COIN_TYPE_GENERICS) throw new TypeError("not a plausible Sui coin type")
-    const canonical = normalizeStructTag(coinType)
+    const canonical = parseCoinType(coinType)
     if (!isValidStructTag(canonical) || canonical.includes("/")) throw new TypeError("not a resolved Sui coin type")
     return canonical
   },
@@ -674,7 +679,7 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
     if (typeof name !== "string") throw typeErr("open", "name must be a string")
     let assetType: string
     try {
-      assetType = normalizeStructTag(asset)
+      assetType = parseCoinType(asset)
     } catch {
       throw typeErr("open", `allowance.asset ${JSON.stringify(asset)} is not a Move type`)
     }
@@ -916,7 +921,7 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
       }
       let actual: string
       try {
-        actual = paymentDigest({ network, asset: normalizeStructTag(h.asset), recipient: normAddr(recipientRaw), amount })
+        actual = paymentDigest({ network, asset: parseCoinType(h.asset), recipient: normAddr(recipientRaw), amount })
       } catch (e) {
         return `${refused} This spend of ${payment} has no payment digest to compare, so no authorization can match it: ${clip(e)}`
       }
@@ -937,6 +942,8 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
     if (amount <= 0n || amount > U64_MAX) return notSent("invalid-amount", `Refused in-process; nothing was sent. A spend must be a whole number of base units from 1 to ${U64_MAX}; this one is ${amount}.`)
     if (!validAddr(recipientRaw)) return notSent("invalid-address", `Refused in-process; nothing was sent. The recipient ${JSON.stringify(recipientRaw)} is not a Sui address.`)
     const recipient = normAddr(recipientRaw)
+    // One recipient has one spelling, or a respelling is a new action that a judge's doubt does not cover.
+    if (recipientRaw !== recipient) return notSent("invalid-address", `Refused in-process; nothing was sent. The recipient ${JSON.stringify(recipientRaw)} is not in canonical form; spell it ${recipient}.`)
     // A hand-built handle can carry a limit nobody holds; refuse rather than ignore it (ruling 1).
     const unheld = present.filter((l) => holder(l) === "nobody")
     if (unheld.length > 0) {

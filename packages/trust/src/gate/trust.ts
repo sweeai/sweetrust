@@ -471,7 +471,12 @@ export function allowlisted<T>(
   if (!Sourced.is(candidate)) {
     return { ok: false, reason: `the candidate for ${registryName} was not minted by the gate` }
   }
-  const entry = registry.get(keyValue)
+  let entry: ReturnType<typeof registry.get>
+  try {
+    entry = registry.get(keyValue)
+  } catch (err) {
+    return { ok: false, reason: `the ${registryName} lookup failed (${safely(() => firstLine(err))}) — refusing rather than guessing` }
+  }
   if (entry === undefined) {
     return { ok: false, reason: `'${keyValue}' not in ${registryName}; candidate is ${candidate.describe()}` }
   }
@@ -756,7 +761,9 @@ export async function humanConfirm<T>(
     json.length > HUMAN_CONFIRM_VALUE_CHARS
       ? `${json.slice(0, HUMAN_CONFIRM_VALUE_CHARS)}… [${json.length} chars total; first ${HUMAN_CONFIRM_VALUE_CHARS} shown]`
       : json
-  const question = `Confirm the value with provenance ${candidate.describe()} — value: ${shown}?`
+  // Quoted, as `allowlisted` quotes its key: an origin is a host-chosen string
+  // that can carry message text, and this is the sentence a person says yes to.
+  const question = `Confirm the value with provenance ${show(candidate.describe())} — value: ${shown}?`
   // Everything above ran synchronously, at the call. The await below is the
   // first point at which time passes; nothing after it reads `candidate`.
   //
@@ -1537,6 +1544,12 @@ export interface JudgmentPayment {
   readonly amount: string
   readonly asset: string
   readonly network: string
+  /** The argument the payee came from, so `input.trust[payeeArg]` is its tier. Named by the host, never by an agent. */
+  readonly payeeArg: string
+  /** The argument the amount came from. */
+  readonly amountArg: string
+  /** The argument the asset came from, or null when the sink fixes the asset. */
+  readonly assetArg: string | null
 }
 
 /**
@@ -1580,9 +1593,9 @@ export function mockJudgmentProvider(intent: {
       }
       // Near-edge amounts read as "unsure" — the honest, defer-to-human band.
       if (intent.intendedPayees.has(to) && amount <= intent.maxAmount * 1.1) {
-        return { assessment: "unsure", confidence: 0.35, rationale: `${to} is intended but amount ${amount} slightly over cap ${intent.maxAmount}` }
+        return { assessment: "unsure", confidence: 0.35, rationale: `${action.sink} pays an intended payee, slightly over the cap` }
       }
-      return { assessment: "mismatch", confidence: 0.82, rationale: `${to}/${amount} not in declared intent (payee unintended or amount over cap)` }
+      return { assessment: "mismatch", confidence: 0.82, rationale: `${action.sink} is not in declared intent (payee unintended or amount over cap)` }
     },
   }
 }
@@ -1707,17 +1720,30 @@ type Spelling = (value: string) => string
 const ownOf = (o: object, k: string): unknown => (Object.hasOwn(o, k) ? (o as Record<string, unknown>)[k] : undefined)
 const isStringList = (v: unknown): v is ReadonlyArray<string> => Array.isArray(v) && v.every((x) => typeof x === "string")
 
-/** Is `value` already in the form `spell` gives it? A spelling that throws, or answers with anything but that same string, says no. */
-const isSpelled = (spell: Spelling, value: string): boolean => {
+/**
+ * Is `value` already in the form `spell` gives it? A throw or a non-string
+ * answer is "unchecked", which the host's function and the agent's input can
+ * both cause, so the sentence it produces blames neither.
+ */
+const spellingOf = (spell: Spelling, value: string): "spelled" | "respelled" | "unchecked" => {
   try {
     const answer: unknown = spell(value)
+    if (typeof answer === "string") return answer === value ? "spelled" : "respelled"
     // A promise is no answer. One that rejects must not become an unhandled
     // rejection, which would end the host's process on an agent's input.
-    if (typeof answer !== "string") void Promise.resolve(answer).catch(() => {})
-    return answer === value
+    void Promise.resolve(answer).catch(() => {})
+    return "unchecked"
   } catch {
-    return false
+    return "unchecked"
   }
+}
+
+/** The violation for `value`, naming the argument and never the value; undefined when it is spelled. */
+const spellingViolation = (spell: Spelling | undefined, value: string, argument: string): string | undefined => {
+  if (spell === undefined) return undefined
+  const state = spellingOf(spell, value)
+  if (state === "spelled") return undefined
+  return state === "respelled" ? `${argument} is not in the spelling this sink's rail uses` : `${argument} could not be checked against this sink's spelling`
 }
 
 /** Read `judgment.spelling` once, as own keys. An unknown key is refused: a misspelled `payee` would hold nothing to a spelling and say nothing. */
@@ -1808,7 +1834,7 @@ function bindPurpose(
     if (payment === undefined) throw new TypeError(`${where}: judgment.spelling needs judgment.purposeArgs to name the payment it holds to a spelling`)
     // Refused here for the same reason as the checks below: no call could satisfy it.
     const mustBeSpelled = (field: string, spell: Spelling | undefined, values: ReadonlyArray<string>): void => {
-      if (spell !== undefined && !values.every((value) => isSpelled(spell, value))) {
+      if (spell !== undefined && !values.every((value) => spellingOf(spell, value) === "spelled")) {
         throw new TypeError(`${where}: ${field} is not in the spelling judgment.spelling gives it, so no call could satisfy it`)
       }
     }
@@ -1862,15 +1888,16 @@ function checkPurpose(bound: BoundPurpose, sink: string, values: Readonly<Record
   if (payment === undefined) return null
   const before = violations.length
   const recipient = ownOf(values, payment.payeeArg)
+  const payeeProblem = typeof recipient === "string" ? spellingViolation(payment.payeeSpelling, recipient, payment.payeeArg) : undefined
   const amount = ownOf(values, payment.amountArg)
   const asset = payment.assetArg === undefined ? payment.asset : ownOf(values, payment.assetArg)
   if (typeof recipient !== "string") {
     violations.push(`${payment.payeeArg} must be a string to name a payee`)
-  } else if (payment.payeeSpelling !== undefined && !isSpelled(payment.payeeSpelling, recipient)) {
+  } else if (payeeProblem !== undefined) {
     // One payee has one spelling, or "0xABC" is a new action that escapes a
     // doubt on "0xabc". Refused rather than rewritten, like the amount below,
     // so what runs is what was asked for and `paymentDigest` hashes it as written.
-    violations.push(`${payment.payeeArg} is not in the spelling this sink's rail uses`)
+    violations.push(payeeProblem)
   } else if (bound.payees !== undefined && !bound.payees.includes(recipient)) {
     violations.push(`${payment.payeeArg} is not a payee this purpose names`)
   }
@@ -1890,11 +1917,12 @@ function checkPurpose(bound: BoundPurpose, sink: string, values: Readonly<Record
     }
     if (!within) violations.push(`${payment.amountArg} is over this purpose's maxPerAction`)
   }
+  const assetProblem = typeof asset === "string" && payment.assetArg !== undefined ? spellingViolation(payment.assetSpelling, asset, payment.assetArg) : undefined
   if (typeof asset !== "string") violations.push(`the payment's asset must be a string`)
-  else if (payment.assetArg !== undefined && payment.assetSpelling !== undefined && !isSpelled(payment.assetSpelling, asset)) violations.push(`${payment.assetArg} is not in the spelling this sink's rail uses`)
+  else if (assetProblem !== undefined) violations.push(assetProblem)
   else if (bound.asset !== undefined && asset !== bound.asset) violations.push(`the payment's asset is not the asset this purpose names`)
   if (violations.length > before) return null
-  return Object.freeze({ payee: recipient as string, amount: String(amount), asset: asset as string, network: payment.network })
+  return Object.freeze({ payee: recipient as string, amount: String(amount), asset: asset as string, network: payment.network, payeeArg: payment.payeeArg, amountArg: payment.amountArg, assetArg: payment.assetArg ?? null })
 }
 
 /** The `paymentDigest` a verdict carries for what `checkPurpose` resolved, null when it resolved none. */

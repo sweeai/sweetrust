@@ -222,7 +222,7 @@ an invoice description, a payee name. The agent's own rationale never reaches a 
 values do. The provider also receives `trust`, each argument's tier and provenance, so it can read
 an `untrusted` argument as data rather than as instructions. On a sink that names `purposeArgs` it
 also receives `payment`, the payee, amount, asset and network the sink resolved and the verdict's
-`paymentDigest` binds, so a provider need not work them out again from the arguments. `payment` says
+`paymentDigest` binds, so a provider need not work them out again from the arguments. It also names the arguments they came from (`payeeArg`, `amountArg`, `assetArg`), so `trust[payeeArg]` is the payee's tier. `payment` says
 what the verdict binds and vouches for none of it: a payee can be text an agent wrote, at whatever
 tier the sink admitted, so a judge must read it as data too. Its `amount` comes with no decimals. The
 gate delivers that information; it cannot make a model use it, and a judge that follows instructions in
@@ -254,7 +254,7 @@ verdict or the whole return, so raw model output that echoes an argument is reco
 
 If the sink redacts any argument, it withholds that text and a provider's rationale from the reason
 and leaves a short hash in their place. The receipt still carries the text's full `rationaleHash`.
-Neither hash is salted, so anyone holding the receipt who can guess the text can confirm the guess. A
+Neither hash is salted, so anyone holding the receipt who can guess the text can confirm the guess, which is easy if your provider writes a fixed sentence with a payee or amount in it. A
 sink that redacts nothing records the text as written. And a host that opts in with
 `judgment.rationaleInRefusal`, off by default, returns the same text to the agent on a fresh hold or
 block, whether or not the sink redacts.

@@ -42,7 +42,7 @@ describe("the judge's view of the payment", () => {
     const extra = { purposeArgs: { payee: "to", amount: "amount", asset: "coin" }, network: "sui:testnet" }
     const { sink, seen } = judged(extra, { requires: { to: "verified", amount: "verified", coin: "verified" } })
     await sink({ to: auth("0xabc"), amount: auth("5"), coin: auth("0x2::usdc::USDC") })
-    expect(seen[0]!.payment).toEqual({ payee: "0xabc", amount: "5", asset: "0x2::usdc::USDC", network: "sui:testnet" })
+    expect(seen[0]!.payment).toEqual({ payee: "0xabc", amount: "5", asset: "0x2::usdc::USDC", network: "sui:testnet", payeeArg: "to", amountArg: "amount", assetArg: "coin" })
   })
 
   it("a fixed judgment asset reaches the judge", async () => {
@@ -91,7 +91,7 @@ describe("the judge's view of the payment", () => {
   it("an undeclared argument in warn mode leaves the judge its payment", async () => {
     const { sink, seen } = judged(FIXED, { mode: "warn" })
     await sink({ to: auth("0xabc"), amount: auth("5"), extra: auth("x") })
-    expect(seen[0]!.payment).toEqual({ payee: "0xabc", amount: "5", asset: "0x2::sui::SUI", network: "sui:testnet" })
+    expect(seen[0]!.payment).toEqual({ payee: "0xabc", amount: "5", asset: "0x2::sui::SUI", network: "sui:testnet", payeeArg: "to", amountArg: "amount", assetArg: null })
   })
 
   it("a payment planted on Object.prototype does not reach a sink with no purposeArgs", async () => {
