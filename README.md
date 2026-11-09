@@ -35,7 +35,7 @@ import {
 const keys = generateSigningKeypair()
 const log = new SignedReceiptLog(makeEd25519ReceiptSigner(keys))
 
-// `pay` will only run on a payee whose origin has been verified.
+// A sink wraps a risky action. `pay` only runs on a payee whose origin has been verified.
 const pay = makeSink<{ to: Sourced<string> }, string>({
   name: "pay",
   requires: { to: "verified" },
@@ -52,7 +52,7 @@ const attempt = pay({ to: account })
 console.log(attempt.ok ? attempt.result : attempt.refusal)
 // ⚠ pay refused: to requires verified but is UNTRUSTED (origin: llm:ExtractInvoice)
 
-// An existing value rises only through a declassifier. This one checks a registry you control.
+// A declassifier is the only way to raise an existing value's trust. This one checks a registry you control.
 const vendors = new Map([["acme", Sourced.fromAuthority("ACCT-123", "vendor-db")]])
 const payee = allowlisted(account, vendors, "acme", "vendor-db")
 console.log(payee.ok) // false: the email's account is not the one on file
@@ -61,7 +61,8 @@ console.log(payee.ok) // false: the email's account is not the one on file
 const paid = pay({ to: vendors.get("acme")! })
 console.log(paid.ok && paid.result) // paid ACCT-123
 
-// The sink's refusal and its payment are both on a signed chain. Anyone with the log and the public key can check it.
+// The refusal and the payment are both on a signed chain.
+// Anyone with the log and the public key can check it.
 const report = verifySignedChain(parseJSONL(log.exportJSONL()), {
   trustedSignerPublicKeyHex: publicKeyHexFromPem(keys.publicKeyPem),
 })
@@ -72,11 +73,13 @@ Save it as `demo.ts` and run `node demo.ts` on Node 22.18 or later.
 
 ## What's inside
 
-**`sweetrust/gate` enforces.** Every value carries a trust tier (`untrusted`, `corroborated`, `verified`) and its full provenance, and mixing in untrusted data taints the result. Three declassifiers are the only way to raise an existing value: `allowlisted` checks a registry you control, `corroborate` requires independent sources to agree, and `humanConfirm` asks a person. Trusted host code mints verified values with `Sourced.fromAuthority`.
+**`sweetrust/gate` enforces.** Every value carries a trust tier (`untrusted`, `corroborated`, `verified`) and its full provenance, and mixing in untrusted data taints the result. Three functions called declassifiers are the only way to raise an existing value's trust: `allowlisted` checks a registry you control, `corroborate` requires independent sources to agree, and `humanConfirm` asks a person. Trusted host code mints verified values with `Sourced.fromAuthority`.
 
-Sinks fail closed in `enforce` mode, and you can adopt them gradually through `observe` and `warn`. An optional `judgment` provider you supply can also block an action that passes the tiers but looks wrong.
+Sinks wrap the actions that matter, and in `enforce` mode they refuse anything that falls short. You can adopt them gradually through `observe` and `warn`. An optional `judgment` provider you supply can also block an action that passes the tiers but looks wrong.
 
-**`sweetrust/mandate` delegates.** Authority flows from organization to project to agent, and each tier can only hold a subset of its parent's capabilities. The compiler rejects an out-of-tier grant, and the runtime refuses it again for plain JavaScript callers. With `makeJsonlSignedAuditLive`, every grant, use and revoke lands on an Ed25519-signed, hash-chained log.
+**`sweetrust/mandate` delegates.** A mandate is a recorded grant of authority, like a power of attorney for software. Authority flows from organization to project to agent, and each tier can only hold a subset of its parent's capabilities. The compiler rejects an out-of-tier grant, and the runtime refuses it again for plain JavaScript callers.
+
+With `makeJsonlSignedAuditLive`, every grant, use and revoke lands on an Ed25519-signed, hash-chained log.
 
 Caps and revocation work like this:
 
@@ -112,7 +115,7 @@ trust.revokeMandate({ mandateId: org.id, revokerScope: org, rationale: "Trip is 
 console.log(buy(1)) // AncestorMandateRevoked
 ```
 
-**`sweetrust/verify` proves.** Every sink decision, allowed or refused, can be signed as it happens and exported as JSONL for an auditor. `verifySignedChain` re-checks each signature and hash link using only public material, and it can also check an anchor head you read back from the chain.
+**`sweetrust/verify` proves.** Every sink decision, allowed or refused, can be signed as it happens and exported as JSONL for an auditor. `verifySignedChain` re-checks each signature and hash link using only public material, and it can also compare the log against an anchor, which is a hash of the log that you posted on a blockchain.
 
 A sink does not consult a mandate. To use both on one tool, call `trust.useCapability` inside `execute`, where a refusal throws and the sink records it as `errored`.
 
@@ -120,10 +123,10 @@ A sink does not consult a mandate. To use both on one tool, call `trust.useCapab
 
 - **It runs inside your process.** Code that shares the process can get around it, so use it to define and record your trust boundaries, and do not make it the only thing protecting custody of funds.
 - **Revoking here does not stop money a chain already holds.** `revokeMandate` writes to this log. A limit that must hold when the host is compromised belongs to the payment rail, such as Sui's native `sui::allowance` or a card issuer's limit.
-- **A local log cannot prove it is complete.** Cutting the newest records leaves a valid shorter chain. An anchor you post on-chain yourself catches a cut back past that anchor in a receipt chain, and nothing in the package detects a cut in a mandate log, so protect that store like a key.
+- **A local log cannot prove it is complete.** Cutting the newest records leaves a valid shorter chain. For receipt chains, an anchor you posted yourself catches a cut back past that anchor. Nothing in the package detects a cut in a mandate log, so protect that store like a key.
 - **One process writes each store.** The JSONL stores do not lock across processes, and a second writer forks the chain so every later read refuses.
-- **Authority is possession.** Whoever holds a scope, the client or the store holds that authority, so hand an agent only its own scope.
-- **You bring the judgment.** The `judgment` provider is a seam, and SweeTrust ships no model.
+- **Authority is possession.** A scope is the object that carries a mandate's authority. Whoever holds a scope, the client or the store holds that authority, so hand an agent only its own scope.
+- **You bring the judgment.** SweeTrust ships no model, so you plug in your own as the `judgment` provider.
 - **It is pre-1.0.** A minor version may break an API.
 
 [`SECURITY.md`](packages/trust/SECURITY.md) has the full list and the history of adversarial reviews.
