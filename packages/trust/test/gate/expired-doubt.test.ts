@@ -186,10 +186,11 @@ describe("a doubted action needs its owner", () => {
     clock()
     const log = new ReceiptLog()
     const enforce = build(scripted(UNSURE, MATCH), log)
-    await enforce.sink(pay())
+    await enforce.sink(pay(), { idempotencyKey: "inv-1" })
     wait(HOLD_MS + 1)
-    expect((await build(scripted(MATCH), log, "m1", { mode: "warn" }).sink(pay())).ok).toBe(true)
-    expect((await enforce.sink(pay())).ok).toBe(false)
+    expect((await build(scripted(MATCH), log, "m1", { mode: "warn" }).sink(pay(), { idempotencyKey: "inv-2" })).ok).toBe(true)
+    // Keyed, so this is answered by the doubt and not by duplicate detection.
+    expect((await enforce.sink(pay(), { idempotencyKey: "inv-3" })).receipt.decision).toBe("judgment-held")
     expect(enforce.runs).toHaveLength(0)
   })
 
