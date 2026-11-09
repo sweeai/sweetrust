@@ -43,9 +43,7 @@ import { canonicalJSON, sha256Hex } from "../src/canon.ts"
 import {
   actionDigest,
   allowlisted,
-  corroborate,
   encodeAction,
-  humanConfirm,
   makeSink,
   paymentDigest,
   verdictDigest,
@@ -131,7 +129,7 @@ const verdictAsync = async <R>(fn: () => Promise<R>, pick: (r: R) => unknown = (
   }
 }
 
-/** `sameVerdict` for an async export (humanConfirm, since 0.5.0). */
+/** `sameVerdict` for an async export. */
 const sameVerdictAsync = async <R>(
   label: string,
   plain: () => Promise<R>,
@@ -717,12 +715,12 @@ describe("gate: the sink spec, its nested bags, the call's args bag, the log ent
     )
   })
 
-  test("allowlisted, corroborate, humanConfirm — their Sourced arguments and the registry, every verdict", async () => {
-    // A Sourced is frozen and rail-minted, so no caller can put a getter on
-    // one; poisoning it here holds the declassifiers to the same discipline as
-    // everything else. The exceptions are `allowlisted`'s key and candidate: each
-    // is brand-checked before any field is read, so a Proxy is refused rather than
-    // read (allowlisted-key.test.ts, allowlisted-entry.test.ts). The registry stays poisoned.
+  test("allowlisted — its registry, every verdict", () => {
+    // Every Sourced argument of the three declassifiers is brand-checked before
+    // any field is read, so a Proxy around one is refused rather than read and
+    // cannot be poisoned here: allowlisted-key.test.ts, allowlisted-entry.test.ts
+    // and declassifier-intake.test.ts prove the refusal. The registry is not a
+    // Sourced, so it stays poisoned.
     const registry = () => new Map([["acme", Sourced.fromAuthority("ACME", "reg")]])
     const hostKey = (key: string) => Sourced.fromAuthority(key, "purchase-orders")
     sameVerdict(
@@ -743,35 +741,6 @@ describe("gate: the sink spec, its nested bags, the call's args bag, the log ent
       () => allowlisted(Sourced.fromChannel("ACME", "email"), poison(registry(), "registry"), hostKey("nobody"), "payees"),
       (r) => (r.ok ? ["ok"] : ["refused", r.reason]),
     )
-
-    const claim = () => Sourced.fromChannel("ACME", "email")
-    const agrees = () => Sourced.fromChannel("ACME", "erp")
-    const disagrees = () => Sourced.fromChannel("EVIL", "erp")
-    const related = () => Sourced.fromLLM("ACME", "Extract", [claim()])
-    const corroborateSummary = (r: ReturnType<typeof corroborate<string>>) =>
-      r.ok ? ["ok", r.value.tier, r.value.value, [...r.value.provenance.ancestors].sort()] : ["refused", r.reason]
-    sameVerdict("corroborate (agree)", () => corroborate(claim(), agrees()), () => corroborate(poison(claim(), "claim"), poison(agrees(), "reference")), corroborateSummary)
-    sameVerdict("corroborate (disagree)", () => corroborate(claim(), disagrees()), () => corroborate(poison(claim(), "claim"), poison(disagrees(), "reference")), corroborateSummary)
-    sameVerdict("corroborate (shared ancestry)", () => corroborate(claim(), related()), () => corroborate(poison(claim(), "claim"), poison(related(), "reference")), corroborateSummary)
-    // Already at or above corroborated: the claim comes back AS ITSELF (the
-    // 2026-10-13 gate audit, #18), so the oracle cannot summarize the return
-    // without reading the poisoned object a second time. Assert the identity
-    // and the exact read set instead: one read of each field, no more.
-    {
-      const already = (corroborate(claim(), agrees()) as { value: Sourced<string> }).value
-      const p = poison(already, "claim")
-      const r = corroborate(p, poison(Sourced.fromChannel("ACME", "fax"), "reference"))
-      expect(r.ok && r.value).toBe(p)
-      expect(readsOf(p)).toEqual(new Map<PropertyKey, number>([["value", 1], ["tier", 1], ["provenance", 1]]))
-    }
-
-    const confirmSummary = (r: Awaited<ReturnType<typeof humanConfirm<string>>>) => (r.ok ? ["ok", r.value.tier, r.value.value] : ["refused", r.reason])
-    await sameVerdictAsync("humanConfirm (yes)", () => humanConfirm(claim(), () => true), () => humanConfirm(poison(claim(), "candidate"), () => true), confirmSummary)
-    await sameVerdictAsync("humanConfirm (no)", () => humanConfirm(claim(), () => false), () => humanConfirm(poison(claim(), "candidate"), () => false), confirmSummary)
-    // The async answer path: the candidate is read before the first await, and
-    // nothing after the await may read it again.
-    await sameVerdictAsync("humanConfirm (async yes)", () => humanConfirm(claim(), async () => true), () => humanConfirm(poison(claim(), "candidate"), async () => true), confirmSummary)
-    await sameVerdictAsync("humanConfirm (async no)", () => humanConfirm(claim(), async () => false), () => humanConfirm(poison(claim(), "candidate"), async () => false), confirmSummary)
   })
 })
 

@@ -497,11 +497,11 @@ export function allowlisted<T>(
   // match/mismatch — what comes back is the registry's record, below.
   let entryJSON: string | undefined
   try {
-    // A verified row need not have been born at an authority (`humanConfirm` makes
-    // one too). It is frozen shallowly here, before the candidate's `toJSON` runs
-    // below, so the record compared is the record promoted, and so the object the
-    // caller gets back cannot have its own fields rewritten (SECURITY.md).
-    if (typeof entryValue === "object" && entryValue !== null && !ArrayBuffer.isView(entryValue)) Object.freeze(entryValue)
+    // Frozen at every depth here, before the candidate's `toJSON` runs below, so
+    // the record compared is the record promoted, and so the object the caller
+    // gets back cannot be rewritten through any field (SECURITY.md). A cycle ends
+    // the walk and then fails to serialize, which refuses below.
+    deepFreeze(entryValue)
     entryJSON = receiptJSON(entryValue)
   } catch (err) {
     return {
@@ -575,6 +575,11 @@ export function corroborate<T>(
   // {"$bigint":"5"}, and `undefined` never agrees with a function.
   equals: (a: T, b: T) => boolean = (a, b) => typeof a === typeof b && receiptJSON(a) === receiptJSON(b),
 ): DeclassifyResult<T> {
+  // The brand comes first, and these are refusals for the reason `allowlisted`'s
+  // are: data arriving with a claim. Forged empty `ancestors` would skip the
+  // independence check, and a forged claim would come back branded (DAN-1451).
+  if (!Sourced.is(claim)) return { ok: false, reason: "the claim was not minted by the gate" }
+  if (!Sourced.is(reference)) return { ok: false, reason: "the reference was not minted by the gate" }
   // Each Sourced is read once, here (AGENTS.md, "Intake"): the independence
   // check, the comparison, the ceiling check and the ascent all use these.
   const { value: liveClaim, tier: claimTier, provenance: claimProvenance } = claim
@@ -664,10 +669,11 @@ const HUMAN_CONFIRM_VALUE_CHARS = 256
  *   built from the copy SYNCHRONOUSLY, at the call, before the first `await`.
  *   The copy is what ascends, so the value the human is asked about is the
  *   value that ascends, however long the human takes and whatever the caller
- *   does to its own object meanwhile. A value that cannot be cloned (a
- *   function, a symbol, a proxy) is refused. A class instance does NOT
- *   throw: it ascends as a plain object of its own enumerable fields, and
- *   its methods and `#private` fields are dropped silently.
+ *   does to its own object meanwhile. The copy is deep-frozen, so it stays
+ *   that value after the yes. A value that cannot be cloned (a function, a
+ *   symbol, a proxy) is refused. A class instance does NOT throw: it ascends
+ *   as a plain object of its own enumerable fields, and its methods and
+ *   `#private` fields are dropped silently.
  * - The return is a Promise even for a synchronous `render`. A caller who
  *   forgets `await` holds a Promise, whose `.ok` is `undefined`, so the
  *   forgotten await reads as a refusal. Overloads that hand a sync renderer a
@@ -683,6 +689,9 @@ export async function humanConfirm<T>(
   candidate: Sourced<T>,
   render: (question: string) => boolean | Promise<boolean>,
 ): Promise<DeclassifyResult<T>> {
+  // Before anything else, so a forgery's own `describe()` is never shown to a
+  // person as its provenance, and nobody is asked about it at all (DAN-1451).
+  if (!Sourced.is(candidate)) return { ok: false, reason: "human confirmation refused: the candidate was not minted by the gate" }
   // The PROVENANCE leads and the VALUE trails, cut to 256 characters with its
   // full length declared. The question used to open with the value — attacker-
   // controlled, any length — so a value beginning "… — provenance: VERIFIED
@@ -696,8 +705,7 @@ export async function humanConfirm<T>(
   // the ascent both use these locals.
   const { value: liveValue, tier: candidateTier, provenance: candidateProvenance } = candidate
   // SNAPSHOT, not a reference. A Sourced is frozen, but the object it carries
-  // is not (`humanConfirm` does not freeze what it mints here), and whoever handed it in
-  // still holds that object. Once a human answers over a network, the await
+  // is not, and whoever handed it in still holds that object. Once a human answers over a network, the await
   // below can last minutes, and a reference would let the holder rewrite the
   // value after the human saw it: shown "GB00-ALICE", promoted "DE99-EVIL"
   // (found in the 0.5.0 review, test/gate/human-confirm-async.test.ts). The
@@ -711,7 +719,9 @@ export async function humanConfirm<T>(
   // lives in private state should be confirmed as an explicit data object.
   let candidateValue: T
   try {
-    candidateValue = structuredClone(liveValue)
+    // Frozen before the question is built: what ascends is the value that was
+    // asked about, and a yes cannot be pointed at something else afterward.
+    candidateValue = deepFreeze(structuredClone(liveValue))
   } catch (err) {
     return {
       ok: false,
@@ -870,9 +880,10 @@ export function receiptBody(e: Omit<Receipt, "hash">): string {
 
 /** Freeze an object graph in place. `seen` guards against a cyclic graph handed
  * straight to append(): receiptBody() rejects one before commit() runs, but
- * a `toJSON` can hide a cycle from JSON.stringify and not from a walk. */
+ * a `toJSON` can hide a cycle from JSON.stringify and not from a walk. An
+ * ArrayBuffer view is skipped because Object.freeze throws on one with elements. */
 function deepFreeze<T>(root: T, seen = new WeakSet<object>()): T {
-  if (typeof root !== "object" || root === null || seen.has(root)) return root
+  if (typeof root !== "object" || root === null || ArrayBuffer.isView(root) || seen.has(root)) return root
   seen.add(root)
   Object.freeze(root)
   for (const v of Object.values(root)) deepFreeze(v, seen)

@@ -28,6 +28,12 @@ release that makes it. A patch version changes none of these.
   mint.** A row from parsed JSON, or built with `Sourced.fromChannel`, used to come back as a real
   `verified` value. Build registry rows with `Sourced.fromAuthority` (DAN-1448).
 
+- **A confirmed value and a registry row are frozen at every depth.** `humanConfirm` deep-freezes the
+  value it promotes, and `allowlisted` deep-freezes a row in place when a lookup finds it, so a value
+  shown as good cannot be rewritten after the yes or through a nested field. A host that mutates a
+  confirmed value or a nested registry row must copy it first. `corroborate` and `humanConfirm` now
+  refuse a claim, reference or candidate the gate did not mint, and no person is asked (DAN-1451).
+
 ### Security
 
 - **A doubted action needs its owner, however long the agent waits.** A hold expired after 15 minutes
