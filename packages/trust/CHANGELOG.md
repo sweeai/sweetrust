@@ -147,7 +147,8 @@ unchanged. Only a judged sink's receipts change shape (ADR 0009).
 
 ### Added
 
-- **A hold can settle to its real cost (ADR 0011, amending ADR 0005).** `useCapability` takes an
+- **A hold can settle to its real cost (ADR 0011, amending ADR 0005).** Reusing a hold id after a
+  settle voids that settle, so both invokes count at `amount`. `useCapability` takes an
   optional `holdId`, and `trust.settleCapability({ mandate, capability, holdId, actual })` records what
   the call really cost as a new `settle` event. The limit then counts `actual` in place of the invoke's
   `amount`, at the invoke's own time and still as one call. A settle only goes down and lands at most

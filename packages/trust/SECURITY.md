@@ -272,7 +272,9 @@ a tool call for that: some current models reject forced `tool_choice`.
 (ADR 0011). `actual` is the host's declaration, the same as `amount`: a host that reports too little
 makes the cap count too little. The kernel holds what it can: a hold settles down and at most once, and
 a `settle` line that names no earlier invoke, is out of range, or shares its hold id with another is
-ignored. Whoever holds the client can settle, so hand an agent its scope, never the client.
+ignored. Whoever holds the client can settle, so hand an agent its scope, never the client. Nothing in a
+`makeJsonlAuditLive` store is signed, so anyone who can append to that file can plant a well-formed
+settle and lower the count. Use a signed store where that matters.
 
 ### Amounts are JavaScript numbers
 

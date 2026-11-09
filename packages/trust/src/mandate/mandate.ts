@@ -811,7 +811,10 @@ const assertWithinLimit = (
     if (e.type !== "invoke" || e.capability !== capId) continue
     if (Date.parse(e.timestamp) < since) continue
     usedCount += 1
-    usedAmount += (e.holdId === undefined ? undefined : actuals.get(e.holdId)) ?? e.amount ?? 0
+    const counted: unknown = (e.holdId === undefined ? undefined : actuals.get(e.holdId)) ?? e.amount ?? 0
+    // A malformed amount can only come from a planted line, and it fails closed:
+    // summing it would lower the total or turn it into NaN, which no cap refuses.
+    usedAmount = typeof counted === "number" && Number.isFinite(counted) && counted >= 0 ? usedAmount + counted : Infinity
   }
   const requested = amount ?? 0
   const overCount = limit.count !== undefined && usedCount + 1 > limit.count

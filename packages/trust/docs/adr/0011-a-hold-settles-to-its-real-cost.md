@@ -36,8 +36,8 @@ A new event type, `settle`, records the real cost against a named hold, and the 
    call, so settling never moves spend into another window and frees dollars, never calls.
 4. **A settle is valid only if** exactly one invoke on the mandate carries the hold id, exactly one
    settle carries it, the settle follows that invoke in log order and names its capability, and `actual`
-   is finite and within 0…`amount`. Anything else is ignored and its invoke counts at `amount`, so a bad
-   line can never lower the count.
+   is finite and within 0…`amount`. Anything else is ignored and its invoke counts at `amount`, so a malformed
+   line can never lower the count. On an unsigned store, a well-formed planted settle can.
 5. **`settleCapability` refuses to write what the rule would ignore,** and refuses writing nothing:
    `MandateSettleUnknownHold`, `MandateSettleNoAmount`, `MandateSettleAboveAmount`,
    `MandateSettleDuplicate`, `MandateSettleAmbiguousHold`, and `MandateAmountInvalid` for an `actual`
