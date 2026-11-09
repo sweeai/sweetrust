@@ -720,26 +720,27 @@ describe("gate: the sink spec, its nested bags, the call's args bag, the log ent
   test("allowlisted, corroborate, humanConfirm — their Sourced arguments and the registry, every verdict", async () => {
     // A Sourced is frozen and rail-minted, so no caller can put a getter on
     // one; poisoning it here holds the declassifiers to the same discipline as
-    // everything else. The one exception is `allowlisted`'s key: it is brand-
-    // checked before any field is read, so a Proxy is refused rather than read.
+    // everything else. The exceptions are `allowlisted`'s key and candidate: each
+    // is brand-checked before any field is read, so a Proxy is refused rather than
+    // read (allowlisted-key.test.ts, allowlisted-entry.test.ts). The registry stays poisoned.
     const registry = () => new Map([["acme", Sourced.fromAuthority("ACME", "reg")]])
     const hostKey = (key: string) => Sourced.fromAuthority(key, "purchase-orders")
     sameVerdict(
       "allowlisted (match)",
       () => allowlisted(Sourced.fromChannel("ACME", "email"), registry(), hostKey("acme"), "payees"),
-      () => allowlisted(poison(Sourced.fromChannel("ACME", "email"), "candidate"), poison(registry(), "registry"), hostKey("acme"), "payees"),
+      () => allowlisted(Sourced.fromChannel("ACME", "email"), poison(registry(), "registry"), hostKey("acme"), "payees"),
       (r) => (r.ok ? ["ok", r.value.tier, r.value.value] : ["refused", r.reason]),
     )
     sameVerdict(
       "allowlisted (mismatch)",
       () => allowlisted(Sourced.fromChannel("EVIL", "email"), registry(), hostKey("acme"), "payees"),
-      () => allowlisted(poison(Sourced.fromChannel("EVIL", "email"), "candidate"), poison(registry(), "registry"), hostKey("acme"), "payees"),
+      () => allowlisted(Sourced.fromChannel("EVIL", "email"), poison(registry(), "registry"), hostKey("acme"), "payees"),
       (r) => (r.ok ? ["ok"] : ["refused", r.reason]),
     )
     sameVerdict(
       "allowlisted (absent)",
       () => allowlisted(Sourced.fromChannel("ACME", "email"), registry(), hostKey("nobody"), "payees"),
-      () => allowlisted(poison(Sourced.fromChannel("ACME", "email"), "candidate"), poison(registry(), "registry"), hostKey("nobody"), "payees"),
+      () => allowlisted(Sourced.fromChannel("ACME", "email"), poison(registry(), "registry"), hostKey("nobody"), "payees"),
       (r) => (r.ok ? ["ok"] : ["refused", r.reason]),
     )
 
