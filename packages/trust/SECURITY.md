@@ -305,12 +305,14 @@ report as a statement about those inputs only.
 object it promotes, and `result.value.value` IS the value object you put in the registry, by
 reference. So that nothing holding the result can rewrite the registry through it,
 `Sourced.fromAuthority` freezes an object or array value **in place, shallowly**, the moment it
-becomes an authority value, and `allowlisted` freezes the row **in place, at every depth**, as soon
-as a lookup finds it and before a candidate's code can run. That includes your own nested objects,
-and it happens whether or not the candidate matches. `humanConfirm` deep-freezes the private copy it
-confirms, so what a person said yes to stays what they saw. A Map, Set, Date or buffer can still be
-changed through its own methods, so these are not frozen in effect, typed arrays are left alone, and
-a getter still answers however it likes. So a row holding bytes can be rewritten after it is compared.
+becomes an authority value, and `allowlisted` freezes every own field of the row **in place, at every
+depth**, as soon as a lookup finds it and before a candidate's code can run. That includes your own
+nested objects and anything a row points at, so do not hang a shared object off a row, and it happens
+whether or not the candidate matches. `humanConfirm` refuses a value that is not plain JSON, because a
+Map or bytes would not appear in full in the question, and it deep-freezes the private copy it
+confirms, so what a person said yes to stays what they saw. In a registry row, a Map, Set, Date or
+buffer can still be changed through its own methods, so these are not frozen in effect, typed arrays
+are left alone, and a getter still answers however it likes. So a row holding bytes can be rewritten after it is compared.
 `corroborate` returns a claim already at or above `corroborated` as itself, unfrozen. If you keep
 editing a record after wrapping it, wrap a copy.
 

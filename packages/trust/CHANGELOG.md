@@ -31,8 +31,10 @@ release that makes it. A patch version changes none of these.
 - **A confirmed value and a registry row are frozen at every depth.** `humanConfirm` deep-freezes the
   value it promotes, and `allowlisted` deep-freezes a row in place when a lookup finds it, so a value
   shown as good cannot be rewritten after the yes or through a nested field. A host that mutates a
-  confirmed value or a nested registry row must copy it first. `corroborate` and `humanConfirm` now
-  refuse a claim, reference or candidate the gate did not mint, and no person is asked (DAN-1451).
+  confirmed value or a nested registry row must copy it first. `humanConfirm` now refuses a value that
+  is not plain JSON (a Map, a Set, bytes, a Date), because the question could not show all of it.
+  `corroborate` and `humanConfirm` refuse a claim, reference or candidate the gate did not mint, and
+  no person is asked. `Sourced.fromLLM` throws a `TypeError` on an input the gate did not mint (DAN-1451).
 
 ### Security
 

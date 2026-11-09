@@ -77,6 +77,40 @@ describe("humanConfirm and corroborate take only what the gate minted", () => {
     expect(readsOf(reference).size).toBe(0)
   })
 
+  it("humanConfirm refuses a value its question could not show in full", async () => {
+    const hidden: Array<[string, unknown]> = [
+      ["a Map", { payee: "GOOD", meta: new Map([["iban", "EVIL"]]) }],
+      ["a Set", new Set(["EVIL"])],
+      ["named keys on an array", Object.assign(["GOOD"], { iban: "EVIL" })],
+      ["an ArrayBuffer", new ArrayBuffer(2)],
+      ["a RegExp", /EVIL/],
+      ["bytes", { addr: new Uint8Array([1, 2]) }],
+      ["shared memory", { addr: new Uint8Array(new SharedArrayBuffer(2)) }],
+      ["a Date", { at: new Date(0) }],
+    ]
+    for (const [name, value] of hidden) {
+      const render = vi.fn(() => true)
+      expect(refusal(await humanConfirm(channel(value), render)), name).toContain("could not be copied")
+      expect(render, name).not.toHaveBeenCalled()
+    }
+  })
+
+  it("a declassifier refuses rather than throws on an error that cannot be printed", async () => {
+    const unprintable = Object.create(null) as object
+    const throwing = { toJSON: () => { throw unprintable } }
+    const row = registryOf(Sourced.fromAuthority("ACME", "payee-registry"))
+    refusal(allowlisted(channel(throwing as unknown as string), row, hostKey(), "payee-registry"))
+    refusal(corroborate(channel("ACME"), channel("ACME", "erp-export"), () => { throw unprintable }))
+    const getter = Object.defineProperty({}, "x", { enumerable: true, get: () => { throw unprintable } })
+    refusal(await humanConfirm(channel(getter), () => true))
+  })
+
+  it("fromLLM refuses an input the gate did not mint", () => {
+    const { forged, touched } = forgery()
+    expect(() => Sourced.fromLLM("ACME", "Extract", [forged])).toThrow(TypeError)
+    expect(touched).toEqual([])
+  })
+
   it("genuine input still corroborates and still confirms", async () => {
     const agreed = corroborate(channel("ACME"), channel("ACME", "erp-export"))
     expect(agreed.ok && agreed.value.tier).toBe("corroborated")
@@ -133,12 +167,10 @@ describe("what a declassifier promotes cannot be rewritten, at any depth", () =>
     expect(reason).toContain("could not be serialized")
   })
 
-  it("a typed array inside a row or a confirmed value does not stop the promotion", async () => {
+  it("a typed array inside a row does not stop the promotion", () => {
     const withBytes = () => ({ bytes: new Uint8Array([1, 2]) })
     const r = allowlisted(channel(withBytes()), registryOf(Sourced.fromAuthority(withBytes(), "payee-registry")), hostKey(), "payee-registry")
     expect(r.ok).toBe(true)
-    const confirmed = await humanConfirm(channel(withBytes()), () => true)
-    expect(confirmed.ok).toBe(true)
   })
 
   it("a nested object under a symbol or hidden key is frozen too", () => {

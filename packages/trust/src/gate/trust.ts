@@ -284,7 +284,12 @@ export class Sourced<T> {
     confidence?: number,
   ): Sourced<T> {
     const ancestors = new Set<string>([`llm:${fn}`])
-    for (const input of inputs) for (const a of input.provenance.ancestors) ancestors.add(a)
+    // Ancestry is what `corroborate` tests independence with, so an input the gate
+    // did not mint would launder forged ancestry into a genuine value (DAN-1451).
+    for (const input of inputs) {
+      if (!Sourced.is(input)) throw new TypeError("Sourced.fromLLM: every input must be a value the gate minted")
+      for (const a of input.provenance.ancestors) ancestors.add(a)
+    }
     // confidence is the extractor's self-report; it rides along but does NOT
     // affect tier (Rule 2 — the value is Untrusted no matter how sure the model).
     return new Sourced(CONSTRUCT, value, "untrusted", { origin: `llm:${fn}`, ancestors, chain: [], confidence })
@@ -362,8 +367,8 @@ Object.freeze(Sourced.prototype)
 // straight in, so the value that was compared and the value that was promoted
 // were separate reads of the caller's object (the 2026-10-13 rail audit,
 // test/intake-poison.test.ts). A Sourced is frozen and cannot carry a getter,
-// so no caller could exploit that; the intake rule in AGENTS.md holds for
-// every export without an exception because of this.
+// so no caller could exploit that; every export meets the intake rule in
+// AGENTS.md, a `Sourced` argument by a brand check before any field is read.
 function ascend<T>(prev: { readonly value: T; readonly provenance: Provenance }, event: UpgradeEvent, mergedAncestors?: ReadonlySet<string>): Sourced<T> {
   return construct(prev.value, event.to, {
     origin: prev.provenance.origin,
@@ -499,15 +504,15 @@ export function allowlisted<T>(
   try {
     // Frozen at every depth here, before the candidate's `toJSON` runs below, so
     // the record compared is the record promoted, and so the object the caller
-    // gets back cannot be rewritten through any field. Bytes and the contents of
-    // a Map or Set are the exception (SECURITY.md). A cycle ends the walk and then
-    // fails to serialize, which refuses below.
-    freezePromoted(entryValue)
+    // gets back cannot be rewritten through any own field. Bytes and the contents
+    // of a Map or Set are the exception (SECURITY.md). A cycle ends the walk and
+    // then fails to serialize, which refuses below.
+    freezeRow(entryValue)
     entryJSON = receiptJSON(entryValue)
   } catch (err) {
     return {
       ok: false,
-      reason: `'${keyValue}' IS in ${registryName} but the ${registryName} record could not be serialized for comparison (${firstLine(err)}) — refusing rather than guessing; candidate is ${candidate.describe()}`,
+      reason: `'${keyValue}' IS in ${registryName} but the ${registryName} record could not be serialized for comparison (${safely(() => firstLine(err))}) — refusing rather than guessing; candidate is ${candidate.describe()}`,
     }
   }
   let candidateJSON: string | undefined
@@ -516,7 +521,7 @@ export function allowlisted<T>(
   } catch (err) {
     return {
       ok: false,
-      reason: `'${keyValue}' IS in ${registryName} but the candidate could not be serialized for comparison (${firstLine(err)}) — refusing rather than guessing`,
+      reason: `'${keyValue}' IS in ${registryName} but the candidate could not be serialized for comparison (${safely(() => firstLine(err))}) — refusing rather than guessing`,
     }
   }
   if (entryJSON !== candidateJSON) {
@@ -593,7 +598,8 @@ export function corroborate<T>(
   // The judged path's rule (the 2026-11-08 audit, G2). A value with a `toJSON`
   // or a getter compared as one thing and was promoted as another, and the
   // receipt recorded the good one. Plain JSON has no code in it, so what is
-  // compared is what it is, and the frozen copy compared is the copy promoted.
+  // compared is what it is, and when this ascends the frozen copy compared is the
+  // copy promoted. A claim already at or above corroborated comes back as itself.
   // The reasons are fixed strings: what was refused is caller-shaped.
   let claimValue: T
   let referenceValue: T
@@ -615,7 +621,7 @@ export function corroborate<T>(
   } catch (err) {
     return {
       ok: false,
-      reason: `could not compare — equals threw (${firstLine(err)}); claim ${claim.describe()} vs reference ${reference.describe()}`,
+      reason: `could not compare — equals threw (${safely(() => firstLine(err))}); claim ${claim.describe()} vs reference ${reference.describe()}`,
     }
   }
   if (!agree) {
@@ -672,7 +678,9 @@ const HUMAN_CONFIRM_VALUE_CHARS = 256
  *   value that ascends, however long the human takes and whatever the caller
  *   does to its own object meanwhile. The copy is deep-frozen, so it stays
  *   that value after the yes. A value that cannot be cloned (a function, a
- *   symbol, a proxy) is refused. A class instance does NOT throw: it ascends
+ *   symbol, a proxy) is refused, and so is a copy that is not plain JSON (a
+ *   Map, a Set, bytes, a Date, named keys on an array), because the question
+ *   could not show all of it. A class instance does NOT throw: it ascends
  *   as a plain object of its own enumerable fields, and its methods and
  *   `#private` fields are dropped silently.
  * - The return is a Promise even for a synchronous `render`. A caller who
@@ -720,13 +728,17 @@ export async function humanConfirm<T>(
   // lives in private state should be confirmed as an explicit data object.
   let candidateValue: T
   try {
-    // Frozen before the question is built: what ascends is the value that was
-    // asked about, and a yes cannot be pointed at something else afterward.
-    candidateValue = freezePromoted(structuredClone(liveValue))
+    // Plain JSON only, checked on the copy, so the question shows all of what
+    // ascends: a Map renders as {}, and bytes over shared memory can change during
+    // the wait. Frozen before the question is built, so a yes cannot be pointed at
+    // something else afterward.
+    const copy = structuredClone(liveValue)
+    copyExact(copy, true)
+    candidateValue = deepFreeze(copy)
   } catch (err) {
     return {
       ok: false,
-      reason: `human confirmation refused: the candidate (${candidate.describe()}) could not be copied for confirmation (${firstLine(err)})`,
+      reason: `human confirmation refused: the candidate (${candidate.describe()}) could not be copied for confirmation as plain data a person can read (${safely(() => firstLine(err))})`,
     }
   }
   let json: string
@@ -735,7 +747,7 @@ export async function humanConfirm<T>(
   } catch (err) {
     return {
       ok: false,
-      reason: `human confirmation refused: the candidate (${candidate.describe()}) could not be rendered for the question (${firstLine(err)})`,
+      reason: `human confirmation refused: the candidate (${candidate.describe()}) could not be rendered for the question (${safely(() => firstLine(err))})`,
     }
   }
   const shown =
@@ -881,26 +893,29 @@ export function receiptBody(e: Omit<Receipt, "hash">): string {
 
 /** Freeze an object graph in place. `seen` guards against a cyclic graph handed
  * straight to append(): receiptBody() rejects one before commit() runs, but
- * a `toJSON` can hide a cycle from JSON.stringify and not from a walk. Every own
- * data field is walked, a symbol or non-enumerable one too, and no getter runs. */
-function deepFreeze<T>(root: T, seen = new WeakSet<object>(), skipViews = false): T {
+ * a `toJSON` can hide a cycle from JSON.stringify and not from a walk. */
+function deepFreeze<T>(root: T, seen = new WeakSet<object>()): T {
   if (typeof root !== "object" || root === null || seen.has(root)) return root
-  if (skipViews && ArrayBuffer.isView(root)) return root
   seen.add(root)
   Object.freeze(root)
-  for (const key of Reflect.ownKeys(root)) {
-    const field = Object.getOwnPropertyDescriptor(root, key)
-    if (field !== undefined && "value" in field) deepFreeze(field.value, seen, skipViews)
-  }
+  for (const v of Object.values(root)) deepFreeze(v, seen)
   return root
 }
 
 /**
- * deepFreeze for a value a declassifier promotes, which can hold bytes. Object.freeze
- * throws on a typed array with elements, so one is left alone here. Only here: the
- * receipt log relies on that throw to keep a writable buffer out of a receipt.
+ * Freeze a registry row in place, every own data field, a symbol or non-enumerable
+ * one too, and run no getter. A row need not be plain JSON, so unlike `deepFreeze`,
+ * whose throw keeps a writable buffer out of a receipt, this leaves bytes alone.
  */
-const freezePromoted = <T>(value: T): T => deepFreeze(value, new WeakSet<object>(), true)
+function freezeRow(root: unknown, seen = new WeakSet<object>()): void {
+  if (typeof root !== "object" || root === null || ArrayBuffer.isView(root) || seen.has(root)) return
+  seen.add(root)
+  Object.freeze(root)
+  for (const key of Reflect.ownKeys(root)) {
+    const field = Object.getOwnPropertyDescriptor(root, key)
+    if (field !== undefined && "value" in field) freezeRow(field.value, seen)
+  }
+}
 
 /** Everything a receipt may hold: `receiptBody`'s nine fields and the hash. A tenth key would sit outside the hash. */
 const RECEIPT_KEYS: ReadonlyArray<string> = ["seq", "prevHash", "at", "sink", "decision", "args", "reason", "verdict", "approval", "hash"]
