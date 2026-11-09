@@ -16,8 +16,9 @@ release that makes it. A patch version changes none of these.
 
 ## [0.5.1] — 2026-11-08
 
-A security patch. No call shape, error union, receipt hash or signed preimage changes, so upgrading
-from 0.5.0 needs no code change and existing logs verify as before. Upgrade if untrusted code can
+A security patch. No call shape, error union, receipt hash or signed preimage changes, and existing
+logs verify as before. Code that compares capability objects needs one change, described under
+*Changed*. Upgrade if untrusted code can
 hand objects to this library in your process, or if a revoke rationale can quote untrusted text.
 
 ### Security
@@ -36,9 +37,18 @@ hand objects to this library in your process, or if a revoke rationale can quote
   rationale that is not what its type says is now refused.
 - **The in-memory test signer checks the key.** Its `verify` ignored the record's key, so a forged
   record could pass a real pin.
-- **Smaller closes.** A child can no longer be issued under a revoked ancestor; capability elements
-  and `signed()` records are frozen; a store file is created mode 600 (an existing file keeps its
-  mode).
+- **A sink reads every argument before rendering any.** A getter on a later argument could edit an
+  earlier one after its receipt entry was written, so the receipt and `execute()` disagreed.
+- **Smaller closes.** A child can no longer be issued under a revoked ancestor; `signed()` records
+  are frozen; a store file is created mode 600 (an existing file keeps its mode).
+
+### Changed
+
+- A scope's `capabilities` elements are now its own copies, so `scope.capabilities.includes(cap)`
+  and `=== cap` are false where they were true. Compare `.key`. Extra fields on a capability object
+  are dropped.
+- In plain JavaScript, a `grantor` or `triggerSource` that is not what its type says now throws. That
+  includes `triggerSource: null`.
 
 ### Documentation
 

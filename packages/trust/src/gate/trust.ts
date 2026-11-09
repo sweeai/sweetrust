@@ -1166,8 +1166,16 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
         return `[unrecordable: ${why}]`
       }
     }
+    // Every argument is read before any is rendered (the 2026-11-08 series
+    // review). Rendering inside the read loop let a getter on a later key edit
+    // an earlier argument's object after its receipt entry was written.
+    const read: Record<string, unknown> = Object.create(null)
+    for (const key of Object.keys(cfg.requires)) read[key] = (args as Record<string, unknown>)[key]
+    for (const key of Object.keys(args)) {
+      if (!Object.hasOwn(cfg.requires, key)) read[key] = (args as Record<string, unknown>)[key]
+    }
     for (const key of Object.keys(cfg.requires) as Array<keyof Args & string>) {
-      const arg = args[key] // the ONE read; everything below, and execute(), sees this binding
+      const arg = read[key] as Args[typeof key] // the ONE read is above; everything below, and execute(), sees this binding
       if (arg === undefined) {
         violations.push(`${key} requires ${cfg.requires[key]} but was not provided`)
         continue
@@ -1222,7 +1230,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
     // Both halves are fixed: it is always RECORDED, and in enforce mode it is a
     // violation. A sink receiving an argument it did not declare is a spec/call
     // mismatch, and fail-closed means refuse rather than guess an appetite.
-    for (const key of Object.keys(args) as Array<keyof Args & string>) {
+    for (const key of Object.keys(read) as Array<keyof Args & string>) {
       // ── Own-key test, not `in` (2026-08-31) ─────────────────────────────
       // This was `if (key in cfg.requires) continue`. `in` walks the
       // prototype chain, and `cfg.requires` is a plain object literal, so
@@ -1239,7 +1247,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
       // tool-calls, which is this package's stated target: the argument names
       // are chosen by whatever wrote the tool schema.
       if (Object.hasOwn(cfg.requires, key)) continue
-      const arg = args[key]
+      const arg = read[key] as Args[typeof key]
       // Was `arg instanceof Sourced` until DAN-904. Same reasoning as the
       // declared path above: `instanceof` asserts "has our prototype", which is
       // weaker than what it reads as. Both paths now use one brand check, so

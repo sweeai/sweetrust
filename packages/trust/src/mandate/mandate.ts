@@ -131,6 +131,14 @@ const assertCapabilityIdentifierClean = (key: string): void => {
 }
 
 /**
+ * A grantor is a string or the issue is refused. A `toJSON` on it would run
+ * between the limit check and the record (the 0.5.1 review, 2026-11-08).
+ */
+const assertGrantorIsString = (grantor: unknown): void => {
+  if (typeof grantor !== "string") throw new TypeError("grantor must be a string")
+}
+
+/**
  * Generate a sortable identifier with crypto-strong randomness.
  *
  * Format: MAN_<base36-ms-timestamp>_<16-hex-chars-from-crypto.randomBytes>.
@@ -965,6 +973,7 @@ export const issueOrgMandate = <Caps extends ReadonlyArray<Capability>>(args: {
 }, audit: MandateAuditService): MandateScope<Caps, "organization", null> => {
   // Every caller-supplied field is read exactly once (the 2026-10-13 mandate audit).
   const { grantor, rationale } = args
+  assertGrantorIsString(grantor)
   const capabilities = captureCapabilities(args.capabilities)
   const capabilityIds = resolveCapabilityIds(capabilities)
   const limits = captureLimits(args.limits, capabilityIds)
@@ -1041,6 +1050,7 @@ export const issueProjectMandate = <
 > => {
   // Every caller-supplied field is read exactly once (the 2026-10-13 mandate audit).
   const { grantor, grantorScope, rationale } = args
+  assertGrantorIsString(grantor)
   const capabilities = captureCapabilities(args.capabilities)
   const capabilityIds = resolveCapabilityIds(capabilities)
   const limits = captureLimits(args.limits, capabilityIds)
@@ -1153,6 +1163,7 @@ export const issueAgentMandate = <
 > => {
   // Every caller-supplied field is read exactly once (the 2026-10-13 mandate audit).
   const { grantor, grantorScope, rationale } = args
+  assertGrantorIsString(grantor)
   const capabilities = captureCapabilities(args.capabilities)
   const capabilityIds = resolveCapabilityIds(capabilities)
   const limits = captureLimits(args.limits, capabilityIds)
