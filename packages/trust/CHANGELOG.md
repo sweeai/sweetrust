@@ -54,7 +54,9 @@ release that makes it. A patch version changes none of these.
 
 - **The provenance in a confirmation question is quoted.** A channel or authority name that held agent
   text could write a second line reading `Confirm VERIFIED (origin: authority:bank)` into the question
-  a person answers. `Sourced.describe` itself is unchanged (DAN-1458).
+  a person answers. The origin is now escaped and cut to 64 characters, so it cannot pose as the value or
+  as the gate's own upgrades, and invisible characters in the value show as escapes. `Sourced.describe`
+  itself is unchanged (DAN-1458).
 - **`allowlisted` refuses when its registry throws.** It used to throw. No value ascended either way
   (DAN-1458).
 - **`mockJudgmentProvider` no longer writes the payee, amount or cap into its rationale**, since a fixed

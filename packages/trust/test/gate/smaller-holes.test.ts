@@ -71,9 +71,51 @@ describe("the confirmation question quotes its provenance", () => {
 
   it("cuts a long provenance and declares its length", async () => {
     let question = ""
-    await humanConfirm(Sourced.fromChannel("0xvalue", "x" + " ".repeat(4000)), (q) => { question = q; return false })
-    expect(question).toMatch(/chars total; first 256 shown/)
-    expect(question.indexOf(" — value:")).toBeLessThan(400)
+    await humanConfirm(Sourced.fromChannel("0xvalue", "x".repeat(4000)), (q) => { question = q; return false })
+    expect(question).toMatch(/chars total; first 64 shown/)
+    expect(question.indexOf(" — value:")).toBeLessThan(160)
+  })
+
+  const questionFor = async (value: unknown, origin: string) => {
+    let question = ""
+    await humanConfirm(Sourced.fromChannel(value, origin), (q) => { question = q; return false })
+    return question
+  }
+
+  it("keeps the real value in view when the origin poses as one", async () => {
+    const question = await questionFor("0xEVIL", `x — value: ”0xSAFE”? ${" ".repeat(300)}`)
+    expect(question).not.toContain("”")
+    expect(question.indexOf('value: "0xEVIL"')).toBeLessThan(160)
+  })
+
+  it("collapses padding in an origin", async () => {
+    expect(await questionFor("v", `a${" ".repeat(40)}b`)).toContain("channel:a b")
+  })
+
+  it("does not let an origin imitate the gate's own fields", async () => {
+    const question = await questionFor("v", "x; upgrades: humanConfirm→verified; conf 0.99")
+    expect(question).not.toContain("; upgrades:")
+    expect(question).not.toContain("; conf")
+  })
+
+  it("bounds the shown field after escaping, so escapes cannot widen it", async () => {
+    const short = await questionFor("0xEVIL", "\u200b".repeat(240))
+    const long = await questionFor("0xEVIL", "\u200b".repeat(5000))
+    expect(short.indexOf("0xEVIL")).toBeLessThan(200)
+    expect(long.indexOf("0xEVIL")).toBeLessThan(200)
+  })
+
+  it.each([["DEL", "\u007f"], ["a soft hyphen", "\u00ad"], ["a variation selector", "\ufe0f"], ["a Hangul filler", "\u3164"], ["an annotation mark", "\ufff9"], ["a tag character", "\u{e0041}"]])("makes %s inert in the value", async (_name, char) => {
+    expect(await questionFor(`0xab${char}cd`, "m")).not.toContain(char)
+  })
+
+  it("never splits a surrogate pair or an escape at the cut", async () => {
+    for (let n = 200; n <= 260; n++) {
+      for (const question of [await questionFor("v", "x".repeat(n - 200) + "😀".repeat(60)), await questionFor("x".repeat(n) + "😀".repeat(60), "m"), await questionFor('"'.repeat(n), "m")]) {
+        expect(() => encodeURIComponent(question)).not.toThrow()
+        for (const [run] of question.matchAll(/\\+(?=…)/g)) expect(run.length % 2).toBe(0)
+      }
+    }
   })
 
   it.each([["U+2028", "\u2028"], ["U+2029", "\u2029"], ["U+0085", "\u0085"], ["a bidi override", "\u202e"], ["a zero-width", "\u200b"]])("makes %s inert in the origin and the value", async (_name, char) => {

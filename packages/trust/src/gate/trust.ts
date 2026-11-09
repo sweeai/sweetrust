@@ -331,15 +331,20 @@ export class Sourced<T> {
 
   /** One-line provenance rendering — what the human sees at a refusal. */
   describe(): string {
-    const hops = this.provenance.chain.map((u) => `${u.declassifier}→${u.to}`).join(", ")
-    // `typeof === "number"`, not `!== undefined`: a value rehydrated from JSON
-    // carries `null`, and `null.toFixed` threw here — inside the enforce sink's
-    // declared loop, before any receipt (the 2026-10-13 gate audit). Anything
-    // that is not a number renders as "not measured".
-    const confidence = this.provenance.confidence
-    const conf = typeof confidence === "number" ? `; conf ${confidence.toFixed(2)}` : ""
-    return `${this.tier.toUpperCase()} (origin: ${this.provenance.origin}${hops ? `; upgrades: ${hops}` : ""}${conf})`
+    return provenanceLine(this.tier, this.provenance, this.provenance.origin)
   }
+}
+
+/** The line `describe()` returns. `originText` is separate so the confirmation question can show an inert origin in the same sentence. */
+function provenanceLine(tier: string, provenance: Sourced<unknown>["provenance"], originText: string): string {
+  const hops = provenance.chain.map((u) => `${u.declassifier}→${u.to}`).join(", ")
+  // `typeof === "number"`, not `!== undefined`: a value rehydrated from JSON
+  // carries `null`, and `null.toFixed` threw here — inside the enforce sink's
+  // declared loop, before any receipt (the 2026-10-13 gate audit). Anything
+  // that is not a number renders as "not measured".
+  const confidence = provenance.confidence
+  const conf = typeof confidence === "number" ? `; conf ${confidence.toFixed(2)}` : ""
+  return `${tier.toUpperCase()} (origin: ${originText}${hops ? `; upgrades: ${hops}` : ""}${conf})`
 }
 
 // The class object and its prototype are frozen so that `Sourced.is` and
@@ -474,7 +479,7 @@ export function allowlisted<T>(
   let entry: ReturnType<typeof registry.get>
   try {
     entry = registry.get(keyValue)
-  } catch (err) {
+  } catch {
     // A fixed sentence: a database error can carry a connection string, and a reason can reach an agent.
     return { ok: false, reason: `the ${registryName} lookup failed, so it is refused rather than guessed` }
   }
@@ -667,12 +672,33 @@ export function corroborate<T>(
 
 /** How much of a candidate's JSON humanConfirm puts in front of the human. */
 const HUMAN_CONFIRM_VALUE_CHARS = 256
-/** Characters JSON leaves raw that a renderer can act on: line separators, bidi overrides, C1 controls, zero-widths. */
-const QUESTION_UNSAFE = /[\u0080-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g
-/** One already-quoted field of the question: cut to length with its full length declared, then made inert. For display only. */
-const forQuestion = (quoted: string): string =>
-  (quoted.length > HUMAN_CONFIRM_VALUE_CHARS ? `${quoted.slice(0, HUMAN_CONFIRM_VALUE_CHARS)}… [${quoted.length} chars total; first ${HUMAN_CONFIRM_VALUE_CHARS} shown]` : quoted)
-    .replace(QUESTION_UNSAFE, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`)
+/** How much of a candidate's origin it shows. Short, so that the real value stays inside a one-line preview however long the origin is. */
+const HUMAN_CONFIRM_ORIGIN_CHARS = 64
+/** Characters JSON leaves raw that a renderer can act on or a person cannot see: line separators, bidi overrides, controls, zero-widths, tag characters. */
+const QUESTION_UNSAFE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]/gu
+/** What an origin may not hold raw: anything outside printable ASCII, the quote that closes its field, and the punctuation that separates the gate's own fields. */
+const ORIGIN_UNSAFE = /[^\x20-\x7e]|["\\;()]/gu
+/** One unbreakable unit of an escaped field: an escape, or one whole code point. */
+const QUESTION_UNIT = /\\u\{[0-9a-f]+\}|\\u[0-9a-f]{4}|\\.|[\s\S]/gu
+const inertChar = (c: string): string => {
+  const code = c.codePointAt(0)!
+  return code > 0xffff ? `\\u{${code.toString(16)}}` : `\\u${code.toString(16).padStart(4, "0")}`
+}
+/** Cut last, after escaping, on a unit boundary, so an escape or a surrogate pair is never split and the limit is what is really shown. */
+const cutForQuestion = (escaped: string, limit: number): string => {
+  if (escaped.length <= limit) return escaped
+  let kept = 0
+  for (const match of escaped.matchAll(QUESTION_UNIT)) {
+    if (kept + match[0].length > limit) break
+    kept += match[0].length
+  }
+  return `${escaped.slice(0, kept)}… [${escaped.length} chars total; first ${kept} shown]`
+}
+/** The value, already quoted as JSON, made inert and cut. For display only. */
+const valueForQuestion = (quoted: string): string => cutForQuestion(quoted.replace(QUESTION_UNSAFE, inertChar), HUMAN_CONFIRM_VALUE_CHARS)
+/** A host-chosen origin that can carry agent text: padding collapsed, escaped and cut, so it cannot pose as the value or as the fields the gate writes. For display only. */
+const originForQuestion = (origin: string): string =>
+  cutForQuestion(origin.replace(/ {2,}/g, " ").replace(ORIGIN_UNSAFE, (c) => (c === '"' || c === "\\" ? `\\${c}` : inertChar(c))), HUMAN_CONFIRM_ORIGIN_CHARS)
 
 /**
  * Human confirmation → Verified. The provenance is RENDERED to the human
@@ -720,7 +746,8 @@ export async function humanConfirm<T>(
   // controlled, any length — so a value beginning "… — provenance: VERIFIED
   // (origin: authority:payee-registry)?" followed by 4,000 spaces put a forged
   // provenance where a one-line renderer shows it and the real one off-screen
-  // (the 2026-10-13 gate audit). The provenance string is ours; it goes first.
+  // (the 2026-10-13 gate audit). The provenance goes first, and its origin,
+  // the one part a host chooses, is made inert below (DAN-1458).
   // Through receiptJSON, in a try: JSON.stringify threw on a bigint candidate
   // and the human never saw a question (the 2026-10-13 gate audit). A value
   // that cannot be rendered cannot be confirmed — refuse, naming why.
@@ -764,10 +791,13 @@ export async function humanConfirm<T>(
       reason: `human confirmation refused: the candidate (${candidate.describe()}) could not be rendered for the question (${safely(() => firstLine(err))})`,
     }
   }
-  const shown = forQuestion(json)
-  // Quoted, as `allowlisted` quotes its key: an origin is a host-chosen string
-  // that can carry message text, and this is the sentence a person says yes to.
-  const question = `Confirm the value with provenance ${forQuestion(show(candidate.describe()))} — value: ${shown}?`
+  const shown = valueForQuestion(json)
+  // An origin is a host-chosen string that can carry message text, and this is
+  // the sentence a person says yes to. Only the origin is escaped and cut: the
+  // tier, upgrades and confidence are the gate's own, so a long origin cannot
+  // push them out of view and a forged one cannot imitate them.
+  const provenanceShown = provenanceLine(candidateTier, candidateProvenance, originForQuestion(candidateProvenance.origin))
+  const question = `Confirm the value with provenance "${provenanceShown}" — value: ${shown}?`
   // Everything above ran synchronously, at the call. The await below is the
   // first point at which time passes; nothing after it reads `candidate`.
   //

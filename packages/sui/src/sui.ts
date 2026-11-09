@@ -205,6 +205,8 @@ const boundTo = (coinType: string | null, asset: string): boolean => {
 const normAddr = (a: string): string => normalizeSuiAddress(a)
 /** `0x` and 64 hex digits, the longest a canonical address can be. */
 const SUI_ADDRESS_CHARS = 66
+/** An agent's string as a refusal quotes it: short, because a refusal copies what it quotes and can reach an agent or a log. */
+const quotedShort = (text: string): string => JSON.stringify(text.length > 80 ? `${text.slice(0, 80)}…` : text)
 /**
  * Sui's canonical spelling of a payee and a coin type, for a judged sink's
  * `judgment.spelling`. A sink holding its payment to this refuses a respelled
@@ -312,6 +314,10 @@ function snapshotHandle(where: string, h: SuiAllowance): SuiAllowance {
     if (typeof v !== "string") throw typeErr(where, `allowance.${k} must be a string`)
   }
   if (!boundedCoinType(asset as string)) throw typeErr(where, "allowance.asset is too long or too nested to be a coin type")
+  // `Transaction.coin` lowercases these. A string past V8's maximum once lowercased ends the process, uncatchably.
+  for (const [k, v] of [["allowanceId", allowanceId], ["capId", capId], ["funder", funder], ["spender", spender]] as const) {
+    if ((v as string).length > SUI_ADDRESS_CHARS) throw typeErr(where, `allowance.${k} is too long to be an address`)
+  }
   const held = snapshotLimits(where, limits)
   // open() refuses a bad window as a result (EBadRateLimit), so a handle that
   // carries one was not made by open(). Caught here, before anything is sent,
@@ -684,8 +690,11 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
     try {
       assetType = parseCoinType(asset)
     } catch {
-      throw typeErr("open", `allowance.asset ${JSON.stringify(asset)} is not a Move type`)
+      throw typeErr("open", `allowance.asset ${quotedShort(asset)} is not a Move type`)
     }
+    // Short-form addresses grow when normalized, and the handle holds the normalized form. Refused
+    // here, before anything is sent, or open would issue a handle that spend and revoke then refuse.
+    if (!boundedCoinType(assetType)) throw typeErr("open", "allowance.asset is too long or too nested, once normalized, to be a coin type")
     const funder = normAddr(signer.toSuiAddress())
     const scale = scaleFor(assetType)
     const present = presentLimits(limits)
@@ -911,20 +920,24 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
     /**
      * Why this payment is not authorized, or null when it is. The token is spent
      * here against the digest of the values this adapter would actually send, so
-     * a token judged over anything else, a non-canonical address included, fails
-     * closed. Spending it is the attempt: a later refusal does not hand it back.
+     * a token judged over anything else fails closed. A genuine token presented
+     * with a recipient that is not canonical is left unspent, and that spend is
+     * refused below as `invalid-address`. Past that check, spending the token is
+     * the attempt: a later refusal does not hand it back.
      */
     const unauthorized = (): string | null => {
       const refused = "Refused in-process; nothing was sent."
-      const payment = `${amountText} to ${validAddr(recipientRaw) ? normAddr(recipientRaw) : JSON.stringify(recipientRaw)} on ${network}`
+      const payment = `${amountText} to ${validAddr(recipientRaw) ? normAddr(recipientRaw) : quotedShort(recipientRaw)} on ${network}`
+      const noSinkIssued = `${refused} This spend of ${payment} presented an authorization that no sink issued. A verdict digest or a copied object is not an authorization: this adapter spends the one-shot token a sink hands its execute().`
       if (authorization === undefined) {
         return authorizedBy === null
           ? `${refused} This adapter requires every spend to name the verdict that approved it (requireAuthorization), and this spend of ${payment} named none.`
           : `${refused} This spend of ${payment} names a verdict by digest and presents no authorization. A digest is not an authorization: this adapter spends the one-shot token a sink hands its execute().`
       }
-      // A token is spent only on a spend that could go. A recipient refused below keeps its token,
-      // and validAddr comes first so that nothing lowercases an unbounded string.
-      if (!validAddr(recipientRaw) || recipientRaw !== normAddr(recipientRaw)) return null
+      // A forgery is refused as a forgery whatever the recipient. A genuine token is not spent on a
+      // recipient refused below as `invalid-address`, the one refusal that needs nothing but the argument.
+      // validAddr comes first so that nothing lowercases an unbounded string.
+      if (!validAddr(recipientRaw) || recipientRaw !== normAddr(recipientRaw)) return SpendAuthorization.is(authorization) ? null : noSinkIssued
       let actual: string
       try {
         actual = paymentDigest({ network, asset: parseCoinType(h.asset), recipient: normAddr(recipientRaw), amount })
@@ -937,7 +950,7 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
       if (spent.reason === "wrong-payment" && SpendAuthorization.is(authorization)) {
         return `${refused} This spend's authorization approved a different payment: it names payment digest ${JSON.stringify(authorization.authorizedBy.paymentDigest)}, and ${payment} digests to ${actual}.`
       }
-      return `${refused} This spend of ${payment} presented an authorization that no sink issued. A verdict digest or a copied object is not an authorization: this adapter spends the one-shot token a sink hands its execute().`
+      return noSinkIssued
     }
     if (requireAuthorization === true || authorization !== undefined) {
       const why = unauthorized()
@@ -946,7 +959,7 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
 
     if (h.network !== network) return notSent("wrong-network", `Refused in-process; nothing was sent. The allowance is on ${h.network}, and this adapter is connected to ${network}.`)
     if (amount <= 0n || amount > U64_MAX) return notSent("invalid-amount", `Refused in-process; nothing was sent. A spend must be a whole number of base units from 1 to ${U64_MAX}; this one is ${amount}.`)
-    if (!validAddr(recipientRaw)) return notSent("invalid-address", `Refused in-process; nothing was sent. The recipient ${JSON.stringify(recipientRaw)} is not a Sui address.`)
+    if (!validAddr(recipientRaw)) return notSent("invalid-address", `Refused in-process; nothing was sent. The recipient ${quotedShort(recipientRaw)} is not a Sui address.`)
     const recipient = normAddr(recipientRaw)
     // One recipient has one spelling, or a respelling is a new action that a judge's doubt does not cover.
     if (recipientRaw !== recipient) return notSent("invalid-address", `Refused in-process; nothing was sent. The recipient ${JSON.stringify(recipientRaw)} is not in canonical form; spell it ${recipient}.`)

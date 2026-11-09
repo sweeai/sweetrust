@@ -56,6 +56,41 @@ describe("spend", () => {
       lowercasing.mockRestore()
     }
   })
+
+  it("refuses an over-long recipient presented with a token, before lowercasing it", async () => {
+    const chain = chainFor()
+    const adapter = suiAllowances({ client: chain.client, network: "sui:testnet", scale, requireAuthorization: true })
+    const lowercasing = vi.spyOn(String.prototype, "toLowerCase")
+    try {
+      const r = await adapter.spend({ signer: agent, allowance: handle(), amount: 5n, recipient: "İ".repeat(70), authorization: {} as never })
+      expect(r.refusal?.code).toBe("not-authorized")
+      expect(lowercasing.mock.contexts.some((text) => String(text).includes("İ"))).toBe(false)
+    } finally {
+      lowercasing.mockRestore()
+    }
+  })
+
+  it("refuses a forged token as a forgery even when the recipient is respelled", async () => {
+    const chain = chainFor()
+    const adapter = suiAllowances({ client: chain.client, network: "sui:testnet", scale, requireAuthorization: true })
+    const r = await adapter.spend({ signer: agent, allowance: handle(), amount: 5n, recipient: `0x${MERCHANT.slice(2).toUpperCase()}`, authorization: {} as never })
+    expect(r.refusal?.code).toBe("not-authorized")
+    expect(chain.executed).toHaveLength(0)
+  })
+
+  it("quotes only the start of a long recipient", async () => {
+    const chain = chainFor()
+    const r = await suiAllowances({ client: chain.client, network: "sui:testnet", scale }).spend({ signer: agent, allowance: handle(), amount: 5n, recipient: "z".repeat(5000) })
+    expect(r.refusal?.code).toBe("invalid-address")
+    expect((r.refusal?.why ?? "").length).toBeLessThan(300)
+  })
+
+  it.each([["allowanceId"], ["capId"], ["funder"], ["spender"]])("refuses a handle whose %s is too long to be an address", async (field) => {
+    const chain = chainFor()
+    const adapter = suiAllowances({ client: chain.client, network: "sui:testnet", scale })
+    await expect(Promise.resolve().then(() => adapter.spend({ signer: agent, allowance: { ...handle(), [field]: "0".repeat(67) }, amount: 5n, recipient: MERCHANT }))).rejects.toThrow(/too long to be an address/)
+    expect(chain.executed).toHaveLength(0)
+  })
 })
 
 describe("open", () => {
@@ -65,5 +100,14 @@ describe("open", () => {
     await fast(async () => {
       await expect(adapter.open({ signer: principal, name: "n", allowance: { asset: NESTED, spender: A, limits: { lifetimeCap: 1n } } } as never)).rejects.toThrow(/not a Move type/)
     })
+  })
+
+  it("refuses a coin type that grows past the limit once normalized, before sending anything", async () => {
+    const chain = chainFor()
+    const adapter = suiAllowances({ client: chain.client, network: "sui:testnet", scale })
+    const asset = "0x2::coin::Coin<".repeat(14) + "0x2::sui::SUI" + ">".repeat(14)
+    expect(asset.length).toBeLessThan(1024)
+    await expect(adapter.open({ signer: principal, name: "n", allowance: { asset, spender: A, limits: { lifetimeCap: 1n } } } as never)).rejects.toThrow(/once normalized/)
+    expect(chain.executed).toHaveLength(0)
   })
 })
