@@ -46,6 +46,14 @@ unchanged. Only a judged sink's receipts change shape (ADR 0009).
 
 ### Security
 
+- **A payment amount has one spelling at the sink.** `"0100"` was a new action, so it escaped a block
+  on `"100"` and paid again. A string amount with leading zeros is now refused before the judge runs.
+- **Every sink argument is read before any is rendered.** A getter on a later argument could edit an
+  earlier one after its receipt entry was written, so the receipt said one thing and `execute()` ran
+  another.
+- **A block and a hold read alike to the agent.** The default refusal is now `stopped by judgment`.
+  The receipt keeps the real decision, and `judgment.rationaleInRefusal` opts back in.
+
 - **A judge is now told which values are untrusted (the 2026-11-08 audit, G1).** `assess` receives a
   third key, `trust`, with each argument's tier and provenance. `action.args` still holds the raw
   values, which can include text an agent wrote.

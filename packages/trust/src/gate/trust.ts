@@ -1216,6 +1216,10 @@ function pinPlainJSON<T>(value: T): T {
 
 /** A decimal-integer amount, as `paymentDigest` and the purpose check both accept it. */
 const DECIMAL_INTEGER = /^[0-9]+$/
+/** What the agent is told by default: a block and a hold read alike (ADR 0010). */
+const STOPPED_BY_JUDGMENT = "stopped by judgment"
+/** The one spelling a sink accepts for a string amount. */
+const CANONICAL_DECIMAL = /^(0|[1-9][0-9]*)$/
 
 const digestOf = (value: unknown): string => refusingOverflow(() => sha256Hex(canonicalJSON(value)))
 
@@ -1665,6 +1669,11 @@ function checkPurpose(bound: BoundPurpose, sink: string, values: Readonly<Record
   }
   if (typeof amount === "bigint" ? amount < 0n : typeof amount !== "string" || !DECIMAL_INTEGER.test(amount)) {
     violations.push(`${payment.amountArg} must be a non-negative bigint or decimal-integer string`)
+  } else if (typeof amount === "string" && !CANONICAL_DECIMAL.test(amount)) {
+    // One payment has one spelling, or "0100" is a new action that escapes a
+    // block on "100" (the 2026-11-08 series review). `paymentDigest` still
+    // digests a string as written; this is where a sink decides what it pays.
+    violations.push(`${payment.amountArg} must be a canonical decimal with no leading zeros`)
   } else if (bound.maxPerAction !== undefined) {
     let within = false
     try {
@@ -2278,8 +2287,16 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
         return `[unrecordable: ${why}]`
       }
     }
+    // Every argument is read before any is rendered (the 2026-11-08 series
+    // review). Rendering inside the read loop let a getter on a later key edit
+    // an earlier argument's object after its receipt entry was written.
+    const read: Record<string, unknown> = Object.create(null)
+    for (const key of Object.keys(cfg.requires)) read[key] = (args as Record<string, unknown>)[key]
+    for (const key of Object.keys(args)) {
+      if (!Object.hasOwn(cfg.requires, key)) read[key] = (args as Record<string, unknown>)[key]
+    }
     for (const key of Object.keys(cfg.requires) as Array<keyof Args & string>) {
-      const arg = args[key] // the ONE read; everything below, and execute(), sees this binding
+      const arg = read[key] as Args[typeof key] // the ONE read is above; everything below, and execute(), sees this binding
       if (arg === undefined) {
         violations.push(`${key} requires ${cfg.requires[key]} but was not provided`)
         continue
@@ -2335,7 +2352,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
     // violation. A sink receiving an argument it did not declare is a spec/call
     // mismatch, and fail-closed means refuse rather than guess an appetite.
     let undeclared = 0
-    for (const key of Object.keys(args) as Array<keyof Args & string>) {
+    for (const key of Object.keys(read) as Array<keyof Args & string>) {
       // ── Own-key test, not `in` (2026-08-31) ─────────────────────────────
       // This was `if (key in cfg.requires) continue`. `in` walks the
       // prototype chain, and `cfg.requires` is a plain object literal, so
@@ -2352,7 +2369,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
       // tool-calls, which is this package's stated target: the argument names
       // are chosen by whatever wrote the tool schema.
       if (Object.hasOwn(cfg.requires, key)) continue
-      const arg = args[key]
+      const arg = read[key] as Args[typeof key]
       // Was `arg instanceof Sourced` until DAN-904. Same reasoning as the
       // declared path above: `instanceof` asserts "has our prototype", which is
       // weaker than what it reads as. Both paths now use one brand check, so
@@ -2523,9 +2540,13 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
           // and learns nothing. The receipt's reason names the verdict; the
           // refusal, which goes to the agent, does so only on the host's opt-in.
           const detail = ` (${verdict.provider}, ${verdict.assessment}, conf ${verdict.confidence})`
-          const answered = ": this action already has this answer and was not judged again"
+          // A hold's approval resumes only under the key it was made with, so a
+          // caller on another key is told, rather than handed a digest it cannot use.
+          const answered = label === "judgment-held" && verdict.actionDigest !== action.digest
+            ? ": this action is held under another idempotency key; approve and resume under that key"
+            : ": this action already has this answer and was not judged again"
           const reason = `⚖ ${cfg.name} ${label}${detail}${answered}`
-          const refusal = `⚖ ${cfg.name} ${label}${bound.rationaleInRefusal ? detail : ""}${answered}`
+          const refusal = `⚖ ${cfg.name} ${bound.rationaleInRefusal ? label : STOPPED_BY_JUDGMENT}${bound.rationaleInRefusal ? detail : ""}${answered}`
           const receipt = cfg.log.append({ at: now(), sink: cfg.name, decision: label, args: rendered, reason, verdict })
           if (label === "judgment-blocked") return { ok: false, refusal, receipt }
           return {
@@ -2653,7 +2674,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
             // The refusal goes to the agent. The judge's words, its assessment
             // and its confidence would each teach it what to change, so they come
             // back only when the host opts in (ADR 0010).
-            const refusal = `⚖ ${cfg.name} ${label}${judge.rationaleInRefusal ? ` (${providerName}, ${verdict.assessment}, ${confText}): ${rationaleText}` : ""}`
+            const refusal = `⚖ ${cfg.name} ${judge.rationaleInRefusal ? label : STOPPED_BY_JUDGMENT}${judge.rationaleInRefusal ? ` (${providerName}, ${verdict.assessment}, ${confText}): ${rationaleText}` : ""}`
             if (label === "judgment-blocked") return { ok: false, refusal, receipt }
             return {
               ok: false,

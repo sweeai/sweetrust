@@ -140,7 +140,7 @@ describe("the judge's contract", () => {
     expect(r.ok).toBe(false)
     if (r.ok) return
     expect(ran.count).toBe(0)
-    expect(r.refusal).toContain("judgment-blocked")
+    expect(r.refusal).toContain("stopped by judgment")
     // The refusal goes to the agent: the rationale stays on the receipt (ADR 0010).
     expect(r.refusal).not.toContain("payee is NOT intended")
     expect(r.receipt.decision).toBe("judgment-blocked")
@@ -267,7 +267,7 @@ describe("the deadline", () => {
     const { sink, ran, log } = judged(p, { timeoutMs: 5 })
     const r = await sink({ to: good() })
     expect(r.ok).toBe(false)
-    if (!r.ok) expect(r.refusal).toBe("⚖ pay judgment-held")
+    if (!r.ok) expect(r.refusal).toBe("⚖ pay stopped by judgment")
     expect(r.receipt.reason).toContain("no verdict within 5ms")
     expect(signal.aborted).toBe(true)
     expect(ran.count).toBe(0)
@@ -317,7 +317,7 @@ describe("the deadline", () => {
     const unhandled = await unhandledDuring(async () => {
       const { sink } = judged(p, { timeoutMs: 5 })
       const r = await sink({ to: good() })
-      if (!r.ok) expect(r.refusal).toBe("⚖ pay judgment-held")
+      if (!r.ok) expect(r.refusal).toBe("⚖ pay stopped by judgment")
     })
     expect((reason as Error).name).toBe("TimeoutError")
     expect(unhandled).toEqual([])

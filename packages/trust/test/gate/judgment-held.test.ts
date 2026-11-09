@@ -141,7 +141,7 @@ describe("I4: in enforce, every doubt case is judgment-held and execute never ru
     expect(r.receipt.decision).toBe("judgment-held")
     expect(log.all().map((x) => x.decision)).toEqual(["judgment-held"])
     if (r.ok || r.held === undefined) throw new Error("expected a held result")
-    expect(r.refusal).toContain("judgment-held")
+    expect(r.refusal).toContain("stopped by judgment")
     expect(r.held.verdictDigest).toMatch(HEX64)
     expect(r.held.grantHash).toBe(GRANTED.grantHash)
     expect(r.held.actionDigest).toBe(actionDigest({ sink: "pay", args: { to: "0xabc", amount: "5" } }))
@@ -159,7 +159,7 @@ describe("I4: in enforce, every doubt case is judgment-held and execute never ru
     const { sink, runs, log } = judged(provider, { timeoutMs: 5 })
     const r = await sink(pay())
     expect(r.receipt.decision).toBe("judgment-held")
-    expect(r.ok ? undefined : r.refusal).toBe("⚖ pay judgment-held")
+    expect(r.ok ? undefined : r.refusal).toBe("⚖ pay stopped by judgment")
     expect(r.receipt.reason).toContain("no verdict within 5ms")
     expect(signal.aborted).toBe(true)
     await later(null, 50)
@@ -220,7 +220,7 @@ describe("the rest of § 3.3", () => {
     expect(r.receipt.decision).toBe("judgment-blocked")
     expect(r.receipt.verdict?.assessment).toBe("mismatch")
     expect((r as { held?: unknown }).held).toBeUndefined()
-    if (!r.ok) expect(r.refusal).toContain("judgment-blocked")
+    if (!r.ok) expect(r.refusal).toContain("stopped by judgment")
   })
 
   it("a match's receipt records provider, model, confidence and digests", async () => {

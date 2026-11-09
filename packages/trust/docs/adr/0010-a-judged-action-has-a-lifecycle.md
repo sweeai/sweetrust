@@ -81,7 +81,7 @@ executing, executed. It is claimed synchronously before the first await.**
    run the judge let through: `executed`, `attempted` (all a log failure after `execute` leaves) and
    an `observed` with no violation. A `warned` run, or an `observed` with a violation, carries no
    authority, so a spend naming one stays `no-verdict`.
-10. **The refusal string carries no assessment, confidence or rationale by default.** The refusal
+10. **The refusal string carries no assessment, confidence, rationale or block-versus-hold label by default.** The refusal
     goes to the agent, and each of those would teach it what to change. `judgment.rationaleInRefusal`
     opts back in to all three. The receipt is unchanged: its verdict and its `reason`, redacted per
     `redact`, still hold them, so a host must not hand the receipt to the agent.

@@ -462,7 +462,7 @@ describe("makeSink", () => {
     const r = await paySink(log, "enforce", judgment)({ to: verified(), amount: corroboratedAmount() })
     expect(r.ok).toBe(false)
     if (!r.ok) {
-      expect(r.refusal).toContain("judgment-blocked")
+      expect(r.refusal).toContain("stopped by judgment")
       expect(r.refusal).not.toContain("requires verified") // tiers passed first
       expect(r.receipt.decision).toBe("judgment-blocked")
     }
