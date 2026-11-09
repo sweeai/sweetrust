@@ -141,7 +141,10 @@ yourself if you need the evidence.
 `constitutionalPreCheck` catches known instruction-override patterns in English, the listed
 Latin-lookalike confusables, a cluster of invisible characters, and (since the 2026-10-13 mandate
 audit) a keyword split by a single invisible or format character, which used to pass. It runs on
-rationales and on capability identifiers before either is persisted. It does not catch paraphrase
+rationales and on capability identifiers before either is persisted. A match refuses an issue. It
+never refuses a revoke: the revoke is recorded with the rationale replaced by the matched pattern
+and a SHA-256 of the text, because a kill switch that a quoted injection can jam is worse than a
+log line that says less. It does not catch paraphrase
 ("never mind what was said") or other languages, by design. Those need defenses in your own harness, such as
 framing untrusted text clearly and constraining what the model may output. Do not rely on forcing
 a tool call for that: some current models reject forced `tool_choice`.

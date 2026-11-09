@@ -6,6 +6,7 @@
  * 2026-10-13 mandate audit, capability identifiers) is exactly the attack
  * surface the pre-check exists to defend.
  */
+import { sha256Hex } from "../canon.ts"
 import { randomBytes } from "node:crypto"
 import { constitutionalPreCheck } from "./security.ts"
 import { MandateFailure } from "./errors.ts"
@@ -832,6 +833,16 @@ export const useCapability = <
 }
 
 /**
+ * What a revoke records in place of a rationale that tripped the screen: the
+ * pattern and a hash, so the record still names the text a host kept elsewhere
+ * and the log never persists the injection. `rationale` stays a string, so the
+ * record's shape does not change. The replacement is itself clean: the hash is
+ * 64 hex characters, far under the MIP-4 blob threshold.
+ */
+const withheldRationale = (rationale: string, patternId: string): string =>
+  `[rationale withheld: matched ${patternId}; sha256 ${sha256Hex(rationale)}]`
+
+/**
  * revokeMandate — remove a mandate from the active pool.
  *
  * The revoker must be in the delegation chain. Since the authority
@@ -862,16 +873,13 @@ export const revokeMandate = (args: {
   const { mandateId, revokerScope, rationale } = args
   const triggerSource = captureTriggerSource(args.triggerSource)
 
-  // rationale pre-check
+  // A revoke always lands (the 2026-11-08 audit, K5). The rationale is screened
+  // before persistence as every authored string is, but a match changes what is
+  // written, never whether it is written: an owner quoting the injection that
+  // made them pull the plug used to be refused, and the mandate stayed live.
   const rationaleCheck = constitutionalPreCheck(rationale)
-  if (rationaleCheck) {
-    failMandate({
-      _tag: "MaliciousMandateMetadata",
-      inputKind: "rationale",
-      matchedPatternId: rationaleCheck.patternId,
-      evidence: rationaleCheck.evidence,
-    })
-  }
+  const recordedRationale =
+    rationaleCheck === null ? rationale : withheldRationale(rationale, rationaleCheck.patternId)
 
   const events = audit.query(mandateId)
 
@@ -923,7 +931,7 @@ export const revokeMandate = (args: {
     type: "revoke",
     mandateId,
     revokedBy: revoker,
-    rationale,
+    rationale: recordedRationale,
     timestamp: nowISO(),
     triggerSource,
   }))
