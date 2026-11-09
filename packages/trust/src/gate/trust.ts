@@ -497,6 +497,11 @@ export function allowlisted<T>(
   // match/mismatch — what comes back is the registry's record, below.
   let entryJSON: string | undefined
   try {
+    // A verified row need not have been born at an authority (`humanConfirm` makes
+    // one too). It is frozen shallowly here, before the candidate's `toJSON` runs
+    // below, so the record compared is the record promoted, and so the object the
+    // caller gets back cannot have its own fields rewritten (SECURITY.md).
+    if (typeof entryValue === "object" && entryValue !== null && !ArrayBuffer.isView(entryValue)) Object.freeze(entryValue)
     entryJSON = receiptJSON(entryValue)
   } catch (err) {
     return {
@@ -542,11 +547,6 @@ export function allowlisted<T>(
   // 🔑 The rule this file keeps relearning: THE OBJECT YOU CHECKED MUST BE THE
   // OBJECT YOU PROMOTE. Checking A and shipping B is not a weaker check, it is
   // no check at all.
-  //
-  // A verified row need not have been born at an authority (`humanConfirm` makes
-  // one too), and the caller gets this very object, so it is frozen here as
-  // `fromAuthority` would have: the result must not be able to rewrite the registry.
-  if (typeof entryValue === "object" && entryValue !== null && !ArrayBuffer.isView(entryValue)) Object.freeze(entryValue)
   return {
     ok: true,
     value: ascend({ value: entryValue, provenance: entryProvenance }, {
@@ -696,7 +696,7 @@ export async function humanConfirm<T>(
   // the ascent both use these locals.
   const { value: liveValue, tier: candidateTier, provenance: candidateProvenance } = candidate
   // SNAPSHOT, not a reference. A Sourced is frozen, but the object it carries
-  // is not (only `fromAuthority` freezes its value), and whoever handed it in
+  // is not (`humanConfirm` does not freeze what it mints here), and whoever handed it in
   // still holds that object. Once a human answers over a network, the await
   // below can last minutes, and a reference would let the holder rewrite the
   // value after the human saw it: shown "GB00-ALICE", promoted "DE99-EVIL"

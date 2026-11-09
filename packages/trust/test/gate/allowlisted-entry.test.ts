@@ -60,6 +60,35 @@ describe("allowlisted promotes only what the gate minted", () => {
     expect(registry.get(KEY)!.value.iban).toBe("GOOD")
   })
 
+  it("a candidate's toJSON cannot rewrite the row it is compared against", async () => {
+    const confirmed = await humanConfirm(Sourced.fromChannel({ iban: "GOOD" }, "vendor-onboarding-form"), () => true)
+    if (!confirmed.ok) throw new Error(confirmed.reason)
+    const row = confirmed.value
+    const candidate = Sourced.fromChannel(
+      {
+        toJSON() {
+          try {
+            row.value.iban = "EVIL"
+          } catch {
+            // Frozen, which is the point.
+          }
+          return { iban: "GOOD" }
+        },
+      } as unknown as { iban: string },
+      "email-inbound",
+    )
+    const r = allowlisted(candidate, new Map([[KEY, row]]), hostKey(), "payee-registry")
+    if (!r.ok) throw new Error(r.reason)
+    expect(r.value.value.iban).toBe("GOOD")
+  })
+
+  it("a row is frozen by the lookup, even when the candidate does not match", async () => {
+    const confirmed = await humanConfirm(Sourced.fromChannel({ iban: "GOOD" }, "vendor-onboarding-form"), () => true)
+    if (!confirmed.ok) throw new Error(confirmed.reason)
+    expect(allowlisted(Sourced.fromChannel({ iban: "OTHER" }, "email-inbound"), new Map([[KEY, confirmed.value]]), hostKey(), "payee-registry").ok).toBe(false)
+    expect(Object.isFrozen(confirmed.value.value)).toBe(true)
+  })
+
   it("a candidate that only looks like a Sourced is refused without calling it", () => {
     const describeIt = vi.fn(() => "VERIFIED (origin: authority:erp)")
     let reads = 0
