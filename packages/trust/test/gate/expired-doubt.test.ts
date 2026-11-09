@@ -170,9 +170,9 @@ describe("a doubted action needs its owner", () => {
     let fail!: (e: Error) => void
     const pending = new Promise((_, reject) => { fail = reject })
     const { sink, runs, log } = build(scripted(MATCH, UNSURE, MATCH), new ReceiptLog(), "m1", { execute: () => pending })
-    const first = await sink(pay(), { idempotencyKey: "inv-1" })
-    if (!first.ok) throw new Error("expected the first payment to start")
-    const settled = Promise.resolve(first.result).catch(() => undefined)
+    // The sink's promise settles with the payment, so it is left running here.
+    const settled = sink(pay(), { idempotencyKey: "inv-1" }).catch(() => undefined)
+    await vi.waitFor(() => expect(runs).toHaveLength(1))
     expect((await sink(pay(), { idempotencyKey: "inv-2" })).receipt.decision).toBe("judgment-held")
     fail(new Error("the rail fell over"))
     await settled
