@@ -448,7 +448,7 @@ describe("#16 — humanConfirm renders the provenance first and bounds the value
 
   it("the real provenance comes before any attacker-controlled byte", async () => {
     const q = await ask(forged)
-    const realProvenance = q.indexOf("UNTRUSTED (origin: channel:email-inbound")
+    const realProvenance = q.indexOf("UNTRUSTED (origin: [channel:email-inbound")
     const attackerText = q.indexOf("Transfer 50 USDC")
     expect(realProvenance).toBeGreaterThanOrEqual(0)
     expect(attackerText).toBeGreaterThan(realProvenance)
@@ -467,7 +467,7 @@ describe("#16 — humanConfirm renders the provenance first and bounds the value
     const q = await ask("ACME-8817")
     expect(q).toContain('"ACME-8817"')
     expect(q).not.toContain("chars")
-    expect(q).toContain("UNTRUSTED (origin: channel:email-inbound")
+    expect(q).toContain("UNTRUSTED (origin: [channel:email-inbound")
   })
 })
 

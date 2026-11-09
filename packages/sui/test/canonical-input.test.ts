@@ -102,6 +102,14 @@ describe("open", () => {
     })
   })
 
+  it("quotes only the start of a long spender", async () => {
+    const chain = chainFor()
+    const adapter = suiAllowances({ client: chain.client, network: "sui:testnet", scale })
+    const r = await adapter.open({ signer: principal, name: "n", allowance: { network: "sui:testnet", asset: SUI, spender: "z".repeat(5000), limits: { lifetimeCap: 1n, expiry: new Date(Date.now() + 60_000) } } } as never)
+    expect(r.receipt.refusal?.code).toBe("invalid-address")
+    expect((r.receipt.refusal?.why ?? "").length).toBeLessThan(300)
+  })
+
   it("refuses a coin type that grows past the limit once normalized, before sending anything", async () => {
     const chain = chainFor()
     const adapter = suiAllowances({ client: chain.client, network: "sui:testnet", scale })

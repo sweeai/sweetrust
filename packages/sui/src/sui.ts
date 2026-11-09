@@ -205,7 +205,7 @@ const boundTo = (coinType: string | null, asset: string): boolean => {
 const normAddr = (a: string): string => normalizeSuiAddress(a)
 /** `0x` and 64 hex digits, the longest a canonical address can be. */
 const SUI_ADDRESS_CHARS = 66
-/** An agent's string as a refusal quotes it: short, because a refusal copies what it quotes and can reach an agent or a log. */
+/** A string as a refusal's sentence quotes it: short, so the sentence stays one. The receipt's own `recipient` field still holds the whole argument, as an in-memory receipt does for any argument. */
 const quotedShort = (text: string): string => JSON.stringify(text.length > 80 ? `${text.slice(0, 80)}…` : text)
 /**
  * Sui's canonical spelling of a payee and a coin type, for a judged sink's
@@ -725,11 +725,11 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
       return refused(r, (l) => unheld.includes(l) ? line(l, limitValue(l, limits, scale), "nobody", "unheld", PER_SPEND_UNHELD_WHY) : null)
     }
     // 3. Addresses.
-    if (!validAddr(spenderRaw)) return plain("invalid-address", `Refused at open(); nothing was sent. The spender ${JSON.stringify(spenderRaw)} is not a Sui address.`)
+    if (!validAddr(spenderRaw)) return plain("invalid-address", `Refused at open(); nothing was sent. The spender ${quotedShort(spenderRaw)} is not a Sui address.`)
     const spender = normAddr(spenderRaw)
     if (limits.recipients !== undefined) {
       const bad = limits.recipients.filter((r) => !validAddr(r))
-      if (bad.length > 0) return plain("invalid-address", `Refused at open(); nothing was sent. ${bad.map((b) => JSON.stringify(b)).join(", ")} ${bad.length === 1 ? "is" : "are"} not a Sui address, so the recipient list cannot be held.`, null, ["recipients"])
+      if (bad.length > 0) return plain("invalid-address", `Refused at open(); nothing was sent. ${bad.map(quotedShort).join(", ")} ${bad.length === 1 ? "is" : "are"} not a Sui address, so the recipient list cannot be held.`, null, ["recipients"])
       if (limits.recipients.length === 0) return plain("invalid-limit", "Refused at open(); nothing was sent. An empty recipient list would refuse every spend; leave recipients out to allow any payee.", null, ["recipients"])
     }
     // 4. Sui's own rules, checked before sending so the refusal costs no gas.

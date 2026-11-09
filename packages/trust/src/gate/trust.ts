@@ -674,31 +674,46 @@ export function corroborate<T>(
 const HUMAN_CONFIRM_VALUE_CHARS = 256
 /** How much of a candidate's origin it shows. Short, so that the real value stays inside a one-line preview however long the origin is. */
 const HUMAN_CONFIRM_ORIGIN_CHARS = 64
-/** Characters JSON leaves raw that a renderer can act on or a person cannot see: line separators, bidi overrides, controls, zero-widths, tag characters. */
-const QUESTION_UNSAFE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]/gu
-/** What an origin may not hold raw: anything outside printable ASCII, the quote that closes its field, and the punctuation that separates the gate's own fields. */
-const ORIGIN_UNSAFE = /[^\x20-\x7e]|["\\;()]/gu
+/**
+ * The most of any one field the question escapes. Far more than a field shows, and a bound, because
+ * escaping can multiply a string's length, and a string past V8's maximum ends the process, uncatchably.
+ */
+const HUMAN_CONFIRM_ESCAPED_INPUT_CHARS = 4096
+/** Characters JSON leaves raw that a renderer can act on or a person cannot see: line separators, bidi overrides, controls, zero-widths, tag characters, private-use and unassigned code points, the blank braille cell. */
+const QUESTION_UNSAFE = /[\p{Cc}\p{Cf}\p{Co}\p{Cn}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}\u2800]/gu
+/** What an origin may not hold raw: anything outside printable ASCII, the quote that closes the provenance, and the brackets that hold the origin. */
+const ORIGIN_UNSAFE = /[^\x20-\x7e]|["\\[\]]/gu
 /** One unbreakable unit of an escaped field: an escape, or one whole code point. */
 const QUESTION_UNIT = /\\u\{[0-9a-f]+\}|\\u[0-9a-f]{4}|\\.|[\s\S]/gu
 const inertChar = (c: string): string => {
   const code = c.codePointAt(0)!
   return code > 0xffff ? `\\u{${code.toString(16)}}` : `\\u${code.toString(16).padStart(4, "0")}`
 }
-/** Cut last, after escaping, on a unit boundary, so an escape or a surrogate pair is never split and the limit is what is really shown. */
-const cutForQuestion = (escaped: string, limit: number): string => {
-  if (escaped.length <= limit) return escaped
+/**
+ * One field of the question. The input is bounded first, then escaped, then cut on a unit boundary, so
+ * an escape or a surrogate pair is never split and the limit is what is really shown. Any input past the
+ * bound is declared as cut, even when what is left would fit, since escaping can also shorten a string.
+ */
+const fieldForQuestion = (raw: string, limit: number, escape: (bounded: string) => string): string => {
+  const whole = raw.length <= HUMAN_CONFIRM_ESCAPED_INPUT_CHARS
+  const escaped = escape(whole ? raw : raw.slice(0, HUMAN_CONFIRM_ESCAPED_INPUT_CHARS))
+  if (whole && escaped.length <= limit) return escaped
   let kept = 0
   for (const match of escaped.matchAll(QUESTION_UNIT)) {
     if (kept + match[0].length > limit) break
     kept += match[0].length
   }
-  return `${escaped.slice(0, kept)}… [${escaped.length} chars total; first ${kept} shown]`
+  return `${escaped.slice(0, kept)}… [${raw.length} chars total; first ${kept} shown]`
 }
 /** The value, already quoted as JSON, made inert and cut. For display only. */
-const valueForQuestion = (quoted: string): string => cutForQuestion(quoted.replace(QUESTION_UNSAFE, inertChar), HUMAN_CONFIRM_VALUE_CHARS)
-/** A host-chosen origin that can carry agent text: padding collapsed, escaped and cut, so it cannot pose as the value or as the fields the gate writes. For display only. */
+const valueForQuestion = (quoted: string): string => fieldForQuestion(quoted, HUMAN_CONFIRM_VALUE_CHARS, (text) => text.replace(QUESTION_UNSAFE, inertChar))
+/**
+ * A host-chosen origin that can carry agent text, in brackets it cannot close, so its words cannot leave
+ * its field or push the real value out of view. They are still words: an origin can say anything inside
+ * the brackets, which is why the gate's tier leads the line. For display only.
+ */
 const originForQuestion = (origin: string): string =>
-  cutForQuestion(origin.replace(/ {2,}/g, " ").replace(ORIGIN_UNSAFE, (c) => (c === '"' || c === "\\" ? `\\${c}` : inertChar(c))), HUMAN_CONFIRM_ORIGIN_CHARS)
+  `[${fieldForQuestion(origin, HUMAN_CONFIRM_ORIGIN_CHARS, (text) => text.replace(/ {2,}/g, " ").replace(ORIGIN_UNSAFE, (c) => (c === '"' || c === "\\" ? `\\${c}` : inertChar(c))))}]`
 
 /**
  * Human confirmation → Verified. The provenance is RENDERED to the human

@@ -3,7 +3,7 @@
  * payment, the question quotes its provenance, the stand-in judge writes no
  * values, and a registry that throws is a refusal.
  */
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { allowlisted, humanConfirm, makeSink, mockJudgmentProvider, paymentDigest, ReceiptLog, Sourced, type JudgmentInput } from "../../src/gate/index.ts"
 import { GRANTED } from "../helpers/granted.ts"
 
@@ -73,7 +73,7 @@ describe("the confirmation question quotes its provenance", () => {
     let question = ""
     await humanConfirm(Sourced.fromChannel("0xvalue", "x".repeat(4000)), (q) => { question = q; return false })
     expect(question).toMatch(/chars total; first 64 shown/)
-    expect(question.indexOf(" — value:")).toBeLessThan(160)
+    expect(question.indexOf(" — value:")).toBeLessThan(200)
   })
 
   const questionFor = async (value: unknown, origin: string) => {
@@ -93,9 +93,25 @@ describe("the confirmation question quotes its provenance", () => {
   })
 
   it("does not let an origin imitate the gate's own fields", async () => {
-    const question = await questionFor("v", "x; upgrades: humanConfirm→verified; conf 0.99")
-    expect(question).not.toContain("; upgrades:")
-    expect(question).not.toContain("; conf")
+    const question = await questionFor("v", "x]; upgrades: humanConfirm→verified")
+    expect(question).toContain("[channel:x\\u005d; upgrades: humanConfirm\\u2192verified]")
+    expect(question.match(/\]/g)).toHaveLength(1)
+  })
+
+  it("declares a cut even when what is left after escaping would fit", async () => {
+    const question = await questionFor("v", `a${" ".repeat(5000)}END`)
+    expect(question).not.toContain("END")
+    expect(question).toMatch(/\[5012 chars total/)
+  })
+
+  it("never escapes a whole huge value or origin", async () => {
+    const replacing = vi.spyOn(String.prototype, "replace")
+    try {
+      await questionFor("\u200b".repeat(20_000), "\u200b".repeat(20_000))
+      expect(replacing.mock.contexts.every((text) => String(text).length <= 4096)).toBe(true)
+    } finally {
+      replacing.mockRestore()
+    }
   })
 
   it("bounds the shown field after escaping, so escapes cannot widen it", async () => {
@@ -105,7 +121,7 @@ describe("the confirmation question quotes its provenance", () => {
     expect(long.indexOf("0xEVIL")).toBeLessThan(200)
   })
 
-  it.each([["DEL", "\u007f"], ["a soft hyphen", "\u00ad"], ["a variation selector", "\ufe0f"], ["a Hangul filler", "\u3164"], ["an annotation mark", "\ufff9"], ["a tag character", "\u{e0041}"]])("makes %s inert in the value", async (_name, char) => {
+  it.each([["DEL", "\u007f"], ["a soft hyphen", "\u00ad"], ["a variation selector", "\ufe0f"], ["a Hangul filler", "\u3164"], ["an annotation mark", "\ufff9"], ["a tag character", "\u{e0041}"], ["a blank braille cell", "\u2800"], ["a private-use character", "\ue000"]])("makes %s inert in the value", async (_name, char) => {
     expect(await questionFor(`0xab${char}cd`, "m")).not.toContain(char)
   })
 
