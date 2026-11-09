@@ -156,12 +156,15 @@ const assertEd25519SignatureShape = (signature: unknown): string => {
 export const makeInMemorySignerLive = (
   publicKeyHex: string = "inmem-test-pubkey",
 ): MandateSignerService => {
-  // The marker must not be a real key. verifyAuditChain trusts whatever the
-  // caller's signer.verify says, so an in-memory signer whose marker was the
-  // operator's SPKI hex passed the pin gate and then accepted an "inmem-"
-  // signature anyone can compute, under the operator's real pin (the
-  // 2026-10-13 verify audit). Decoding is deliberately lenient here: anything
-  // that could be read as a public key is refused.
+  // Two halves, because the first alone did not hold. verifyAuditChain pins the
+  // key a record carries and then trusts whatever signer.verify says, and an
+  // "inmem-" signature is computable by anyone. The marker must not be a real
+  // key, or a signer built with the operator's SPKI hex would satisfy the
+  // operator's real pin (the 2026-10-13 verify audit). And `verify` below holds
+  // a record to THIS marker, or a default-marker signer handed a forgery that
+  // names the operator's key verifies it all the same (the 2026-11-08 audit,
+  // K4). Decoding is deliberately lenient here: anything that could be read as
+  // a public key is refused.
   let parsesAsKey = false
   try {
     createPublicKey({ key: Buffer.from(publicKeyHex, "hex"), format: "der", type: "spki" })
@@ -189,10 +192,13 @@ export const makeInMemorySignerLive = (
   verify: <P>(signed: Signed<P>): boolean => {
     // Each field is read once (the 2026-10-13 verify audit): the preimage is
     // built from these locals, never from a second read of a live object.
-    const { signature, payload, previousHash, signedAt, domain } = signed
+    const { signature, signerPublicKeyHex, payload, previousHash, signedAt, domain } = signed
     if (typeof signature !== "string" || !IN_MEMORY_SIGNATURE.test(signature)) {
       throw new Error("MandateSigner: signature is not inmem- followed by 64 lowercase hex characters")
     }
+    // This signer speaks only for its own marker, so it cannot satisfy a real
+    // pin (the 2026-11-08 audit, K4; the note at the top of this factory).
+    if (signerPublicKeyHex !== publicKeyHex) return false
     const expected = "inmem-" + sha256Hex(signedPreimage({ domain, payload, previousHash, signedAt }))
     return signature === expected
   },

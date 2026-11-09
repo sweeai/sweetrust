@@ -108,6 +108,12 @@ const foldConfusables = (s: string): string =>
   s.replace(CONFUSABLE_RE, (ch) => CONFUSABLE_TO_LATIN[ch] ?? ch)
 
 export const constitutionalPreCheck = (rawInput: string): MaliciousInputMatch | null => {
+  // A string, or nothing (the 2026-11-08 audit, K2/K8). An object carrying its
+  // own `normalize` passed the screen as "clean" and was then persisted through
+  // its `toJSON` as whatever it liked. A non-string is a programmer error.
+  if (typeof rawInput !== "string") {
+    throw new TypeError("constitutionalPreCheck: expected a string")
+  }
   // Three-stage normalization for the pattern matches:
   //   1. NFKC — compatibility decomposition (full-width, ligatures, circled forms)
   //   2. Latin-confusable folding — cross-script visual lookalikes (Cyrillic/Greek)

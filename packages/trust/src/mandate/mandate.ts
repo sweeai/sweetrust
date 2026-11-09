@@ -6,6 +6,7 @@
  * 2026-10-13 mandate audit, capability identifiers) is exactly the attack
  * surface the pre-check exists to defend.
  */
+import { sha256Hex } from "../canon.ts"
 import { randomBytes } from "node:crypto"
 import { constitutionalPreCheck } from "./security.ts"
 import { MandateFailure } from "./errors.ts"
@@ -33,6 +34,27 @@ import type {
  */
 const failMandate = (error: MandateError): never => {
   throw new MandateFailure(error)
+}
+
+/**
+ * The caller's `triggerSource`, read once by the caller of this function and
+ * held to the two values the type names (the 2026-11-08 audit, K2). Absent means
+ * "code". Anything else is a programmer error, a `TypeError`, before any
+ * authority decision.
+ *
+ * It used to reach the event unchecked, so an object carrying a `toJSON` went
+ * into the signed payload. A stateful `toJSON` made the signed bytes differ from
+ * the file bytes, and every owner operation on that store, revoke included,
+ * then threw `AuditLogCorrupt` until someone edited the file by hand. A
+ * re-entrant `toJSON` spent twice between the chain-head read and the append.
+ * Refusing it here means no live object ever reaches a record.
+ */
+const captureTriggerSource = (raw: unknown): TriggerSource => {
+  if (raw === undefined) return "code"
+  if (raw !== "code" && raw !== "external") {
+    throw new TypeError('triggerSource must be "code" or "external"')
+  }
+  return raw
 }
 
 /**
@@ -72,10 +94,19 @@ export const grantorId = (id: string): GrantorId => {
  * A capability carries a stable `key`. This helper centralizes the lookup
  * (and tolerates any-cast escape hatches where a bare string sneaks in): the
  * one branded-object-or-string fallback, where several copies used to live.
+ *
+ * Always returns a primitive string, and only for a bare string or an object
+ * with a string `key` (the 2026-11-08 audit, K1). A `key` that is an object would
+ * otherwise reach the Sets, the grant event and the signed bytes as a live value,
+ * and a key-less object stringified to one shared "[object Object]". Anything
+ * else is a programmer error, a `TypeError`. The use path has its own form that
+ * refuses instead (`presentedKey`).
  */
 export const capabilityKey = (cap: Capability): string => {
-  const branded = cap as unknown as { key?: string }
-  return branded.key ?? String(cap)
+  if (typeof cap === "string") return cap
+  const key: unknown = (cap as unknown as { readonly key?: unknown } | null | undefined)?.key
+  if (typeof key !== "string") throw new TypeError("capabilityKey: expected a capability with a string key")
+  return key
 }
 
 /**
@@ -97,6 +128,14 @@ const assertCapabilityIdentifierClean = (key: string): void => {
       evidence: match.evidence,
     })
   }
+}
+
+/**
+ * A grantor is a string or the issue is refused. A `toJSON` on it would run
+ * between the limit check and the record (the 0.5.1 review, 2026-11-08).
+ */
+const assertGrantorIsString = (grantor: unknown): void => {
+  if (typeof grantor !== "string") throw new TypeError("grantor must be a string")
 }
 
 /**
@@ -180,29 +219,83 @@ const nowISO = (): ISO8601 => new Date().toISOString() as ISO8601
 // `key` getter is the same hole one object down. SECURITY.md already records
 // the lesson: a check and the decision it authorizes must name the same
 // binding. `test/mandate/authority-binding.test.ts` pins the read count.
+//
+// Read-once was not enough (the 2026-11-08 audit, K1). A `key` getter read once
+// still runs caller code, and it used to run AFTER `useCapability` had taken
+// its snapshot of the log. The getter called `useCapability` again, the inner
+// call recorded a spend, and the outer call then judged the cap against a
+// snapshot that did not contain it: 150 spent against a cap of 30, on a signed
+// chain that verified. So every caller-supplied value is reduced to a primitive
+// before the first log read, and an issued scope's keys are kept here, in
+// `ISSUED`, where the holder cannot reach them.
 
-const ISSUED = new WeakSet<object>()
+const ISSUED = new WeakMap<object, ReadonlyArray<string>>()
 
-/** Freeze a freshly built scope (and its capability list) and record it as issued. */
-const mint = <S extends MandateScope<any, any, any>>(scope: S): S => {
+/**
+ * The elements a scope hands out: one fresh object per key per scope, so no
+ * caller's capability object is retained and no two scopes share an element.
+ * The kernel never reads them back (`claimedCapabilityIds`), so a holder who
+ * edits an element has edited its own view and nothing else.
+ */
+const rebuildCapabilities = (capabilityIds: ReadonlyArray<string>): ReadonlyArray<Capability> =>
+  Object.freeze(capabilityIds.map((key) => ({ key })))
+
+/**
+ * Freeze a freshly built scope and record it as issued, under the keys the
+ * issuer resolved once. `capabilityIds` is that frozen list, and the scope's
+ * capability list is rebuilt from it.
+ */
+const mint = <S extends MandateScope<any, any, any>>(scope: S, capabilityIds: ReadonlyArray<string>): S => {
   const frozen = Object.freeze({
     ...scope,
-    capabilities: Object.freeze([...scope.capabilities]),
-  }) as S
-  ISSUED.add(frozen)
+    capabilities: rebuildCapabilities(capabilityIds),
+  }) as unknown as S
+  ISSUED.set(frozen, capabilityIds)
   return frozen
 }
 
 /**
  * A read-only view of a grantor scope for a child's `parentScope`: the same
  * fields, so the typed parent chain still reads correctly, but a different
- * object that was never issued, so it carries no authority.
+ * object that was never issued, so it carries no authority. Its capability
+ * elements are rebuilt too: a shared element let a child's holder rewrite what
+ * its grantor's holder saw. Call only after `assertIssued`.
  */
 const detach = <S extends MandateScope<any, any, any>>(scope: S): S =>
-  Object.freeze({ ...scope }) as S
+  Object.freeze({ ...scope, capabilities: rebuildCapabilities(ISSUED.get(scope) ?? []) }) as unknown as S
 
 const isIssued = (scope: unknown): scope is MandateScope<any, any, any> =>
   typeof scope === "object" && scope !== null && ISSUED.has(scope)
+
+/** Stands in for a key that is not a string; such a value is refused before anything records it. */
+const UNRESOLVED_KEY = "<no string key>"
+
+/**
+ * A presented capability's key at use, or null when it has none: `capabilityKey`
+ * without the throw, because a bad value at use is a refusal, never a `TypeError`.
+ * Reads `key` once.
+ */
+const presentedKey = (cap: unknown): string | null => {
+  if (typeof cap === "string") return cap
+  if (typeof cap !== "object" || cap === null) return null
+  const key: unknown = (cap as { readonly key?: unknown }).key
+  return typeof key === "string" ? key : null
+}
+
+/**
+ * The capability keys a presented scope claims, as primitives, with no caller
+ * code left to run afterward. An issued scope answers from `ISSUED`, so nothing
+ * planted on its elements ever executes. Anything else is a forgery on its way
+ * to a refusal, and is read once here so its refusal stays the specific one: a
+ * malformed element becomes `UNRESOLVED_KEY`, never a throw. Call before the
+ * first log read.
+ */
+const claimedCapabilityIds = (scope: unknown): ReadonlyArray<string> => {
+  if (isIssued(scope)) return ISSUED.get(scope) ?? []
+  const raw: unknown = (scope as { readonly capabilities?: unknown }).capabilities
+  if (!Array.isArray(raw)) return []
+  return Object.freeze([...raw].map((c) => presentedKey(c) ?? UNRESOLVED_KEY))
+}
 
 // ============================================================================
 // Binding to the store (2026-10-31)
@@ -492,25 +585,15 @@ const assertWithinLimit = (
  * grantor's `MandateScope` reference was captured but BEFORE the child issue
  * fires would silently produce an orphan child mandate (parent revoked, child
  * still callable until ancestor-chain check at use time catches it). The
- * issue-time check stops the orphan from ever entering the audit log.
+ * issue-time check stops the orphan from ever entering the audit log. It runs
+ * the same walk as use, so a revoked grandparent stops it too (the 2026-11-08
+ * audit, K8: the child used to be minted and refused only at use).
  */
 const checkGrantorNotRevoked = (
   audit: MandateAuditService,
   grantorScope: { readonly id: MandateId; readonly grantor: GrantorId },
 ): void => {
-  const revoked = audit.isRevoked(grantorScope.id)
-  if (!revoked) return
-  const events = audit.query(grantorScope.id)
-  const revokeEvent = events.find((e) => e.type === "revoke")
-  failMandate({
-    _tag: "MandateRevoked",
-    mandateId: grantorScope.id,
-    revokedAt: revokeEvent?.timestamp ?? nowISO(),
-    revokedBy:
-      revokeEvent?.type === "revoke" ? revokeEvent.revokedBy : grantorScope.grantor,
-    rationale:
-      revokeEvent?.type === "revoke" ? revokeEvent.rationale : "grantor revoked",
-  })
+  void walkChain(audit, grantorScope.id, grantorScope.grantor)
 }
 
 /**
@@ -663,9 +746,20 @@ export const useCapability = <
   // `ISSUED` has the shape of the hole). `mandate` is the one object the
   // walk, the log checks, the possession check and the record all name.
   const { mandate, capability } = args
-  const triggerSource: TriggerSource = args.triggerSource ?? "code"
+  const triggerSource = captureTriggerSource(args.triggerSource)
   const amountRaw: unknown = args.amount
-  const mandateId: MandateId = mandate.id
+  const rawMandateId: unknown = mandate.id
+  if (typeof rawMandateId !== "string") {
+    return failMandate({ _tag: "MandateNotIssued", mandateId: "<non-string id>" as MandateId })
+  }
+  const mandateId = rawMandateId as MandateId
+  // Everything a caller's object can answer is answered HERE, before the first
+  // log read (K1; the note above `ISSUED`). From the walk down to the record
+  // this function touches only primitives, frozen log records and the store,
+  // so no caller code can run between the limit check and its record.
+  const claimedCapIds = claimedCapabilityIds(mandate)
+  const presented = presentedKey(capability)
+  const capId = presented ?? UNRESOLVED_KEY
 
   // The revocation walk, shared with `resume`: see `walkChain` above for why
   // it reads the audit log and never the in-memory parent pointer (DAN-637,
@@ -691,7 +785,6 @@ export const useCapability = <
     return
   }
   const grantedCapIds = new Set(grantEvent.capabilities)
-  const claimedCapIds = mandate.capabilities.map((c) => capabilityKey(c))
   for (const claimed of claimedCapIds) {
     if (!grantedCapIds.has(claimed)) {
       failMandate({
@@ -701,8 +794,6 @@ export const useCapability = <
       })
     }
   }
-
-  const capId = capabilityKey(capability)
 
   // DAN-1157 (F1): everything above reads the log through `mandateId`,
   // which the caller chooses. That defeats a FAKE id and misses a REAL id that
@@ -717,7 +808,7 @@ export const useCapability = <
   // Compile-time check: this function's signature requires the mandate to
   // include the capability. The runtime check is for any-cast escape hatches.
   const mandateCapIds = new Set(claimedCapIds)
-  if (!mandateCapIds.has(capId)) {
+  if (presented === null || !mandateCapIds.has(capId)) {
     failMandate({
       _tag: "CapabilityNotInGrantorScope",
       capability: capId,
@@ -738,6 +829,16 @@ export const useCapability = <
     ...(amount === undefined ? {} : { amount }),
   }))
 }
+
+/**
+ * What a revoke records in place of a rationale that tripped the screen: the
+ * pattern and a hash, so the record still names the text a host kept elsewhere
+ * and the log never persists the injection. `rationale` stays a string, so the
+ * record's shape does not change. The replacement is itself clean: the hash is
+ * 64 hex characters, far under the MIP-4 blob threshold.
+ */
+const withheldRationale = (rationale: string, patternId: string): string =>
+  `[rationale withheld: matched ${patternId}; sha256 ${sha256Hex(rationale)}]`
 
 /**
  * revokeMandate — remove a mandate from the active pool.
@@ -768,18 +869,15 @@ export const revokeMandate = (args: {
   // audit). `mandateId` is the one id the chain walk, the authorization and
   // the revoke record all name.
   const { mandateId, revokerScope, rationale } = args
-  const triggerSource: TriggerSource = args.triggerSource ?? "code"
+  const triggerSource = captureTriggerSource(args.triggerSource)
 
-  // rationale pre-check
+  // A revoke always lands (the 2026-11-08 audit, K5). The rationale is screened
+  // before persistence as every authored string is, but a match changes what is
+  // written, never whether it is written: an owner quoting the injection that
+  // made them pull the plug used to be refused, and the mandate stayed live.
   const rationaleCheck = constitutionalPreCheck(rationale)
-  if (rationaleCheck) {
-    failMandate({
-      _tag: "MaliciousMandateMetadata",
-      inputKind: "rationale",
-      matchedPatternId: rationaleCheck.patternId,
-      evidence: rationaleCheck.evidence,
-    })
-  }
+  const recordedRationale =
+    rationaleCheck === null ? rationale : withheldRationale(rationale, rationaleCheck.patternId)
 
   const events = audit.query(mandateId)
 
@@ -831,7 +929,7 @@ export const revokeMandate = (args: {
     type: "revoke",
     mandateId,
     revokedBy: revoker,
-    rationale,
+    rationale: recordedRationale,
     timestamp: nowISO(),
     triggerSource,
   }))
@@ -875,11 +973,12 @@ export const issueOrgMandate = <Caps extends ReadonlyArray<Capability>>(args: {
 }, audit: MandateAuditService): MandateScope<Caps, "organization", null> => {
   // Every caller-supplied field is read exactly once (the 2026-10-13 mandate audit).
   const { grantor, rationale } = args
+  assertGrantorIsString(grantor)
   const capabilities = captureCapabilities(args.capabilities)
   const capabilityIds = resolveCapabilityIds(capabilities)
   const limits = captureLimits(args.limits, capabilityIds)
   capabilityIds.forEach(assertCapabilityIdentifierClean)
-  const triggerSource: TriggerSource = args.triggerSource ?? "code"
+  const triggerSource = captureTriggerSource(args.triggerSource)
 
   const rationaleCheck = constitutionalPreCheck(rationale)
   if (rationaleCheck) {
@@ -890,6 +989,7 @@ export const issueOrgMandate = <Caps extends ReadonlyArray<Capability>>(args: {
       evidence: rationaleCheck.evidence,
     })
   }
+
 
   const newId = freshMandateId(audit)
   const grantTimestamp = nowISO()
@@ -905,7 +1005,7 @@ export const issueOrgMandate = <Caps extends ReadonlyArray<Capability>>(args: {
     grantRationale: rationale,
     parentMandateId: null,
     parentScope: null,
-  })
+  }, capabilityIds)
 
   bindTo(audit, scope)
 
@@ -950,11 +1050,12 @@ export const issueProjectMandate = <
 > => {
   // Every caller-supplied field is read exactly once (the 2026-10-13 mandate audit).
   const { grantor, grantorScope, rationale } = args
+  assertGrantorIsString(grantor)
   const capabilities = captureCapabilities(args.capabilities)
   const capabilityIds = resolveCapabilityIds(capabilities)
   const limits = captureLimits(args.limits, capabilityIds)
   capabilityIds.forEach(assertCapabilityIdentifierClean)
-  const triggerSource: TriggerSource = args.triggerSource ?? "code"
+  const triggerSource = captureTriggerSource(args.triggerSource)
 
   const rationaleCheck = constitutionalPreCheck(rationale)
   if (rationaleCheck) {
@@ -966,13 +1067,14 @@ export const issueProjectMandate = <
     })
   }
 
+
+  // Resolved before the first log read, as in `useCapability` (K1).
+  const grantorCapIds = new Set(claimedCapabilityIds(grantorScope))
+
   // Issue-time grantor-revoked check (closes the revoke-vs-issue race).
   checkGrantorNotRevoked(audit, grantorScope)
 
   // Runtime fallback subset check (belt-and-suspenders for any-cast escapes)
-  const grantorCapIds = new Set(
-    grantorScope.capabilities.map((c) => capabilityKey(c)),
-  )
   for (const capId of capabilityIds) {
     if (!grantorCapIds.has(capId)) {
       failMandate({
@@ -1012,7 +1114,7 @@ export const issueProjectMandate = <
     grantRationale: rationale,
     parentMandateId: grantorScope.id,
     parentScope: detach(grantorScope),
-  })
+  }, capabilityIds)
 
   bindTo(audit, scope)
 
@@ -1061,11 +1163,12 @@ export const issueAgentMandate = <
 > => {
   // Every caller-supplied field is read exactly once (the 2026-10-13 mandate audit).
   const { grantor, grantorScope, rationale } = args
+  assertGrantorIsString(grantor)
   const capabilities = captureCapabilities(args.capabilities)
   const capabilityIds = resolveCapabilityIds(capabilities)
   const limits = captureLimits(args.limits, capabilityIds)
   capabilityIds.forEach(assertCapabilityIdentifierClean)
-  const triggerSource: TriggerSource = args.triggerSource ?? "code"
+  const triggerSource = captureTriggerSource(args.triggerSource)
 
   const rationaleCheck = constitutionalPreCheck(rationale)
   if (rationaleCheck) {
@@ -1077,13 +1180,14 @@ export const issueAgentMandate = <
     })
   }
 
+
+  // Resolved before the first log read, as in `useCapability` (K1).
+  const grantorCapIds = new Set(claimedCapabilityIds(grantorScope))
+
   // Issue-time grantor-revoked check (closes the revoke-vs-issue race).
   checkGrantorNotRevoked(audit, grantorScope)
 
   // Runtime fallback subset check (belt-and-suspenders for any-cast escapes)
-  const grantorCapIds = new Set(
-    grantorScope.capabilities.map((c) => capabilityKey(c)),
-  )
   for (const capId of capabilityIds) {
     if (!grantorCapIds.has(capId)) {
       failMandate({
@@ -1125,7 +1229,7 @@ export const issueAgentMandate = <
     grantRationale: rationale,
     parentMandateId: grantorScope.id,
     parentScope: detach(grantorScope),
-  })
+  }, capabilityIds)
 
   bindTo(audit, scope)
 
@@ -1182,7 +1286,7 @@ export const resumeMandate = <
   const capabilities = captureCapabilities(args.capabilities)
   const declaredIds = resolveCapabilityIds(capabilities)
   const declaredTier: unknown = args.tier
-  const triggerSource: TriggerSource = args.triggerSource ?? "code"
+  const triggerSource = captureTriggerSource(args.triggerSource)
 
   // The leaf's grant first, so the walk's fallback `revokedBy` is the real
   // grantor, as it is on the use path (blind review 2026-11-01, finding 4).
@@ -1265,7 +1369,7 @@ export const resumeMandate = <
     grantRationale: leaf.rationale,
     parentMandateId: leaf.parentMandateId,
     parentScope: parent,
-  })
+  }, declaredIds)
 
   bindTo(audit, scope)
 
