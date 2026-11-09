@@ -2690,11 +2690,17 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
           : rationaleText
 
         const confident = scored && verdict.confidence >= judge.floor
-        if (!(confident && verdict.assessment === "match")) {
+        // A real doubt on this action outlives its window (ADR 0010, DAN-1443). The
+        // judge is still asked, because the owner needs a fresh hold to approve,
+        // but only the owner can turn that doubt into a run. `standingAnswer`
+        // above has already answered any doubt still inside its window, and
+        // nothing has been awaited since it read the log.
+        const doubted = cfg.mode === "enforce" && actionState(action, judge).standing !== undefined
+        if (!(confident && verdict.assessment === "match") || doubted) {
           if (cfg.mode === "enforce") {
             // Only a confident mismatch is a judgment. Everything else is doubt.
             const label = confident && verdict.assessment === "mismatch" ? "judgment-blocked" : "judgment-held"
-            const receipt = cfg.log.append({ ...evidence, decision: label, reason: `⚖ ${cfg.name} ${label} (${providerName}, ${verdict.assessment}, ${confText}): ${rationale}` })
+            const receipt = cfg.log.append({ ...evidence, decision: label, reason: `⚖ ${cfg.name} ${label} (${providerName}, ${verdict.assessment}, ${confText}): ${rationale}${doubted ? "; an earlier doubt on this action needs its owner" : ""}` })
             // The refusal goes to the agent. The judge's words, its assessment
             // and its confidence would each teach it what to change, so they come
             // back only when the host opts in (ADR 0010).

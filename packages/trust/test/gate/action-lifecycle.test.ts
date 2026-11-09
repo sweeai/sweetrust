@@ -111,7 +111,8 @@ describe("a block stands: retrying learns nothing (L1)", () => {
     expect((await sink(pay())).ok).toBe(false)
     expect(p.calls).toBe(1)
     vi.setSystemTime(new Date("2026-11-08T00:20:01.000Z"))
-    expect((await sink(pay())).ok).toBe(true)
+    // The block has ended, so the judge is asked again, but its match waits for the owner (DAN-1443).
+    expect((await sink(pay())).receipt.decision).toBe("judgment-held")
     expect(p.calls).toBe(2)
   })
 
@@ -170,15 +171,15 @@ describe("a hold stands until resolved or expired (L1, L2)", () => {
     expect(log.all().map((r) => r.decision)).toEqual(["judgment-held", "judgment-held", "attempted", "executed", "refused"])
   })
 
-  it("an expired hold is judged again", async () => {
+  it("an expired hold is judged again, and a match stays held for the owner (DAN-1443)", async () => {
     vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-11-08T00:00:00.000Z") })
     const p = scripted(UNSURE, MATCH)
     const { sink, runs } = build(p)
     await sink(pay())
     vi.setSystemTime(new Date("2026-11-08T00:15:00.001Z"))
-    expect((await sink(pay())).ok).toBe(true)
+    expect((await sink(pay())).receipt.decision).toBe("judgment-held")
     expect(p.calls).toBe(2)
-    expect(runs).toHaveLength(1)
+    expect(runs).toHaveLength(0)
   })
 })
 

@@ -176,7 +176,8 @@ the purpose, and a variant is then refused.
 ### A judge outage holds the call and leaves nothing behind
 
 A judge that times out, throws or answers with something that is not a verdict holds the call, and
-the next identical call asks the judge again. Only a real assessment sticks.
+the next identical call asks the judge again. Only a real assessment sticks: once a judge has really
+doubted an action, a later `match` on it is held for the owner, however long the agent waits.
 
 ### An idempotency key is host-attested
 

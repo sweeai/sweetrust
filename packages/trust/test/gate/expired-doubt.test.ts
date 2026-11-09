@@ -1,0 +1,172 @@
+/**
+ * A doubted action needs its owner (DAN-1443, amending ADR 0010). Waiting out a
+ * hold or a block used to buy a fresh sample of the judge, and a `match` then ran
+ * with nobody's approval, so an agent could retry until the judge agreed.
+ */
+import { generateKeyPairSync, sign } from "node:crypto"
+import { afterEach, describe, expect, it, vi } from "vitest"
+import { canonicalJSON, sha256Hex } from "../../src/canon.ts"
+import { ReceiptLog, Sourced, makeSink, type HeldAction, type JudgmentProvider } from "../../src/gate/index.ts"
+
+const owner = generateKeyPairSync("ed25519")
+const approvalKey = owner.publicKey.export({ format: "der", type: "spki" }).toString("hex")
+const approve = (h: HeldAction) => {
+  const f = {
+    verdictDigest: h.verdictDigest,
+    actionDigest: h.actionDigest,
+    grantHash: h.grantHash,
+    expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
+  }
+  return { ...f, signature: sign(null, Buffer.from(canonicalJSON({ domain: "sweetrust/approval@1", ...f })), owner.privateKey).toString("hex") }
+}
+
+const PURPOSE = { statement: "Pay the utility bill" }
+const granted = (mandateId: string) => ({ purpose: PURPOSE, grantHash: sha256Hex(canonicalJSON({ type: "grant", mandateId, purpose: PURPOSE })) })
+const MATCH = { assessment: "match", confidence: 0.95, rationale: "fits" }
+const MISMATCH = { assessment: "mismatch", confidence: 0.95, rationale: "not the owner's purpose" }
+const UNSURE = { assessment: "unsure", confidence: 0.3, rationale: "ask the owner" }
+const NOT_A_VERDICT = "the judge fell over"
+
+const HOLD_MS = 15 * 60_000
+const BLOCK_MS = 60 * 60_000
+const START = new Date("2026-11-08T00:00:00.000Z")
+
+const scripted = (...answers: unknown[]): JudgmentProvider & { calls: number } => {
+  const p = {
+    name: "j",
+    model: "j@1",
+    calls: 0,
+    async assess() {
+      const answer = answers[Math.min(p.calls, answers.length - 1)]
+      p.calls += 1
+      return answer as never
+    },
+  }
+  return p
+}
+
+const build = (provider: JudgmentProvider, log = new ReceiptLog(), mandateId = "m1") => {
+  const runs: unknown[] = []
+  const sink = makeSink<any, unknown>({
+    name: "pay",
+    requires: { to: "verified", amount: "verified" },
+    mode: "enforce",
+    log,
+    judgment: { provider, floor: 0.7, granted: granted(mandateId), approvalKey, purposeArgs: { payee: "to", amount: "amount" }, network: "sui:testnet", asset: "0x2::sui::SUI" },
+    execute: () => {
+      runs.push(1)
+      return "sent"
+    },
+  })
+  return { sink, log, runs }
+}
+const V = <T>(v: T) => Sourced.fromAuthority(v, "owner")
+const pay = () => ({ to: V("0xutility"), amount: V("5") })
+const wait = (ms: number) => vi.setSystemTime(new Date(Date.now() + ms))
+
+afterEach(() => {
+  vi.useRealTimers()
+})
+
+describe("a doubted action needs its owner", () => {
+  const clock = () => vi.useFakeTimers({ toFake: ["Date"], now: START })
+
+  it("an expired scored hold judged match again is held and does not run", async () => {
+    clock()
+    const p = scripted(UNSURE, MATCH)
+    const { sink, runs } = build(p)
+    await sink(pay())
+    wait(HOLD_MS + 1)
+    const r = await sink(pay())
+    expect(r.ok).toBe(false)
+    expect(r.receipt.decision).toBe("judgment-held")
+    expect(p.calls).toBe(2)
+    expect(runs).toHaveLength(0)
+  })
+
+  it("an expired block judged match again is held and does not run", async () => {
+    clock()
+    const p = scripted(MISMATCH, MATCH)
+    const { sink, runs } = build(p)
+    await sink(pay())
+    wait(BLOCK_MS + 1)
+    const r = await sink(pay())
+    expect(r.ok).toBe(false)
+    expect(r.receipt.decision).toBe("judgment-held")
+    expect(runs).toHaveLength(0)
+  })
+
+  it("retrying every window never runs the action", async () => {
+    clock()
+    const { sink, runs } = build(scripted(UNSURE, MATCH))
+    await sink(pay())
+    for (let i = 0; i < 20; i++) {
+      wait(HOLD_MS + 1)
+      expect((await sink(pay())).ok).toBe(false)
+    }
+    expect(runs).toHaveLength(0)
+  })
+
+  it("a hold issued after expiry releases with a fresh owner approval", async () => {
+    clock()
+    const { sink, runs } = build(scripted(UNSURE, MATCH))
+    await sink(pay())
+    wait(HOLD_MS + 1)
+    const held = await sink(pay())
+    if (held.ok || held.held === undefined) throw new Error("expected a hold")
+    const released = await sink.resume(pay(), approve(held.held))
+    expect(released.ok).toBe(true)
+    expect(runs).toHaveLength(1)
+  })
+
+  it("an expired hold judged mismatch is blocked", async () => {
+    clock()
+    const { sink, runs } = build(scripted(UNSURE, MISMATCH))
+    await sink(pay())
+    wait(HOLD_MS + 1)
+    const r = await sink(pay())
+    expect(r.receipt.decision).toBe("judgment-blocked")
+    expect(runs).toHaveLength(0)
+  })
+
+  it("a judge failure leaves no doubt so a later match runs", async () => {
+    clock()
+    const { sink, runs } = build(scripted(NOT_A_VERDICT, MATCH))
+    const first = await sink(pay())
+    expect(first.ok).toBe(false)
+    expect(first.receipt.verdict?.scored).toBe(false)
+    expect((await sink(pay())).ok).toBe(true)
+    expect(runs).toHaveLength(1)
+  })
+
+  it("an outage after a real doubt does not erase the doubt", async () => {
+    clock()
+    const { sink, runs } = build(scripted(UNSURE, NOT_A_VERDICT, MATCH))
+    await sink(pay())
+    wait(HOLD_MS + 1)
+    await sink(pay())
+    const r = await sink(pay())
+    expect(r.ok).toBe(false)
+    expect(runs).toHaveLength(0)
+  })
+
+  it("a completed action leaves no doubt on the next keyed payment", async () => {
+    clock()
+    const { sink, runs } = build(scripted(UNSURE, MATCH))
+    const held = await sink(pay(), { idempotencyKey: "invoice-1" })
+    if (held.ok || held.held === undefined) throw new Error("expected a hold")
+    expect((await sink.resume(pay(), approve(held.held), { idempotencyKey: "invoice-1" })).ok).toBe(true)
+    expect((await sink(pay(), { idempotencyKey: "invoice-2" })).ok).toBe(true)
+    expect(runs).toHaveLength(2)
+  })
+
+  it("a new grant starts without the old doubt", async () => {
+    clock()
+    const log = new ReceiptLog()
+    await build(scripted(UNSURE), log, "m1").sink(pay())
+    wait(HOLD_MS + 1)
+    const fresh = build(scripted(MATCH), log, "m2")
+    expect((await fresh.sink(pay())).ok).toBe(true)
+    expect(fresh.runs).toHaveLength(1)
+  })
+})
