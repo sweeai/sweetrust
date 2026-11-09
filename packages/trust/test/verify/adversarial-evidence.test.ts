@@ -156,7 +156,7 @@ describe("V5 — an action that throws leaves no receipt at all", () => {
   // "Verifiable evidence of what the agent did" cannot have a hole shaped like
   // "everything that went wrong".
 
-  it("ATTACK: a throwing sink operation must still land on the receipt log", () => {
+  it("ATTACK: a throwing sink operation must still land on the receipt log", async () => {
     const log = new SignedReceiptLog(signer)
     const pay = makeSink<{ amount: Sourced<number> }, string>({
       name: "pay",
@@ -168,7 +168,7 @@ describe("V5 — an action that throws leaves no receipt at all", () => {
       },
     })
 
-    expect(() => pay({ amount: Sourced.fromAuthority(500, "treasury") })).toThrow()
+    await expect(pay({ amount: Sourced.fromAuthority(500, "treasury") })).rejects.toThrow()
 
     // The attempt must be discoverable by an auditor.
     expect(log.all().length).toBeGreaterThan(0)

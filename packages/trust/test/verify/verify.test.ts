@@ -33,7 +33,7 @@ import {
 
 // ── Fixture: a two-decision session (1 executed, 1 refused) ──────────────────
 
-function session() {
+async function session() {
   const keys = generateSigningKeypair()
   const signer = makeEd25519ReceiptSigner({ privateKeyPem: keys.privateKeyPem, publicKeyPem: keys.publicKeyPem })
   const log = new SignedReceiptLog(signer)
@@ -47,8 +47,8 @@ function session() {
     execute: ({ to }) => `paid ${to.value}`,
   })
 
-  pay({ to: registryEntry }) // executed
-  pay({ to: Sourced.fromLLM("acct-EVIL-666", "ExtractInvoice", []) }) // refused
+  await pay({ to: registryEntry }) // executed
+  await pay({ to: Sourced.fromLLM("acct-EVIL-666", "ExtractInvoice", []) }) // refused
 
   const trustedKey = publicKeyHexFromPem(keys.publicKeyPem)
   return { keys, signer, log, trustedKey }
@@ -57,8 +57,8 @@ function session() {
 // ── Signing + the honest path ─────────────────────────────────────────────────
 
 describe("SignedReceiptLog", () => {
-  test("signs every receipt as it lands — refusals included — and stays a drop-in ReceiptLog", () => {
-    const { log } = session()
+  test("signs every receipt as it lands — refusals included — and stays a drop-in ReceiptLog", async () => {
+    const { log } = await session()
     expect(log).toBeInstanceOf(ReceiptLog)
     expect(log.all()).toHaveLength(2)
     expect(log.signed()).toHaveLength(2)
@@ -66,32 +66,32 @@ describe("SignedReceiptLog", () => {
     expect(log.verifyChain()).toBe(true) // the interior kernel chain still verifies
   })
 
-  test("wrapper chain follows sweetrust/mandate spec I8: previousHash = sha256(canonicalJSON(prev signed record)), null first", () => {
-    const { log } = session()
+  test("wrapper chain follows sweetrust/mandate spec I8: previousHash = sha256(canonicalJSON(prev signed record)), null first", async () => {
+    const { log } = await session()
     const [first, second] = log.signed()
     expect(first!.previousHash).toBeNull()
     expect(second!.previousHash).toBe(sha256Hex(canonicalJSON(first)))
   })
 
-  test("head() is the interior chain head (genesis when empty)", () => {
+  test("head() is the interior chain head (genesis when empty)", async () => {
     const keys = generateSigningKeypair()
     const empty = new SignedReceiptLog(
       makeEd25519ReceiptSigner({ privateKeyPem: keys.privateKeyPem, publicKeyPem: keys.publicKeyPem }),
     )
     expect(empty.head()).toBe("genesis")
-    const { log } = session()
+    const { log } = await session()
     expect(log.head()).toBe(log.all().at(-1)!.hash)
   })
 
-  test("exportJSONL / parseJSONL round-trips; parseJSONL rejects non-receipts", () => {
-    const { log } = session()
+  test("exportJSONL / parseJSONL round-trips; parseJSONL rejects non-receipts", async () => {
+    const { log } = await session()
     const parsed = parseJSONL(log.exportJSONL())
     expect(parsed).toEqual([...log.signed()])
     expect(() => parseJSONL('{"not":"a receipt"}\n')).toThrow(/not a SignedReceipt/)
   })
 
-  test("the honest chain verifies with only public material, anchor covering the full chain", () => {
-    const { log, trustedKey } = session()
+  test("the honest chain verifies with only public material, anchor covering the full chain", async () => {
+    const { log, trustedKey } = await session()
     const report = verifySignedChain(parseJSONL(log.exportJSONL()), {
       trustedSignerPublicKeyHex: trustedKey,
       anchor: { kind: "anchor", head: log.head() },
@@ -103,8 +103,8 @@ describe("SignedReceiptLog", () => {
 // ── The attacks: every one must be CAUGHT ────────────────────────────────────
 
 describe("verifySignedChain — attacks", () => {
-  test("tamper: rewriting history breaks the signature", () => {
-    const { log, trustedKey } = session()
+  test("tamper: rewriting history breaks the signature", async () => {
+    const { log, trustedKey } = await session()
     const tampered: SignedReceipt[] = JSON.parse(JSON.stringify(log.signed()))
     ;(tampered[0]!.payload.args as Record<string, { value: unknown }>).to!.value = "acct-EVIL-666"
     const r = verifySignedChain(tampered, { trustedSignerPublicKeyHex: trustedKey })
@@ -113,16 +113,16 @@ describe("verifySignedChain — attacks", () => {
     expect(r.firstInvalidIndex).toBe(0)
   })
 
-  test("splice: deleting the refusal from the middle breaks the hash chain", () => {
-    const { log, trustedKey } = session()
+  test("splice: deleting the refusal from the middle breaks the hash chain", async () => {
+    const { log, trustedKey } = await session()
     const spliced = [...log.signed()].filter((r) => r.payload.seq !== 0)
     const r = verifySignedChain(spliced, { trustedSignerPublicKeyHex: trustedKey })
     expect(r.valid).toBe(false)
     expect(r.reason).toBe("hash-chain-broken")
   })
 
-  test("forge: a competent forger who re-signs a consistent chain with THEIR key is stopped by key pinning", () => {
-    const { log, trustedKey } = session()
+  test("forge: a competent forger who re-signs a consistent chain with THEIR key is stopped by key pinning", async () => {
+    const { log, trustedKey } = await session()
     const forgerKeys = generateSigningKeypair()
     const forger = makeEd25519ReceiptSigner({ privateKeyPem: forgerKeys.privateKeyPem, publicKeyPem: forgerKeys.publicKeyPem })
     const forgedLog = new SignedReceiptLog(forger)
@@ -135,8 +135,8 @@ describe("verifySignedChain — attacks", () => {
     expect(r.reason).toBe("untrusted-signer")
   })
 
-  test("lie: a validly-signed payload whose interior hash doesn't rebuild → hash-mismatch", () => {
-    const { signer, trustedKey } = session()
+  test("lie: a validly-signed payload whose interior hash doesn't rebuild → hash-mismatch", async () => {
+    const { signer, trustedKey } = await session()
     const lying: Receipt = {
       seq: 0,
       at: new Date().toISOString(),
@@ -151,8 +151,8 @@ describe("verifySignedChain — attacks", () => {
     expect(r.reason).toBe("hash-mismatch")
   })
 
-  test("truncate: the tail deletion is INVISIBLE locally (honest limit) but the anchor catches it", () => {
-    const { log, trustedKey } = session()
+  test("truncate: the tail deletion is INVISIBLE locally (honest limit) but the anchor catches it", async () => {
+    const { log, trustedKey } = await session()
     const truncated = [...log.signed()].slice(0, -1)
     const local = verifySignedChain(truncated, { trustedSignerPublicKeyHex: trustedKey })
     expect(local.valid).toBe(true) // a shorter chain is still a valid chain — stated, not hidden
@@ -161,8 +161,8 @@ describe("verifySignedChain — attacks", () => {
     expect(anchored.reason).toBe("anchor-not-found")
   })
 
-  test("missing signature is refused before any crypto runs", () => {
-    const { log, trustedKey } = session()
+  test("missing signature is refused before any crypto runs", async () => {
+    const { log, trustedKey } = await session()
     const stripped = [{ ...log.signed()[0]!, signature: "" }]
     const r = verifySignedChain(stripped, { trustedSignerPublicKeyHex: trustedKey })
     expect(r.valid).toBe(false)
@@ -187,7 +187,7 @@ describe("anchor memos", () => {
   })
 
   // ── DAN-643: a receipt memo cannot masquerade as a full-chain seal ───────────
-  test("truncation behind an intermediate RECEIPT memo: a seal catches it, a receipt only proves partial", () => {
+  test("truncation behind an intermediate RECEIPT memo: a seal catches it, a receipt only proves partial", async () => {
     // A 3-decision session so an INTERIOR record survives truncation to be pointed at.
     const keys = generateSigningKeypair()
     const signer = makeEd25519ReceiptSigner({ privateKeyPem: keys.privateKeyPem, publicKeyPem: keys.publicKeyPem })
@@ -197,9 +197,9 @@ describe("anchor memos", () => {
       name: "pay", requires: { to: "verified" } as Record<"to", Tier>, mode: "enforce", log,
       execute: ({ to }) => `paid ${to.value}`,
     })
-    pay({ to: registryEntry })
-    pay({ to: registryEntry })
-    pay({ to: registryEntry })
+    await pay({ to: registryEntry })
+    await pay({ to: registryEntry })
+    await pay({ to: registryEntry })
     const trustedKey = publicKeyHexFromPem(keys.publicKeyPem)
 
     const full = log.signed()

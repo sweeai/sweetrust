@@ -53,7 +53,7 @@ Values carry their provenance, and privileged operations can demand it.
 - **The tier lattice** — `untrusted → corroborated → verified`. `minTier` gives the lowest tier of its inputs, and a value you compute from a `.value` is plain until you wrap it. LLM output is born untrusted no matter how good the model. *Inference is not evidence.*
 - **Three declassifiers** — the only ways a value can rise, and the constructor is module-private — at runtime too, not only in the types — so there is no fourth. A successful ascent is recorded in the value's provenance; a refusal is not yet recorded anywhere (see `SECURITY.md`): `allowlisted` (matches a registry you control → verified), `corroborate` (independent sources agree → corroborated, never verified), `humanConfirm` (asks a person, with the provenance rendered into the question so the answer is informed rather than reflexive).
 - **Sinks that declare their appetite** — `makeSink` refuses under-tier arguments and fails closed, naming the tier gap in the refusal. Adoption ladder: `observe → warn → enforce`, so you can install it into a running system without breaking it on day one; a mode outside the ladder is a `TypeError` at construction, never a guess. `execute()` receives a snapshot of the declared arguments, read once when they were checked.
-- **The judgment seam** — a pluggable calibrated scorer that runs *after* the tiers pass, to catch the action that is in-bounds but still wrong. An `unsure` verdict never blocks — it flags and defers to a human. A `mismatch` at or above the sink's `floor` blocks in `enforce`, and so does a provider that throws or cannot score; both flag in `observe` and `warn`.
+- **The judgment seam** — a pluggable calibrated scorer that runs *after* the tiers pass, to catch the action that is in-bounds but still wrong. In `enforce`, only a `match` at or above the sink's `floor` runs and only a `mismatch` at or above it blocks. Everything else is **held** for a human: `unsure`, either answer below the floor, and a provider that times out, throws or cannot score. Nothing runs on doubt. In `observe` and `warn` the action runs, flagged, with the verdict on the receipt. A block stands for an hour by default and a hold stands until it is resolved or expires, so a retry gets the same answer without asking the judge again. In `enforce` an identical action runs once unless the host names a new `{ idempotencyKey }`, which must never come from the agent (ADR 0010).
 - **`ReceiptLog`** — every **sink** decision, allow *and* refuse, lands on a hash-chained tamper-evident log. A declassifier's refusal does not (see `SECURITY.md`).
 
 <!-- readme-check: prelude
@@ -86,7 +86,7 @@ const payee   = allowlisted(account, PAYEE_REGISTRY, vendor, "payee-registry") /
 // value, so there is no way to spend the output without having looked.
 if (!payee.ok) throw new Error(payee.reason)
 
-pay({ to: payee.value, amount })
+await pay({ to: payee.value, amount })
 // Refused? The refusal names the tier gap AND renders the provenance —
 // and the refusal itself is on the receipt chain.
 ```
@@ -121,7 +121,7 @@ Power of attorney for machines: delegated in bounded tiers, every act on a signe
 - **One store, bound once** — `createTrust({ store })` is the only door to issue, use and revoke. The audit store is never a per-call argument, so a caller cannot judge a scope against a log it wrote itself; a scope minted against another store is refused (`MandateScopeForeign`).
 - **Forged-scope rejection** — `useCapability` requires a matching grant in the audit log and re-checks the subset claim. Deserialized payloads and `as any` escapes do not get through.
 - **Ancestor-revocation cascade** — revoking an org-tier mandate disables every descendant, and it cannot be argued away with a different log. The kill switch is structural, not advisory.
-- **Capability limits** — a grant can cap a capability by `amount`, by `count`, or both, optionally over a rolling `windowMs`. The cap is recorded in the grant event, and the spend is summed from the same audit log at every use, so no counter lives next to the agent and a restart alone refunds nothing (a log whose tail was cut does: `SECURITY.md`). Every key is resolved before the log is read, so a caller's getter cannot spend between the check and the record. A child may only tighten its grantor's limits (`LimitNotWithinGrantor`).
+- **Capability limits** — a grant can cap a capability by `amount`, by `count`, or both, optionally over a rolling `windowMs`. The cap is recorded in the grant event, and the spend is summed from the same audit log at every use, so no counter lives next to the agent and a restart alone refunds nothing (a log whose tail was cut does: `SECURITY.md`). Every key is resolved before the log is read, so a caller's getter cannot spend between the check and the record. A child may only tighten its grantor's limits (`LimitNotWithinGrantor`). A metered caller can name a hold with `holdId` (32 lowercase hex characters) and record the real cost later with `trust.settleCapability`, which lowers the counted amount, never the call count (ADR 0011).
 - **Resume, never re-mint** — `trust.resume({ resumedBy, mandateId, capabilities })` picks an issued, unrevoked mandate back up from the log after a restart: the same id, so the same budget. A re-mint at boot would be a fresh id with a fresh budget.
 - **Constitutional pre-check** — authored strings (rationales, capability identifiers) are screened for prompt-injection patterns *before* persistence.
 
@@ -251,6 +251,7 @@ A child may only tighten. Its `amount` and `count` may not be larger, its `unit`
 
 - **A cap binds a leaf.** Spend counts against the capped scope's own budget, and a parent's cap is not yet a shared budget across its children: two agents capped at $20 under a project capped at $30 can spend $40 between them. Cap the agent-tier scope you hand each agent, to the share you mean it to have.
 - **`amount` is the host's declaration.** The kernel enforces the spend it is told, so the host, never the agent, must make the `useCapability` call with the true figure.
+- **`actual` is the host's declaration too.** `settleCapability` counts the figure it is told, so the host, never the agent, makes that call. Whoever holds the client can settle.
 - **Amounts are JavaScript numbers.** The kernel accepts any finite, non-negative number and sums them as floats, so for money use integers in minor units (cents): a cap of 0.3 refuses 0.1 + 0.2. Whole dollars, as above, are integers too.
 
 ### Resume after a restart
@@ -389,7 +390,7 @@ A free tier without enforcement is an advisory guardrail, which is the exact fai
 
 ## Status
 
-**v0.5.1 is current,** a security patch over 0.5.0 with no API change (see `CHANGELOG.md`). 0.5.0 breaks two entry points from 0.4.0, the first npm release: the mandate verbs move onto the client `createTrust({ store })` returns, and `humanConfirm` returns a Promise. It also adds capability limits and `trust.resume`. `CHANGELOG.md` § *[0.5.0]* has the migration. The package was formed 2026-07-30 by merging three unpublished packages (`@sweetrust/mandate`, `@sweetrust/gate`, `@sweetrust/verify`) into one with subpath exports, then hardened through the adversarial passes `SECURITY.md` lists. Before 0.4.0, npm held only a 0.0.1 name placeholder with no code. `CHANGELOG.md` ships in the tarball.
+**v0.6.0 is current.** It lets a judge you supply score each action against the owner's signed purpose, and every sink call now returns a Promise. `CHANGELOG.md` § *[0.6.0]* has the migration. The package was formed 2026-07-30 by merging three unpublished packages (`@sweetrust/mandate`, `@sweetrust/gate`, `@sweetrust/verify`) into one with subpath exports, then hardened through the adversarial passes `SECURITY.md` lists. Before 0.4.0, npm held only a 0.0.1 name placeholder with no code. `CHANGELOG.md` ships in the tarball.
 
 ## Versioning
 

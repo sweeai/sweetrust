@@ -136,6 +136,103 @@ nothing. This is a known gap, not a design choice. The planned fix writes an int
 the action and the outcome after it. Until then, treat a signer error as "an action may have run
 unrecorded", not as a refusal.
 
+A judged enforce sink no longer has this gap (ADR 0010): an `attempted` receipt lands before
+`execute`, so a failure afterward still leaves the intent on the log, and the approval cannot be
+replayed. Unjudged sinks and observe/warn runs still do.
+
+### An action's lifecycle reads the log you give it
+
+Blocks, holds and attempts are read back from the receipt log, so the action record lasts exactly
+as long as the log does. `ReceiptLog` and `SignedReceiptLog` are in-memory. A new one is empty, so
+after a restart a block is forgotten and **an unkeyed payment that already ran can run again** unless
+you seed the new log from the old receipts, with `ReceiptLog.fromReceipts` or
+`SignedReceiptLog.fromSigned` (which verifies every signature under the signer's key). Saving the
+receipts is your job, and it has to happen as they are written: subclass the log, persist in
+`append`, and let a failed write throw, because the `attempted` record only protects you if it
+reached the disk before `execute` ran. Loading proves the chain is consistent, not that it is
+complete: a file cut at its tail loads as a valid shorter chain and its records are forgotten. A log
+that two processes write without sharing loses records the same way (ADR 0010).
+
+The check is in-process and keyed per sink name, grant, purpose and action digest; it does not stop
+a host from calling `execute`'s work some other way. Each judged call walks the log twice, so its
+cost grows with the log's length, and a retry loop that appends a receipt per retry makes each later
+call slower.
+
+### A changed argument is a new action
+
+Stickiness holds one exact action. An argument that changes, even by one base unit of an amount or
+one word of a free-text field, is a new action and gets a new judge call, and this design does not
+prevent that. A block does not cover the action next to it. The sink withholds the assessment,
+confidence and rationale from the refusal by default so an agent has nothing to climb on, and that
+is undone if you hand the agent the receipt, which holds all three. What bounds an agent that keeps
+trying is the purpose's deterministic fields and the chain's own limits.
+
+### A payee or asset is compared as written
+
+The kernel does not normalize an address or coin type. On a rail that does not normalize them
+either, a respelled payee is a new action that a block does not cover. Set `payees` and `asset` in
+the purpose, and a variant is then refused.
+
+### A judge outage holds the call and leaves nothing behind
+
+A judge that times out, throws or answers with something that is not a verdict holds the call, and
+the next identical call asks the judge again. Only a real assessment sticks.
+
+### An idempotency key is host-attested
+
+`{ idempotencyKey }` is how a host says "this is a second, intended payment", so it must come from the
+host, for example a payment's own invoice id, and never from anything an agent wrote. A host that
+forwards an agent's value as the key has handed the agent the decision to repeat a payment. It
+cannot evade a block or a hold, and that is all it cannot do.
+
+### A hand-built `granted` gets no revocation
+
+`trust.grantedPurpose(scope)` returns `{ purpose, grantHash, isLive }`. A judged sink calls `isLive`
+before judging and again immediately before `execute`, and refuses a grant it cannot confirm is
+live, in every mode, with a `refused` receipt reading `grant-not-live`. A store that fails during the
+check therefore stops the sink, and the receipt does not claim anyone revoked anything. A `granted` built by hand as `{ purpose, grantHash }` has no
+check, so it keeps working and **no revoke ever reaches that sink**. If you copy the fields out of
+`grantedPurpose`'s result, copy `isLive` too. A revoke that lands after the second check is too late
+for that call: `execute` has started. And a revoke here stops this kernel's sinks only; it does not
+stop money a chain already holds (above).
+
+### A `maxPerAction` with no asset is only as scoped as the host
+
+A sink that takes its asset as an argument refuses to build from a `maxPerAction` with no
+`purpose.fields.asset`. A sink with a fixed `judgment.asset` does not need one, because the host
+settles the unit. So one grant with no asset, used to build two fixed-asset sinks for two coins, caps
+both at the same number of base units, and the owner's signature names neither. Set `asset` in the
+purpose when the cap is meant for one asset.
+
+### A judge can read what an agent wrote
+
+`assess` receives `action.args` as raw values, and an argument can hold text an agent wrote: a memo,
+an invoice description, a payee name. The agent's own rationale never reaches a judge, but those
+values do. The provider also receives `trust`, each argument's tier and provenance, so it can read
+an `untrusted` argument as data rather than as instructions. The gate delivers that information; it
+cannot make a model use it, and a judge that follows instructions in an argument can still be
+talked into a `match`. Provenance is built from the channel and authority names your host passed,
+so a host that names a channel after agent text has handed the agent that string too.
+
+### A provider can do two things the sink cannot catch
+
+**An abort listener that throws.** At the deadline the sink calls `controller.abort()`. Node reports
+an exception from an abort listener as an uncaught exception, which ends the process unless the host
+handles it, and the sink has no way to catch it. The call then leaves no receipt. Do not throw from
+an abort listener.
+
+**A provider that blocks synchronously.** The deadline is a timer, and a timer cannot fire while
+JavaScript is blocking the event loop. A provider that spins in `assess`, or does synchronous work
+longer than `timeoutMs`, outlasts the deadline and stalls the whole process. Do blocking work off the
+main thread. Both limits apply to any code the host puts in the provider (ADR 0007).
+
+### A sink cannot check that `granted` belongs together
+
+`judgment.granted` is `{ purpose, grantHash }`, and the gate cannot recompute a grant's hash without
+the grant event. A host that pairs a real hash with a different purpose is not refused at the call.
+It is caught afterward: `verifyVerdictPurpose`, or `reconcile` given `grants`, compares the verdict's
+`purposeHash` with the purpose the signed grant records.
+
 ### For an async action, the receipt precedes the outcome and an `errored` receipt trails it
 
 A sink's receipt is written when `execute()` returns, and an async `execute()` returns a promise
@@ -176,12 +273,28 @@ log line that says less. It does not catch paraphrase
 framing untrusted text clearly and constraining what the model may output. Do not rely on forcing
 a tool call for that: some current models reject forced `tool_choice`.
 
+### A settle lowers the count on the host's word
+
+`settleCapability` records what a held call really cost, and the limit counts that figure from then on
+(ADR 0011). `actual` is the host's declaration, the same as `amount`: a host that reports too little
+makes the cap count too little. The kernel holds what it can: a hold settles down and at most once, and
+a `settle` line that names no earlier invoke, is out of range, or shares its hold id with another is
+ignored. Whoever holds the client can settle, so hand an agent its scope, never the client. Nothing in a
+`makeJsonlAuditLive` store is signed, so anyone who can append to that file can plant a well-formed
+settle and lower the count. Use a signed store where that matters.
+
 ### Amounts are JavaScript numbers
 
 A cap is summed in double precision, so past 2^53 an addition stops changing the total: a cap of
 2^53 fully spent still allows further uses of 1. Keep caps and amounts well under
 `Number.MAX_SAFE_INTEGER`, in integer minor units. A chain's own allowance, not this log, is what
 enforces an exact on-chain amount.
+
+### `reconcile` trusts the payloads you hand it
+
+`reconcile` takes `gate`, `sui` and `chain` rows as plain data and verifies no signature on them.
+Fabricated rows reconcile clean. Verify the gate rows with `verifySignedChain` first, and treat its
+report as a statement about those inputs only.
 
 ### `allowlisted` hands you the registry's own object, and `fromAuthority` freezes it
 
@@ -197,6 +310,25 @@ left alone. If you keep editing a record after wrapping it, wrap a copy.
 `untrusted → corroborated → verified`. The spec's fourth rung, `asserted`, was never produced by any
 factory or declassifier and was removed in the 2026-10-13 rail audit; a sink that requires it is a
 `TypeError` at construction.
+
+### `chainSpends` and `reconcile` trust an unauthenticated indexer
+
+`reconcile` is only as true as the chain list it is handed, and `sweetrust-sui`'s `chainSpends` reads
+that list from a GraphQL indexer. Nothing authenticates the answer: no signature or proof ties a row
+to a checkpoint. An indexer that lies, lags or withholds rows can hide a spend, invent one or misstate
+its amount, and a clean report then means only that the list agreed with the log.
+
+Point it at an endpoint you trust. `chainSpends` throws when the indexer knows nothing about the
+allowance, and a custom URL that shows neither a spend nor the allowance's creation throws too, since
+it may keep only part of the history. A partial answer that does contain spends is returned as it
+stands, and the list is only as complete as the indexer's retention.
+
+It reports what the chain charged, not what your program intended, and it can over-report. A spend is
+any transaction carrying a `FUNDS_WITHDRAWAL` input with `source: SENDER_ALLOWANCE` for this allowance,
+whichever Move module the commands call. `AllowanceWithdrawal` has `drop`, so a spender can name a
+withdrawal it never redeems: that lists as a spend with an unreadable payment, and `reconcile` calls
+it an orphan though nothing moved. Over-reporting fails closed, and only the spender can cause it,
+because a validator refuses at signing a withdrawal whose sender is not the allowance's spender.
 
 ---
 
@@ -262,6 +394,8 @@ artifact rather than the source, and the findings are recorded rather than quiet
   the injection; the in-memory signer's `verify` ignoring the record's key. In `useCapability`,
   every caller value except the scope, checked by identity, is a primitive before the first log
   read, and each regression was watched red on `v0.5.0`.
+  The same pass found `grantedPurpose` answering for a revoked mandate. That API first ships in 0.6.0
+  and is fixed there.
 
 🔑 **The lesson we keep relearning, offered because it will apply to your code too:** a check and
 the decision it authorizes must name the same binding. If you compare A and act on B, you have not

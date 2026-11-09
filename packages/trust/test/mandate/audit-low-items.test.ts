@@ -46,6 +46,54 @@ const refusal = (fn: () => void): MandateError | undefined => {
 
 const tmp = (): string => join(mkdtempSync(join(tmpdir(), "low-items-")), "audit.jsonl")
 
+describe("every authored name is screened before persistence (K8)", () => {
+  const setup = () => {
+    const store = makeInMemoryAuditLive()
+    const trust = createTrust({ store })
+    const org = trust.issueOrgMandate({ grantor: OWNER, capabilities: [Buy] as const, rationale: "root" })
+    return { trust, org }
+  }
+
+  test("a grantor at each tier", () => {
+    const { trust, org } = setup()
+    const project = trust.issueProjectMandate({ grantor: OWNER, grantorScope: org, capabilities: [Buy] as const, rationale: "p" })
+    const bad = grantorId(INJECTION)
+    for (const attempt of [
+      () => trust.issueOrgMandate({ grantor: bad, capabilities: [Buy] as const, rationale: "r" }),
+      () => trust.issueProjectMandate({ grantor: bad, grantorScope: org, capabilities: [Buy] as const, rationale: "r" }),
+      () => trust.issueAgentMandate({ grantor: bad, grantorScope: project, capabilities: [Buy] as const, rationale: "r" }),
+    ]) {
+      expect(refusal(attempt)).toMatchObject({ _tag: "MaliciousMandateMetadata", inputKind: "grantor" })
+    }
+  })
+
+  test("a limit's unit", () => {
+    const { trust } = setup()
+    expect(
+      refusal(() =>
+        trust.issueOrgMandate({ grantor: OWNER, capabilities: [Buy] as const, rationale: "r", limits: { "x.buy": { count: 1, unit: INJECTION } } }),
+      ),
+    ).toMatchObject({ _tag: "MaliciousMandateMetadata", inputKind: "unit" })
+  })
+
+  test("a resume's resumedBy, and nothing is recorded", () => {
+    const store = makeInMemoryAuditLive()
+    const trust = createTrust({ store })
+    const org = trust.issueOrgMandate({ grantor: OWNER, capabilities: [Buy] as const, rationale: "root" })
+    expect(refusal(() => trust.resume({ mandateId: org.id, capabilities: [Buy] as const, resumedBy: grantorId(INJECTION) }))).toMatchObject({
+      _tag: "MaliciousMandateMetadata",
+      inputKind: "resumedBy",
+    })
+    expect(store.query(org.id).filter((e) => e.type === "resume")).toHaveLength(0)
+  })
+
+  test("a grantor that is not a string is refused", () => {
+    const { trust } = setup()
+    const live = { toJSON: () => INJECTION } as unknown as GrantorId
+    expect(() => trust.issueOrgMandate({ grantor: live, capabilities: [Buy] as const, rationale: "r" })).toThrow(TypeError)
+  })
+})
+
 describe("issuing under a revoked ancestor (K8)", () => {
   test("a child of a project whose org is revoked is refused at issue", () => {
     const store = makeInMemoryAuditLive()

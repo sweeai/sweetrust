@@ -2,7 +2,7 @@
 title:       "ADR 0005: a capability limit lives in the grant event and is counted from the audit log"
 kind:        adr
 status:      accepted
-updated:     2026-11-01
+updated:     2026-11-08
 owner:       sweetrust maintainers
 verified_by: "pnpm -C packages/trust test (test/mandate/limits.test.ts, 30 cases watched RED on 2026-10-31 before the implementation; test/intake-poison.test.ts, the limits case)"
 ---
@@ -82,3 +82,9 @@ A grant may carry `limits`, a per-capability `CapabilityLimit { amount?, count?,
   `amount`. Both are additive, so a 0.4.0 log reads unchanged and a 0.4.0 reader ignores them.
 - Four new members on `MandateError`. Consumers that switch on `_tag` exhaustively will need the
   new cases.
+
+## Amended 2026-11-08
+
+ADR 0011 changes one step of how a limit is counted. An invoke that carries a `holdId` and has one
+valid `settle` event counts at that event's `actual` instead of its `amount`, at its own timestamp and
+still as one call. Every other invoke counts as decision 2 above says.

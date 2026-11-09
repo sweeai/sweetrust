@@ -1,0 +1,41 @@
+{
+  "what": "One allowance spend landed on Sui testnet through a spender's own Move module (a one-function wrapper calling 0x2::allowance::balance_spend), so no top-level command names 0x2::allowance. chainSpends must list it from the FUNDS_WITHDRAWAL input, and reconcile must not be clean about it. The wrapper is throwaway test code published to testnet only; its source is on chain at wrapperPackage and is not part of this package. Re-check: open the explorer link, or fetch the digest from any testnet fullnode.",
+  "network": "sui:testnet",
+  "recordedAt": "2026-11-09T03:33:11.465Z",
+  "sdk": "@mysten/sui 2.35.0",
+  "digest": "CJ477fKLXryieo5D2HGBdpj8VbJYTkAVzdviSUYocQUD",
+  "explorer": "https://suiscan.xyz/testnet/tx/CJ477fKLXryieo5D2HGBdpj8VbJYTkAVzdviSUYocQUD",
+  "wrapperPackage": "0x309bce7107bde7feab2dccebc5b3965f2f7681653956c76f906e413ac4d546ed",
+  "publishDigest": "8HVV2Af8Kcue8UbseFPsKUMnuR49p1ZF9jP9zeXQPm9r",
+  "allowanceId": "0x04534f3c35ccf1c116b6481d972cdb9fc5386a3644859b50fc2354230ee1afb7",
+  "openDigest": "Bjbd5vtpHYcGbqUPmzC9jaEQzSDt9pnEV1zo2xr3NbU5",
+  "revokeDigest": "2ahCpGdFHXzJmuEPVRVPuD5bG473sh9mWrE4QkaJ4EUW",
+  "amount": "1",
+  "commands": [
+    "0x309bce7107bde7feab2dccebc5b3965f2f7681653956c76f906e413ac4d546ed::w::forward",
+    "0x2::coin::from_balance",
+    "transferObjects"
+  ],
+  "withdrawalSource": "SENDER_ALLOWANCE",
+  "onChainSpent": "1",
+  "chainSpends": {
+    "status": "success",
+    "amount": "1"
+  },
+  "reconcile": {
+    "ok": false,
+    "orphans": [
+      {
+        "digest": "CJ477fKLXryieo5D2HGBdpj8VbJYTkAVzdviSUYocQUD",
+        "reason": "no-receipt"
+      }
+    ]
+  },
+  "preFix": {
+    "chainSpendsRows": 0,
+    "reconcile": {
+      "ok": true,
+      "orphans": []
+    }
+  }
+}

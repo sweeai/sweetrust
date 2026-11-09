@@ -1,0 +1,9 @@
+sweetrust-sui
+Copyright 2026 Daniel Ahn (Swee Inc.)
+
+Licensed under the Apache License, Version 2.0.
+
+This package calls Sui's native allowance module (`0x2::allowance`, part of the
+Sui framework, Copyright (c) Mysten Labs, Inc., Apache-2.0) through the
+`@mysten/sui` TypeScript SDK (Mysten Labs, Apache-2.0), a peer dependency. It
+ships no Move code and no copy of either.

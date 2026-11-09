@@ -35,7 +35,7 @@ describe("makeSink argument types (DAN-1159 item 4a)", () => {
     expect(typeof pay).toBe("function")
   })
 
-  it("CONTROL: a narrowed read compiles without generics", () => {
+  it("CONTROL: a narrowed read compiles without generics", async () => {
     const log = new ReceiptLog()
     const pay = makeSink({
       name: "pay",
@@ -47,10 +47,10 @@ describe("makeSink argument types (DAN-1159 item 4a)", () => {
         return typeof v === "number" ? v.toFixed(2) : "not a number"
       },
     })
-    expect(pay({ amount: Sourced.fromAuthority(5, "treasury") })).toMatchObject({ ok: true, result: "5.00" })
+    expect(await pay({ amount: Sourced.fromAuthority(5, "treasury") })).toMatchObject({ ok: true, result: "5.00" })
   })
 
-  it("CONTROL: explicit generics still satisfy the constraint, and keep the full type", () => {
+  it("CONTROL: explicit generics still satisfy the constraint, and keep the full type", async () => {
     const log = new ReceiptLog()
     const pay = makeSink<{ amount: Sourced<number> }, string>({
       name: "pay",
@@ -59,6 +59,6 @@ describe("makeSink argument types (DAN-1159 item 4a)", () => {
       log,
       execute: (a) => a.amount.value.toFixed(2),
     })
-    expect(pay({ amount: Sourced.fromAuthority(5, "treasury") })).toMatchObject({ ok: true, result: "5.00" })
+    expect(await pay({ amount: Sourced.fromAuthority(5, "treasury") })).toMatchObject({ ok: true, result: "5.00" })
   })
 })

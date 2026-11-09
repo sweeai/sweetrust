@@ -22,6 +22,7 @@ export type {
   MandateResumeEvent,
   MandateRevokeEvent,
   MandateScope,
+  MandateSettleEvent,
   MandateTier,
   ResumedScope,
   Signed,
@@ -29,6 +30,8 @@ export type {
   TriggerSource,
   VerifyAuditChainResult,
 } from "./types.ts"
+
+export type { GrantedPurpose, Purpose } from "../purpose.ts"
 
 export {
   makeInMemoryAuditLive,

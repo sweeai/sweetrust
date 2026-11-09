@@ -26,6 +26,9 @@ export {
   parseJSONL,
   // third-party verification
   verifySignedChain,
+  // the chain's payments against the records (spec I8)
+  reconcile,
+  verifyVerdictPurpose,
   // the anchor-memo convention
   RECEIPT_MEMO_PREFIX,
   ANCHOR_MEMO_PREFIX,
@@ -36,4 +39,11 @@ export {
   type ReceiptSigner,
   type VerifyFailure,
   type VerifyReport,
+  type Orphan,
+  type OrphanReason,
+  type ReconcileArgs,
+  type ReconcileReport,
+  type ReconcileSuiReceipt,
+  type ReconcileChainSpend,
+  type VerdictPurposeResult,
 } from "./verify.ts"

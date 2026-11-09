@@ -70,6 +70,7 @@ export const useCapability = <
     readonly mandate: MandateScope<Caps, Tier, ParentScope>
     readonly capability: Cap
     readonly triggerSource?: Parameters<TrustClient["issueOrgMandate"]>[0]["triggerSource"]
+    readonly verdictDigest?: string
   },
   audit: MandateAuditService,
 ): void => createTrust({ store: audit }).useCapability(args)

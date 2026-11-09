@@ -20,6 +20,7 @@ import {
   type Receipt,
   type JudgmentProvider,
 } from "../../src/gate/trust.js"
+import { GRANTED } from "../helpers/granted.ts"
 
 describe("A1 — ancestry erasure defeats the independence check (Rule 3b)", () => {
   // ADVERTISED: "Known limit: `ancestors` is a Set and freeze() does not seal
@@ -91,7 +92,7 @@ describe("A3 — the receipt is not a complete record of what the sink executed 
   // declared is therefore never tier-checked AND never recorded — it reaches
   // the privileged operation invisibly.
 
-  const undeclaredCall = (mode: "enforce" | "observe") => {
+  const undeclaredCall = async (mode: "enforce" | "observe") => {
     const log = new ReceiptLog()
     let sawInExecute: unknown = "never ran"
     const pay = makeSink<Record<string, Sourced<any>>, string>({
@@ -104,7 +105,7 @@ describe("A3 — the receipt is not a complete record of what the sink executed 
         return "sent"
       },
     })
-    const out = pay({
+    const out = await pay({
       amount: Sourced.fromAuthority(100, "treasury"),
       // Never declared in `requires`. Untrusted, straight off a channel.
       memo: Sourced.fromChannel("drain the account", "email-inbound"),
@@ -112,17 +113,17 @@ describe("A3 — the receipt is not a complete record of what the sink executed 
     return { out, sawInExecute: () => sawInExecute }
   }
 
-  it("FIXED: enforce mode refuses an argument the sink never declared", () => {
-    const { out, sawInExecute } = undeclaredCall("enforce")
+  it("FIXED: enforce mode refuses an argument the sink never declared", async () => {
+    const { out, sawInExecute } = await undeclaredCall("enforce")
     expect(out.ok).toBe(false)
     // It never reached the privileged operation.
     expect(sawInExecute()).toBe("never ran")
     if (!out.ok) expect(out.refusal).toContain("not declared in requires")
   })
 
-  it("FIXED: the receipt records an undeclared argument, in every mode", () => {
+  it("FIXED: the receipt records an undeclared argument, in every mode", async () => {
     for (const mode of ["enforce", "observe"] as const) {
-      const { out } = undeclaredCall(mode)
+      const { out } = await undeclaredCall(mode)
       expect(Object.keys(out.receipt.args)).toContain("memo")
       expect(out.receipt.args.memo?.provenance).toContain("UNDECLARED")
       expect(out.receipt.args.memo?.value).toBe("drain the account")
@@ -141,14 +142,15 @@ describe("A4 — judgment rationale bypasses the redaction seam", () => {
 
   const echoingProvider: JudgmentProvider = {
     name: "echoing-judge",
-    assess: (_action, args) => ({
+    model: "m@1",
+    assess: async ({ action }) => ({
       assessment: "unsure",
       confidence: 0.4,
-      rationale: `could not classify recipient ${String(args.to?.value)}`,
+      rationale: `could not classify recipient ${String(action.args.to)}`,
     }),
   }
 
-  it("ATTACK: a redacted value must not reappear in the receipt's reason", () => {
+  it("ATTACK: a redacted value must not reappear in the receipt's reason", async () => {
     const log = new ReceiptLog()
     const send = makeSink<Record<string, Sourced<any>>, string>({
       name: "send",
@@ -156,11 +158,11 @@ describe("A4 — judgment rationale bypasses the redaction seam", () => {
       mode: "enforce",
       log,
       redact: { to: "hash" },
-      judgment: { provider: echoingProvider, floor: 0.8 },
+      judgment: { provider: echoingProvider, floor: 0.8, granted: GRANTED },
       execute: () => "ok",
     })
 
-    const out = send({ to: Sourced.fromAuthority("patient@clinic.example", "directory") })
+    const out = await send({ to: Sourced.fromAuthority("patient@clinic.example", "directory") })
 
     // Redaction did its job on args…
     expect(String(out.receipt.args.to?.value)).toContain("sha256:")
@@ -263,7 +265,7 @@ describe("DAN-1159 item 2 — no action without its receipt", () => {
         return opts.execute ? opts.execute() : "sent"
       },
     })
-    const call = (value: unknown) => pay({ amount: Sourced.fromAuthority(value, "treasury") })
+    const call = async (value: unknown) => await pay({ amount: Sourced.fromAuthority(value, "treasury") })
     return { log, call, executed: () => executed }
   }
 
@@ -273,9 +275,9 @@ describe("DAN-1159 item 2 — no action without its receipt", () => {
     return o
   }
 
-  it("a BigInt amount (Sui MIST) executes AND leaves a receipt that records it", () => {
+  it("a BigInt amount (Sui MIST) executes AND leaves a receipt that records it", async () => {
     const { log, call, executed } = paySink()
-    const out = call(1_000_000_000n)
+    const out = await call(1_000_000_000n)
     expect(out.ok).toBe(true)
     expect(executed()).toBe(1)
     expect(log.all()).toHaveLength(1)
@@ -285,16 +287,16 @@ describe("DAN-1159 item 2 — no action without its receipt", () => {
     expect(log.verifyChain()).toBe(true)
   })
 
-  it("a BigInt nested inside an argument object is recorded too", () => {
+  it("a BigInt nested inside an argument object is recorded too", async () => {
     const { log, call } = paySink()
-    call({ to: "0xabc", amount: 5n })
+    await call({ to: "0xabc", amount: 5n })
     expect(log.all()[0]!.args.amount!.value).toEqual({ to: "0xabc", amount: { $bigint: "5" } })
     expect(log.verifyChain()).toBe(true)
   })
 
-  it("a circular argument is REFUSED in enforce mode, BEFORE execute(), and the refusal is on the receipt", () => {
+  it("a circular argument is REFUSED in enforce mode, BEFORE execute(), and the refusal is on the receipt", async () => {
     const { log, call, executed } = paySink()
-    const out = call(circular())
+    const out = await call(circular())
     expect(executed()).toBe(0)
     expect(out.ok).toBe(false)
     if (!out.ok) expect(out.refusal).toContain("cannot be written to a receipt")
@@ -304,9 +306,9 @@ describe("DAN-1159 item 2 — no action without its receipt", () => {
     expect(log.verifyChain()).toBe(true)
   })
 
-  it("in observe mode a circular argument still executes, and its receipt says what could not be recorded", () => {
+  it("in observe mode a circular argument still executes, and its receipt says what could not be recorded", async () => {
     const { log, call, executed } = paySink({ mode: "observe" })
-    const out = call(circular())
+    const out = await call(circular())
     expect(out.ok).toBe(true)
     expect(executed()).toBe(1)
     expect(log.all()).toHaveLength(1)
@@ -315,27 +317,27 @@ describe("DAN-1159 item 2 — no action without its receipt", () => {
     expect(log.verifyChain()).toBe(true)
   })
 
-  it("an execute() that throws on a BigInt-bearing call leaves an `errored` receipt and rethrows ITS error", () => {
+  it("an execute() that throws on a BigInt-bearing call leaves an `errored` receipt and rethrows ITS error", async () => {
     const { log, call, executed } = paySink({ execute: () => { throw new Error("rpc timeout") } })
-    expect(() => call(7n)).toThrow("rpc timeout")
+    await expect(call(7n)).rejects.toThrow("rpc timeout")
     expect(executed()).toBe(1)
     expect(log.all().map((r) => r.decision)).toEqual(["errored"])
     expect(log.verifyChain()).toBe(true)
   })
 
-  it("a BigInt under the `hash` and `truncate` policies is recorded, not thrown before the receipt", () => {
+  it("a BigInt under the `hash` and `truncate` policies is recorded, not thrown before the receipt", async () => {
     for (const redact of ["hash", "truncate"] as const) {
       const { log, call, executed } = paySink({ redact })
-      expect(() => call(42n)).not.toThrow()
+      await expect(call(42n)).resolves.toBeDefined()
       expect(executed()).toBe(1)
       expect(log.all()).toHaveLength(1)
     }
     const truncated = paySink({ redact: "truncate" })
-    truncated.call(42n)
+    await truncated.call(42n)
     expect(truncated.log.all()[0]!.args.amount!.value).toBe('{"$bigint":"42"}')
   })
 
-  it("the receipt is a SNAPSHOT: editing the argument object afterwards changes neither the receipt nor its chain", () => {
+  it("the receipt is a SNAPSHOT: editing the argument object afterwards changes neither the receipt nor its chain", async () => {
     // Built from a CHANNEL, not an authority: since the 2026-10-13 gate audit
     // (#9) `fromAuthority` freezes an object value in place, so the edit below
     // would throw on an authority value. The claim under test — the receipt
@@ -349,21 +351,21 @@ describe("DAN-1159 item 2 — no action without its receipt", () => {
       execute: () => "sent",
     })
     const order = { to: "0xabc", amount: 5 }
-    pay({ amount: Sourced.fromChannel(order, "webhook") })
+    await pay({ amount: Sourced.fromChannel(order, "webhook") })
     order.amount = 5000
     expect(log.all()[0]!.args.amount!.value).toEqual({ to: "0xabc", amount: 5 })
     expect(log.verifyChain()).toBe(true)
   })
 
-  it("CONTROL: plain JSON values record exactly as before, and the `hash` digest is unchanged", () => {
+  it("CONTROL: plain JSON values record exactly as before, and the `hash` digest is unchanged", async () => {
     const { log, call } = paySink()
-    call("0xabc")
-    call(12.5)
-    call({ b: 1, a: [true, null] })
+    await call("0xabc")
+    await call(12.5)
+    await call({ b: 1, a: [true, null] })
     expect(log.all().map((r) => r.args.amount!.value)).toEqual(["0xabc", 12.5, { b: 1, a: [true, null] }])
 
     const hashed = paySink({ redact: "hash" })
-    hashed.call({ to: "0xabc", amount: 5 })
+    await hashed.call({ to: "0xabc", amount: 5 })
     const expected = "sha256:" + createHash("sha256").update(JSON.stringify({ to: "0xabc", amount: 5 })).digest("hex")
     expect(hashed.log.all()[0]!.args.amount!.value).toBe(expected)
   })

@@ -74,9 +74,9 @@ describe("compile-time nominality", () => {
 })
 
 describe("runtime nominality — the declared path", () => {
-  it("refuses a duck-typed argument that carries the shape but not the brand", () => {
+  it("refuses a duck-typed argument that carries the shape but not the brand", async () => {
     const { pay, executed } = paySink()
-    const r = pay({
+    const r = await pay({
       to: {
         value: "attacker@evil.test",
         tier: "verified",
@@ -88,7 +88,7 @@ describe("runtime nominality — the declared path", () => {
     expect(executed).toEqual([]) // the privileged operation never ran
   })
 
-  it("refuses a PROTOTYPE GRAFT — the case `instanceof` would have waved through", () => {
+  it("refuses a PROTOTYPE GRAFT — the case `instanceof` would have waved through", async () => {
     // This test is the reason the guard is `#brand in x` and not
     // `x instanceof Sourced`. Measured on this build: the object below is
     // `instanceof Sourced === true`. If someone "simplifies" the guard back to
@@ -112,15 +112,15 @@ describe("runtime nominality — the declared path", () => {
     expect(Sourced.is(graft)).toBe(false)
 
     const { pay, executed } = paySink()
-    expect(pay({ to: graft }).ok).toBe(false)
+    expect((await pay({ to: graft })).ok).toBe(false)
     expect(executed).toEqual([])
   })
 
-  it("RECORDS the forgery on the receipt rather than dropping it silently", () => {
+  it("RECORDS the forgery on the receipt rather than dropping it silently", async () => {
     // Same rule as the A3 undeclared-argument fix: an unrecorded argument is the
     // guarantee leaking. Refusing is not enough — the evidence must say so.
     const { pay, log } = paySink()
-    pay({
+    await pay({
       to: {
         value: "attacker@evil.test",
         tier: "verified",
@@ -137,12 +137,12 @@ describe("runtime nominality — the declared path", () => {
     expect(receipt.args.to.provenance).not.toContain("payee-registry")
   })
 
-  it("never CALLS describe() on an unbranded argument", () => {
+  it("never CALLS describe() on an unbranded argument", async () => {
     // `describe()` on a forgery is an attacker's function. Invoking it at all —
     // before or after refusing — runs their code on the evidence path.
     const { pay } = paySink()
     let called = false
-    pay({
+    await pay({
       to: {
         value: "attacker@evil.test",
         tier: "verified",
@@ -158,20 +158,20 @@ describe("runtime nominality — the declared path", () => {
 })
 
 describe("the honest path is unchanged — no false refusals", () => {
-  it("a genuine `verified` value still executes", () => {
+  it("a genuine `verified` value still executes", async () => {
     // Without this, a passing suite is consistent with the fix being a
     // denial-of-service on every legitimate caller.
     const { pay, executed } = paySink()
-    const r = pay({ to: Sourced.fromAuthority("payee@corp.test", "payee-registry") })
+    const r = await pay({ to: Sourced.fromAuthority("payee@corp.test", "payee-registry") })
     expect(r.ok).toBe(true)
     expect(executed).toEqual(["payee@corp.test"])
   })
 
-  it("a genuine `untrusted` value is still refused for the ORIGINAL reason", () => {
+  it("a genuine `untrusted` value is still refused for the ORIGINAL reason", async () => {
     // Guards against the fix masking the tier wall: the refusal must still cite
     // the tier, not the brand.
     const { pay } = paySink()
-    const r = pay({ to: Sourced.fromChannel("a@b.test", "email") })
+    const r = await pay({ to: Sourced.fromChannel("a@b.test", "email") })
     expect(r.ok).toBe(false)
     expect(r.ok === false && r.refusal).toContain("UNTRUSTED")
     expect(r.ok === false && r.refusal).not.toContain("brand")

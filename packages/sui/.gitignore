@@ -1,0 +1,20 @@
+# Each package carries its own .gitignore (see the repo root's for why).
+
+.env
+.env.*
+!.env.example
+
+# Testnet keys are loaded by path from SWEETRUST_SUI_TESTNET_KEYS and never
+# live in this tree. These patterns catch a copy made by mistake.
+*.keys.json
+.keys.json
+
+node_modules
+dist/
+*.tsbuildinfo
+
+.DS_Store
+
+# scripts/readme-typecheck.ts runs README blocks from a temp dir inside the
+# package (for self-reference resolution) and removes it; this catches a crash.
+.readme-run-*/

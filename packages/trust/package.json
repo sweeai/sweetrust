@@ -1,6 +1,6 @@
 {
   "name": "sweetrust",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "description": "Trust rails for AI agents: issue authority, enforce it, prove what happened. Ed25519-signed mandates, provenance-tiered values with fail-closed sinks, and receipt chains a stranger can verify. Zero runtime dependencies.",
   "type": "module",
   "main": "./dist/index.mjs",

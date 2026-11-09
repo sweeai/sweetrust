@@ -34,20 +34,27 @@
  * record; the three declassifiers re-read their `Sourced` arguments into the
  * ascent. Each was watched RED here before its fix.
  */
-import { generateKeyPairSync } from "node:crypto"
+import { generateKeyPairSync, sign } from "node:crypto"
 import { describe, expect, test } from "vitest"
+import { GRANTED } from "./helpers/granted.ts"
 import { poison, readsOf, SecondRead } from "./helpers/poison.ts"
 import { MandateFailure } from "../src/mandate/errors.ts"
+import { canonicalJSON, sha256Hex } from "../src/canon.ts"
 import {
+  actionDigest,
   allowlisted,
   corroborate,
+  encodeAction,
   humanConfirm,
   makeSink,
+  paymentDigest,
+  verdictDigest,
   ReceiptLog,
   Sourced,
   type JudgmentProvider,
   type Receipt,
   type Tier,
+  purposeHash,
 } from "../src/gate/index.ts"
 import {
   createTrust,
@@ -75,8 +82,10 @@ import {
   generateSigningKeypair,
   makeEd25519ReceiptSigner,
   publicKeyHexFromPem,
+  reconcile,
   SignedReceiptLog,
   verifySignedChain,
+  verifyVerdictPurpose,
   type SignedReceipt,
 } from "../src/verify/index.ts"
 
@@ -341,6 +350,37 @@ describe("mandate: every exported function reads its args bag, and each capabili
       () => resumeRun((x) => x),
       () => resumeRun(poison),
     )
+    // DAN-1384: the `purpose` bag and its `fields` bag are caller data read
+    // once at issue. The verdicts to pin are an issue, a narrower child, the
+    // widening refusal, and what grantedPurpose then reads back. The hash is
+    // left out because a grant's timestamp differs across the two runs.
+    const purposeRun = (wrap: <T extends object>(x: T) => T) => {
+      const audit = makeInMemoryAuditLive()
+      const trust = createTrust(wrap({ store: audit }))
+      const purpose = (payees: string[], maxPerAction: string) =>
+        wrap({ statement: "pay for research", fields: wrap({ payees, maxPerAction, actions: ["pay"] }) })
+      const org = trust.issueOrgMandate(wrap({ grantor: ARTHUR, capabilities: [Wire] as const, rationale: "org", purpose: purpose(["0xa", "0xb"], "500") }))
+      const project = trust.issueProjectMandate(wrap({ grantor: LEAD, grantorScope: org, capabilities: [Wire] as const, rationale: "project", purpose: purpose(["0xa"], "100") }))
+      const agent = trust.issueAgentMandate(wrap({ grantor: BOT, grantorScope: project, capabilities: [Wire] as const, rationale: "agent", purpose: purpose(["0xa"], "100") }))
+      let widened = "none"
+      try {
+        trust.issueAgentMandate(wrap({ grantor: BOT, grantorScope: project, capabilities: [Wire] as const, rationale: "agent", purpose: purpose(["0xa"], "101") }))
+      } catch (e) {
+        if (MandateFailure.is(e)) widened = e._tag
+        else throw e
+      }
+      return { widened, recorded: [org, project, agent].map((s) => trust.grantedPurpose(s).purpose) }
+    }
+    sameVerdict(
+      "createTrust() with purpose: issue, narrow, refuse a wider child, read it back",
+      () => purposeRun((x) => x),
+      () => purposeRun(poison),
+    )
+    // grantedPurpose takes a scope, whose authority is object identity (this
+    // file's header): a Proxy of one is correctly refused, without a second read.
+    const trust = createTrust({ store: makeInMemoryAuditLive() })
+    const scope = trust.issueOrgMandate({ grantor: ARTHUR, capabilities: [Wire] as const, rationale: "org", purpose: { statement: "s" } })
+    expect(verdict(() => trust.grantedPurpose(poison(scope)))).toEqual({ kind: "threw", tag: "MandateScopeForged" })
   })
 
   test("issueOrgMandate — success, and the injected-rationale refusal", () => {
@@ -412,6 +452,40 @@ describe("mandate: every exported function reads its args bag, and each capabili
     )
   })
 
+  test("settleCapability — success (the settle is recorded once), and a refusal", () => {
+    const HOLD = "a".repeat(32)
+    const held = () => {
+      const { audit, agent } = chain()
+      const trust = createTrust({ store: audit })
+      trust.useCapability({ mandate: agent, capability: Read, amount: 10, holdId: HOLD, triggerSource: "code" })
+      return { audit, agent, trust }
+    }
+    sameVerdict(
+      "settleCapability",
+      () => {
+        const { audit, agent, trust } = held()
+        trust.settleCapability({ mandate: agent, capability: Read, holdId: HOLD, actual: 1, triggerSource: "code" })
+        return audit.query(agent.id).filter((e) => e.type === "settle").length
+      },
+      () => {
+        const { audit, agent, trust } = held()
+        trust.settleCapability(poison({ mandate: agent, capability: poison(Read), holdId: HOLD, actual: 1, triggerSource: "code" as const }))
+        return audit.query(agent.id).filter((e) => e.type === "settle").length
+      },
+    )
+    sameVerdict(
+      "settleCapability (refused)",
+      () => {
+        const { agent, trust } = held()
+        return trust.settleCapability({ mandate: agent, capability: Read, holdId: HOLD, actual: 11 })
+      },
+      () => {
+        const { agent, trust } = held()
+        return trust.settleCapability(poison({ mandate: agent, capability: poison(Read), holdId: HOLD, actual: 11 }))
+      },
+    )
+  })
+
   test("useCapability — success (the invoke is recorded once), and the out-of-scope refusal", () => {
     sameVerdict(
       "useCapability",
@@ -437,6 +511,41 @@ describe("mandate: every exported function reads its args bag, and each capabili
         return useCapability(poison({ mandate: agent, capability: poison(Wire) }) as any, audit)
       },
     )
+  })
+
+  test("useCapability — verdictDigest is read once, accepted and refused alike (DAN-1385)", () => {
+    const digest = "d".repeat(64)
+    const recorded = (audit: ReturnType<typeof chain>["audit"], id: ReturnType<typeof chain>["agent"]["id"]) =>
+      audit.query(id).map((e) => (e.type === "invoke" ? e.verdictDigest : e.type))
+    sameVerdict(
+      "useCapability (verdictDigest)",
+      () => {
+        const { audit, agent } = chain()
+        useCapability({ mandate: agent, capability: Read, verdictDigest: digest }, audit)
+        return recorded(audit, agent.id)
+      },
+      () => {
+        const { audit, agent } = chain()
+        useCapability(poison({ mandate: agent, capability: poison(Read), verdictDigest: digest }), audit)
+        return recorded(audit, agent.id)
+      },
+    )
+    sameVerdict(
+      "useCapability (malformed verdictDigest)",
+      () => {
+        const { audit, agent } = chain()
+        return useCapability({ mandate: agent, capability: Read, verdictDigest: "D".repeat(64) }, audit)
+      },
+      () => {
+        const { audit, agent } = chain()
+        return useCapability(poison({ mandate: agent, capability: poison(Read), verdictDigest: "D".repeat(64) }), audit)
+      },
+    )
+    const { audit, agent } = chain()
+    const bag = poison({ mandate: agent, capability: poison(Read), verdictDigest: digest })
+    useCapability(bag, audit)
+    expect(readsOf(bag).get("verdictDigest")).toBe(1)
+    expect(recorded(audit, agent.id)).toContain(digest)
   })
 
   test("revokeMandate — success, and the stranger refusal", () => {
@@ -474,7 +583,7 @@ describe("mandate: every exported function reads its args bag, and each capabili
 describe("gate: the sink spec, its nested bags, the call's args bag, the log entry and the declassifiers", () => {
   const good = () => Sourced.fromAuthority("ACME", "reg")
   const bad = () => Sourced.fromLLM("EVIL", "Extract", [])
-  const unsure: JudgmentProvider = { name: "u", assess: () => ({ assessment: "unsure", confidence: 0.4, rationale: "near the cap" }) }
+  const unsure: JudgmentProvider = { name: "u", model: "m@1", assess: async () => ({ assessment: "unsure", confidence: 0.4, rationale: "near the cap" }) }
 
   type Spec = Parameters<typeof makeSink<{ to: Sourced<string> }, string>>[0]
   const spec = (log: ReceiptLog, judgment?: boolean): Spec => ({
@@ -484,7 +593,7 @@ describe("gate: the sink spec, its nested bags, the call's args bag, the log ent
     log,
     execute: ({ to }) => `paid ${to.value}`,
     redact: { to: "hash" },
-    ...(judgment ? { judgment: { provider: unsure, floor: 0.8 } } : {}),
+    ...(judgment ? { judgment: { provider: unsure, floor: 0.8, granted: GRANTED } } : {}),
   })
   const poisonedSpec = (log: ReceiptLog, judgment?: boolean): Spec => {
     const s = spec(log, judgment)
@@ -493,35 +602,81 @@ describe("gate: the sink spec, its nested bags, the call's args bag, the log ent
         ...s,
         requires: poison(s.requires, "spec.requires"),
         redact: poison(s.redact!, "spec.redact"),
-        ...(s.judgment ? { judgment: poison(s.judgment, "spec.judgment") } : {}),
+        ...(s.judgment
+          ? {
+              judgment: poison(
+                { ...s.judgment, provider: poison(s.judgment.provider, "spec.judgment.provider"), granted: poison(s.judgment.granted, "spec.judgment.granted") },
+                "spec.judgment",
+              ),
+            }
+          : {}),
       },
       "spec",
     )
   }
   const decisions = (log: ReceiptLog) => log.all().map((r) => r.decision)
 
-  test("makeSink spec + the call's args bag: executed, refused (under-tier), refused (undeclared key)", () => {
+  test("makeSink spec + the call's args bag: executed, refused (under-tier), refused (undeclared key)", async () => {
     for (const judgment of [false, true]) {
-      sameVerdict(
+      await sameVerdictAsync(
         `makeSink${judgment ? " +judgment" : ""}`,
-        () => {
+        async () => {
           const log = new ReceiptLog()
           const pay = makeSink(spec(log, judgment))
-          const a = pay({ to: good() })
-          const b = pay({ to: bad() })
-          const c = pay({ to: good(), extra: good() } as any)
+          const a = await pay({ to: good() })
+          const b = await pay({ to: bad() })
+          const c = await pay({ to: good(), extra: good() } as any)
           return { a: [a.ok, a.receipt.decision], b: [b.ok, b.receipt.decision], c: [c.ok, c.receipt.decision], decisions: decisions(log), chain: log.verifyChain() }
         },
-        () => {
+        async () => {
           const log = new ReceiptLog()
           const pay = makeSink(poisonedSpec(log, judgment))
-          const a = pay(poison({ to: good() }, "args"))
-          const b = pay(poison({ to: bad() }, "args"))
-          const c = pay(poison({ to: good(), extra: good() } as any, "args"))
+          const a = await pay(poison({ to: good() }, "args"))
+          const b = await pay(poison({ to: bad() }, "args"))
+          const c = await pay(poison({ to: good(), extra: good() } as any, "args"))
           return { a: [a.ok, a.receipt.decision], b: [b.ok, b.receipt.decision], c: [c.ok, c.receipt.decision], decisions: decisions(log), chain: log.verifyChain() }
         },
       )
     }
+  })
+
+  test("the sink's call options are read once, own keys only", async () => {
+    const run = async (wrap: <T extends object>(o: T, label: string) => T) => {
+      const log = new ReceiptLog()
+      const pay = makeSink(spec(log, true))
+      const a = await pay({ to: good() }, wrap({ idempotencyKey: "invoice-1" }, "options"))
+      const b = await pay({ to: good() }, wrap({ idempotencyKey: "invoice-1" }, "options"))
+      const c = await pay({ to: good() }, wrap({ idempotencyKey: "" } as never, "options"))
+      return { a: [a.ok, a.receipt.decision], b: [b.ok, b.receipt.decision], c: [c.ok, c.receipt.decision], decisions: decisions(log), chain: log.verifyChain() }
+    }
+    await sameVerdictAsync("sink options", () => run((o) => o), () => run((o, label) => poison(o, label)))
+    const inherited = await makeSink(spec(new ReceiptLog(), true))({ to: good() }, Object.create({ idempotencyKey: "from-the-prototype" }) as never)
+    expect(inherited.receipt.verdict?.actionDigest).toBe(inherited.receipt.verdict?.unkeyedActionDigest)
+  })
+
+  test("sink.resume: the approval, its args bag and the sink's approvalKey are each read once", async () => {
+    const { publicKey, privateKey } = generateKeyPairSync("ed25519")
+    const approvalKey = publicKey.export({ format: "der", type: "spki" }).toString("hex")
+    const run = async (wrap: <T extends object>(o: T, label: string) => T) => {
+      const log = new ReceiptLog()
+      const base = spec(log, true)
+      const pay = makeSink(wrap({ ...base, judgment: wrap({ ...base.judgment!, approvalKey }, "spec.judgment") }, "spec"))
+      const value = good()
+      const h = await pay(wrap({ to: value }, "args"))
+      if (h.ok || h.held === undefined) throw new Error("expected a hold")
+      const fields = { ...h.held, expiresAt: new Date(Date.now() + 60_000).toISOString() }
+      const signature = sign(null, Buffer.from(canonicalJSON({ domain: "sweetrust/approval@1", ...fields })), privateKey).toString("hex")
+      const released = await pay.resume(wrap({ to: value }, "resume.args"), wrap({ ...fields, signature }, "resume.approval"))
+      const replayed = await pay.resume(wrap({ to: value }, "resume.args"), wrap({ ...fields, signature }, "resume.approval"))
+      const forged = await pay.resume(wrap({ to: value }, "resume.args"), wrap({ ...fields, signature: "0".repeat(128) }, "resume.approval"))
+      return {
+        released: [released.ok, released.receipt.decision],
+        replayed: [replayed.ok, replayed.receipt.decision, replayed.ok ? "" : replayed.refusal.includes("approval-replayed")],
+        forged: [forged.ok, forged.receipt.decision, forged.ok ? "" : forged.refusal.includes("approval-unsigned")],
+        chain: log.verifyChain(),
+      }
+    }
+    await sameVerdictAsync("sink.resume", () => run((o) => o), () => run((o, label) => poison(o, label)))
   })
 
   test("makeSink refuses a bad spec at construction with the same TypeError, poisoned or not", () => {
@@ -620,21 +775,45 @@ describe("gate: the sink spec, its nested bags, the call's args bag, the log ent
 // ── verify, and mandate's signer surface ─────────────────────────────────────
 
 describe("verify + signer: records, options bags, signer configs and sign/preimage envelopes", () => {
-  const session = () => {
+  const session = async () => {
     const keys = generateSigningKeypair()
     const log = new SignedReceiptLog(makeEd25519ReceiptSigner(keys))
     const pay = makeSink<{ to: Sourced<string> }, string>({ name: "pay", requires: { to: "verified" }, mode: "enforce", log, execute: ({ to }) => `paid ${to.value}` })
-    pay({ to: Sourced.fromAuthority("ACME", "reg") })
-    pay({ to: Sourced.fromLLM("EVIL", "Extract", []) })
-    pay({ to: Sourced.fromAuthority("ACME", "reg") })
+    await pay({ to: Sourced.fromAuthority("ACME", "reg") })
+    await pay({ to: Sourced.fromLLM("EVIL", "Extract", []) })
+    await pay({ to: Sourced.fromAuthority("ACME", "reg") })
     const records = log.signed() as SignedReceipt[]
     const pin = publicKeyHexFromPem(keys.publicKeyPem)
     return { keys, log, records, pin }
   }
   const poisonRecords = (records: ReadonlyArray<SignedReceipt>) => records.map((r, i) => poison({ ...r }, `records[${i}]`))
 
-  test("verifySignedChain — valid, with a seal, with a receipt memo, wrong pin, unknown option", () => {
-    const { records, pin, log } = session()
+  test("ReceiptLog.fromReceipts and SignedReceiptLog.fromSigned read each record once", async () => {
+    const signer = makeEd25519ReceiptSigner(generateSigningKeypair())
+    const log = new SignedReceiptLog(signer)
+    log.append({ at: "2026-01-01T00:00:00.000Z", sink: "s", decision: "refused", args: {} })
+    log.append({ at: "2026-01-01T00:00:01.000Z", sink: "s", decision: "executed", args: {} })
+    const copies = () => JSON.parse(log.exportJSONL().trim().split("\n").map((l) => `[${l}]`).join("").replace(/\]\[/g, ",")) as ReadonlyArray<ReturnType<typeof log.signed>[number]>
+    const heads = (l: ReceiptLog) => [l.head(), l.all().length, l.verifyChain()]
+    expect(heads(ReceiptLog.fromReceipts(log.all()))).toEqual(heads(log))
+    sameVerdict("fromReceipts", () => heads(ReceiptLog.fromReceipts(log.all())), () => heads(ReceiptLog.fromReceipts(log.all().map((r, i) => poison({ ...r }, `row[${i}]`)))))
+    expect(heads(SignedReceiptLog.fromSigned(copies(), signer))).toEqual(heads(log))
+    sameVerdict("fromSigned", () => heads(SignedReceiptLog.fromSigned(copies(), signer)), () => heads(SignedReceiptLog.fromSigned(copies().map((r, i) => poison({ ...r }, `record[${i}]`)), signer)))
+  })
+
+  test("verifyVerdictPurpose — its args bag, the verdict and the grant are read once", () => {
+    const grant = () => ({ type: "grant", purpose: { statement: "Pay rent" } })
+    const verdict = () => ({ grantHash: sha256Hex(canonicalJSON(grant())), purposeHash: purposeHash({ statement: "Pay rent" }) }) as never
+    expect(verifyVerdictPurpose({ verdict: verdict(), grant: grant() })).toEqual({ ok: true })
+    sameVerdict(
+      "verifyVerdictPurpose",
+      () => verifyVerdictPurpose({ verdict: verdict(), grant: grant() }),
+      () => verifyVerdictPurpose(poison({ verdict: poison(verdict() as object, "verdict") as never, grant: poison(grant(), "grant") }, "args")),
+    )
+  })
+
+  test("verifySignedChain — valid, with a seal, with a receipt memo, wrong pin, unknown option", async () => {
+    const { records, pin, log } = await session()
     const head = log.head()
     const mid = log.all()[1]!.hash
     const cases: Array<[string, () => Parameters<typeof verifySignedChain>[1]]> = [
@@ -734,5 +913,112 @@ describe("verify + signer: records, options bags, signer configs and sign/preima
       () => makeEd25519SignerLive(poison({ privateKeyPem: pems.privateKeyPem, publicKeyPem: other }, "config")),
       (s) => s.publicKeyHex,
     )
+  })
+})
+
+describe("gate: the intent digests read their argument once", () => {
+  const argsBag = () => ({ amount: { n: 5n }, to: "0xabc" })
+  const action = () => ({ sink: "pay", args: argsBag() })
+  const poisonedAction = () => poison({ sink: "pay", args: poison({ amount: poison({ n: 5n }, "amount"), to: "0xabc" }, "args") }, "action")
+  const ENCODED_ARGS = { amount: { n: { $bigint: "5" } }, to: "0xabc" }
+
+  test("encodeAction and actionDigest — success, and the raw $bigint refusal", () => {
+    expect(encodeAction(poisonedAction())).toEqual({ sink: "pay", args: ENCODED_ARGS })
+    expect(actionDigest(poisonedAction())).toBe(actionDigest(action()))
+    sameVerdict("encodeAction", () => encodeAction(action()), () => encodeAction(poisonedAction()))
+    sameVerdict("actionDigest", () => actionDigest(action()), () => actionDigest(poisonedAction()))
+    const raw = () => ({ sink: "pay", args: { a: { $bigint: "1" } } })
+    sameVerdict("encodeAction ($bigint)", () => encodeAction(raw()), () => encodeAction(poison({ sink: "pay", args: poison({ a: poison({ $bigint: "1" }, "a") }, "args") }, "action")))
+  })
+
+  test("paymentDigest — success, and the malformed-amount refusal", () => {
+    const pay = (amount: bigint | string) => ({ network: "sui:testnet", asset: "0x2::sui::SUI", recipient: "0xabc", amount })
+    expect(paymentDigest(poison(pay(600n), "payment"))).toBe(paymentDigest(pay("600")))
+    sameVerdict("paymentDigest", () => paymentDigest(pay(600n)), () => paymentDigest(poison(pay(600n), "payment")))
+    sameVerdict("paymentDigest (bad amount)", () => paymentDigest(pay("-1")), () => paymentDigest(poison(pay("-1"), "payment")))
+  })
+
+  test("verdictDigest — success, and the malformed-verdict refusal", () => {
+    const v = () => ({
+      assessment: "match" as const,
+      confidence: 0.9,
+      rationaleHash: "a".repeat(64),
+      provider: "p",
+      model: "m@1",
+      actionDigest: "c".repeat(64),
+      unkeyedActionDigest: "c".repeat(64),
+      scored: true,
+      paymentDigest: null,
+      grantHash: "b".repeat(64),
+      purposeHash: "e".repeat(64),
+      judgedAt: "2026-01-01T00:00:00.000Z",
+      attestation: null,
+    })
+    expect(verdictDigest(poison(v(), "verdict"))).toBe(verdictDigest(v()))
+    sameVerdict("verdictDigest", () => verdictDigest(v()), () => verdictDigest(poison(v(), "verdict")))
+    sameVerdict("verdictDigest (NaN)", () => verdictDigest({ ...v(), confidence: NaN }), () => verdictDigest(poison({ ...v(), confidence: NaN }, "verdict")))
+  })
+})
+
+describe("verify: reconcile reads each record, and each nested bag, once", () => {
+  type Rec = Record<string, unknown>
+  const network = "sui:testnet"
+  const asset = "0x2::sui::SUI"
+  const pd = paymentDigest({ network, asset, recipient: "0xabc", amount: "600" })
+  const judgedBy = (): Rec => ({
+    assessment: "match",
+    confidence: 0.9,
+    rationaleHash: "a".repeat(64),
+    provider: "p",
+    model: "m@1",
+    actionDigest: "c".repeat(64),
+    paymentDigest: pd,
+    grantHash: "b".repeat(64),
+    judgedAt: "2026-01-01T00:00:00.000Z",
+    attestation: null,
+  })
+  const vd = verdictDigest(judgedBy() as never)
+  const gateRow = (v: Rec | number = judgedBy(), decision = "executed"): Rec => ({ seq: 0, prevHash: "GENESIS", hash: "h", at: "t", sink: "pay", decision, args: {}, verdict: v })
+  const suiRow = (digest: string, auth: Rec | null = { verdictDigest: vd, paymentDigest: pd }, over: Rec = {}): Rec => ({ schema: "sweetrust-sui/receipt@2", verb: "spend", verdict: "executed", digest, authorizedBy: auth, ...over })
+  const chainRow = (digest: string, over: Rec = {}): Rec => ({ digest, status: "success", sender: "0xs", network, asset, recipient: "0xabc", amount: "600", ...over })
+
+  const poisonRows = (rows: Rec[], label: string, nested: string) =>
+    poison(
+      rows.map((row, i) => {
+        const inner = row[nested]
+        return poison({ ...row, ...(typeof inner === "object" && inner !== null ? { [nested]: poison({ ...(inner as Rec) }, `${label}[${i}].${nested}`) } : {}) }, `${label}[${i}]`)
+      }),
+      label,
+    )
+
+  const plain = (g: Rec[], s: Rec[], c: Rec[]) => () => reconcile({ gate: g, sui: s, chain: c } as never)
+  const poisoned = (g: Rec[], s: Rec[], c: Rec[]) => () =>
+    reconcile(poison({ gate: poisonRows(g, "gate", "verdict"), sui: poisonRows(s, "sui", "authorizedBy"), chain: poisonRows(c, "chain", "") }, "args") as never)
+
+  const cases: Array<[string, () => [Rec[], Rec[], Rec[]]]> = [
+    ["clean", () => [[gateRow()], [suiRow("D1")], [chainRow("D1")]]],
+    ["no-receipt", () => [[gateRow()], [], [chainRow("D1")]]],
+    ["no-verdict", () => [[], [suiRow("D1")], [chainRow("D1")]]],
+    ["payment-mismatch", () => [[gateRow()], [suiRow("D1")], [chainRow("D1", { amount: "601" })]]],
+    ["double-spend", () => [[gateRow()], [suiRow("D1"), suiRow("D2")], [chainRow("D1"), chainRow("D2")]]],
+    ["a chain failure", () => [[], [], [chainRow("F1", { status: "failure", amount: null, recipient: null })]]],
+    ["a receipt the chain does not show", () => [[gateRow()], [suiRow("D1")], []]],
+    ["a duplicated chain digest", () => [[gateRow()], [suiRow("D1")], [chainRow("D1"), chainRow("D1")]]],
+    ["duplicated receipts", () => [[gateRow()], [suiRow("D1"), suiRow("D1")], [chainRow("D1")]]],
+    ["a malformed verdict", () => [[gateRow({ ...judgedBy(), confidence: NaN })], [], []]],
+    ["a non-object verdict", () => [[gateRow(7)], [], []]],
+    ["a null authorizedBy", () => [[gateRow()], [suiRow("D1", null)], [chainRow("D1")]]],
+    ["an other decision", () => [[gateRow(judgedBy(), "judgment-held")], [suiRow("D1")], [chainRow("D1")]]],
+  ]
+
+  test.each(cases)("%s", (label, build) => {
+    const [g, s, c] = build()
+    // Both runs must return: two matching throws would prove nothing here.
+    expect(verdict(plain(g, s, c)).kind).toBe("returned")
+    sameVerdict(`reconcile (${label})`, plain(g, s, c), poisoned(g, s, c))
+  })
+
+  test("a malformed argument bag", () => {
+    sameVerdict("reconcile (no chain)", () => reconcile({ gate: [], sui: [] } as never), () => reconcile(poison({ gate: [], sui: [] }, "args") as never))
   })
 })

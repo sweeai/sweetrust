@@ -33,12 +33,15 @@
  */
 import {
   issueAgentMandate as issueAgentMandateImpl,
+  grantedPurpose as grantedPurposeImpl,
   issueOrgMandate as issueOrgMandateImpl,
   issueProjectMandate as issueProjectMandateImpl,
   resumeMandate as resumeMandateImpl,
   revokeMandate as revokeMandateImpl,
+  settleCapability as settleCapabilityImpl,
   useCapability as useCapabilityImpl,
 } from "./mandate.ts"
+import type { GrantedPurpose, Purpose } from "../purpose.ts"
 import type {
   Capability,
   CapabilityLimits,
@@ -77,6 +80,8 @@ export interface TrustClient {
     readonly triggerSource?: TriggerSource
     /** Per-capability caps, keyed by capability key (DAN-1319). */
     readonly limits?: CapabilityLimits
+    /** What this grant is for, signed into it. The statement is at most 280 characters (DAN-1384). */
+    readonly purpose?: Purpose
   }) => MandateScope<Caps, "organization", null>
 
   /** Derive a project tier from an org scope this client issued; a compile-time subset. */
@@ -91,6 +96,8 @@ export interface TrustClient {
     readonly triggerSource?: TriggerSource
     /** Per-capability caps; at least as tight as the grantor's on every capped capability carried (DAN-1319). */
     readonly limits?: CapabilityLimits
+    /** What this grant is for; only ever narrows the grantor's recorded purpose, and may not be omitted if it has one (DAN-1384). */
+    readonly purpose?: Purpose
   }) => MandateScope<ProjectCaps, "project", MandateScope<OrgCaps, "organization", null>>
 
   /** Derive an agent tier, a leaf, from a project scope this client issued. */
@@ -106,6 +113,8 @@ export interface TrustClient {
     readonly triggerSource?: TriggerSource
     /** Per-capability caps; at least as tight as the grantor's on every capped capability carried (DAN-1319). */
     readonly limits?: CapabilityLimits
+    /** What this grant is for; only ever narrows the grantor's recorded purpose, and may not be omitted if it has one (DAN-1384). */
+    readonly purpose?: Purpose
   }) => MandateScope<
     AgentCaps,
     "agent",
@@ -128,6 +137,34 @@ export interface TrustClient {
     readonly triggerSource?: TriggerSource
     /** What this use spends; required when the grant caps the capability by amount (DAN-1319). */
     readonly amount?: number
+    /** The digest of the verdict that approved this use, recorded on the invoke event: 64 lowercase hex, else a TypeError (DAN-1385). */
+    readonly verdictDigest?: string
+    /** Your name for this hold, so `settleCapability` can point at it: 32 lowercase hex, else a TypeError (ADR 0011). */
+    readonly holdId?: string
+  }) => void
+
+  /**
+   * Record what a held invoke really cost, so the limit counts `actual` in place
+   * of the invoke's `amount`, at the invoke's own time and still as one call
+   * (ADR 0011). A hold settles down, at most once, and never moves spend into
+   * another window. Allowed on a revoked mandate: it records a call made before
+   * the revoke and can only lower the count. Refused, writing nothing, as
+   * `MandateSettleUnknownHold`, `MandateSettleNoAmount`, `MandateSettleAboveAmount`,
+   * `MandateSettleDuplicate`, `MandateSettleAmbiguousHold` or `MandateAmountInvalid`.
+   */
+  readonly settleCapability: <
+    Caps extends ReadonlyArray<Capability>,
+    Cap extends Caps[number],
+    Tier extends MandateTier = "organization",
+    ParentScope extends MandateScope<any, any, any> | null = null,
+  >(args: {
+    readonly mandate: MandateScope<Caps, Tier, ParentScope>
+    readonly capability: Cap
+    /** The `holdId` the invoke carried: 32 lowercase hex, else a TypeError. */
+    readonly holdId: string
+    /** What the call really cost: finite, non-negative, at most the invoke's `amount`. */
+    readonly actual: number
+    readonly triggerSource?: TriggerSource
   }) => void
 
   /** Revoke a mandate; the revoker proves position by possessing the target or an ancestor. */
@@ -156,6 +193,15 @@ export interface TrustClient {
     readonly tier?: Tier
     readonly triggerSource?: TriggerSource
   }) => ResumedScope<Caps, Tier>
+
+  /**
+   * The purpose this scope's grant event records and the hash naming that
+   * grant, for the host to hand a judged sink. Read from the log. A copy of a
+   * scope, a scope from another store, and a mandate that is revoked or has a
+   * revoked ancestor are refused; a grant with no purpose is a TypeError
+   * (DAN-1384).
+   */
+  readonly grantedPurpose: (scope: MandateScope<any, any, any>) => GrantedPurpose
 
   readonly audit: AuditView
 }
@@ -195,8 +241,10 @@ export const createTrust = (config: TrustConfig): TrustClient => {
     issueProjectMandate: (args) => issueProjectMandateImpl(args, store),
     issueAgentMandate: (args) => issueAgentMandateImpl(args, store),
     useCapability: (args) => useCapabilityImpl(args, store),
+    settleCapability: (args) => settleCapabilityImpl(args, store),
     revokeMandate: (args) => revokeMandateImpl(args, store),
     resume: (args) => resumeMandateImpl(args, store),
+    grantedPurpose: (scope) => grantedPurposeImpl(scope, store),
     audit,
   }
   return Object.freeze(client)

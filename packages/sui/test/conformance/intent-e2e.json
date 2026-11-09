@@ -1,0 +1,10 @@
+{
+  "network": "sui:testnet",
+  "judge": "mockJudgmentProvider",
+  "digest": "4R5NbzmQfRS6B18jSd2weGzuVhpqmZGW9txvekKGPHM5",
+  "verdictDigest": "b5d4b3443e3d19c3201a6742819119bd93ddc6ff5bb7aaf78fcea230452e8b78",
+  "invokeVerdictDigest": "b5d4b3443e3d19c3201a6742819119bd93ddc6ff5bb7aaf78fcea230452e8b78",
+  "gateReceiptVerdictDigest": "b5d4b3443e3d19c3201a6742819119bd93ddc6ff5bb7aaf78fcea230452e8b78",
+  "suiAuthorizedByVerdictDigest": "b5d4b3443e3d19c3201a6742819119bd93ddc6ff5bb7aaf78fcea230452e8b78",
+  "orphans": []
+}
