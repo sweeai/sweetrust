@@ -229,6 +229,19 @@ JavaScript is blocking the event loop. A provider that spins in `assess`, or doe
 longer than `timeoutMs`, outlasts the deadline and stalls the whole process. Do blocking work off the
 main thread. Both limits apply to any code the host puts in the provider (ADR 0007).
 
+### A provider's error text reaches the receipt
+
+When a provider throws or rejects, the sink has no verdict, so it records why: `provider <name> gave
+no verdict: <the first line of the error>`. A receipt cannot be redacted after it is written, and an
+error message can echo the arguments the provider was handed. An HTTP client that puts the request
+in its message is enough.
+
+If the sink redacts any argument, it withholds that text and a provider's rationale from the receipt
+and leaves a short hash in their place. A sink that redacts nothing records them as written. And
+`judgment.rationaleInRefusal` returns the same text to the agent, whether or not the sink redacts.
+So keep raw values out of the messages a provider throws, and catch and rewrite the errors of any
+library it calls.
+
 ### A sink cannot check that `granted` belongs together
 
 `judgment.granted` is `{ purpose, grantHash }`, and the gate cannot recompute a grant's hash without
