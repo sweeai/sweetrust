@@ -135,12 +135,35 @@ replayed. Unjudged sinks and observe/warn runs still do.
 
 ### An action's lifecycle reads the log you give it
 
-Blocks, holds and attempts are read back from the receipt log, and so is stickiness across a
-restart. A log that does not return what was appended, or that two processes write without sharing,
-loses them: a per-process log forgets the block at restart, and the identical action judges afresh.
-Give a judged enforce sink a log that outlives the process (ADR 0010). The check is in-process and
-keyed per sink name and per action digest; it does not stop a host from calling `execute`'s work
-some other way. Each judged call walks the log once, so its cost grows with the log's length.
+Blocks, holds and attempts are read back from the receipt log, so the action record lasts exactly
+as long as the log does. `ReceiptLog` and `SignedReceiptLog` are in-memory. A new one is empty, so
+after a restart a block is forgotten and **an unkeyed payment that already ran can run again** unless
+you seed the new log from the old receipts, with `ReceiptLog.fromReceipts` or
+`SignedReceiptLog.fromSigned` (which verifies every signature under the signer's key). Saving the
+receipts is your job, and it has to happen as they are written: subclass the log, persist in
+`append`, and let a failed write throw, because the `attempted` record only protects you if it
+reached the disk before `execute` ran. Loading proves the chain is consistent, not that it is
+complete: a file cut at its tail loads as a valid shorter chain and its records are forgotten. A log
+that two processes write without sharing loses records the same way (ADR 0010).
+
+The check is in-process and keyed per sink name, grant, purpose and action digest; it does not stop
+a host from calling `execute`'s work some other way. Each judged call walks the log twice, so its
+cost grows with the log's length, and a retry loop that appends a receipt per retry makes each later
+call slower.
+
+### A changed argument is a new action
+
+Stickiness holds one exact action. An argument that changes, even by one base unit of an amount or
+one word of a free-text field, is a new action and gets a new judge call, and this design does not
+prevent that. A block does not cover the action next to it. The sink withholds the assessment,
+confidence and rationale from the refusal by default so an agent has nothing to climb on, and that
+is undone if you hand the agent the receipt, which holds all three. What bounds an agent that keeps
+trying is the purpose's deterministic fields and the chain's own limits.
+
+### A judge outage holds the call and leaves nothing behind
+
+A judge that times out, throws or answers with something that is not a verdict holds the call, and
+the next identical call asks the judge again. Only a real assessment sticks.
 
 ### An idempotency key is host-attested
 

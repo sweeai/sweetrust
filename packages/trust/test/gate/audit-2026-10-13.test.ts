@@ -863,7 +863,7 @@ describe("#7 — the judgment wall fails closed when it cannot score", () => {
     const { log, make, ran } = sink({ name: "boom", model: "m@1", assess: () => { throw new Error("scorer down") } })
     const r = await make()({ to: good() })
     expect(r.ok).toBe(false)
-    if (!r.ok) expect(r.refusal).toContain("no verdict")
+    if (!r.ok) expect(r.refusal).not.toContain("scorer down")
     expect(ran()).toBe(0)
     expect(log.all().map((x) => x.decision)).toEqual(["judgment-held"])
     expect(log.all()[0]!.reason).toContain("scorer down")

@@ -1,5 +1,5 @@
 {
-  "stale": "Recorded before ADR 0010 (DAN-1406) added purposeHash and unkeyedActionDigest to the verdict, so these digests no longer match what the code produces. Re-run packages/sui/scripts/intent-e2e.ts (it submits a testnet transaction) to regenerate.",
+  "stale": "Recorded before ADR 0010 (DAN-1406) added purposeHash, unkeyedActionDigest and scored to the verdict, so these digests no longer match what the code produces. Re-run packages/sui/scripts/intent-e2e.ts (it submits a testnet transaction) to regenerate.",
   "network": "sui:testnet",
   "digest": "8yqHCsi6Ns9pKUE2sHr6iu4s5eLB4MndtVTWub2ZC6gV",
   "verdictDigest": "e24352bdac82f51a15c02684a234aaa896820329654388619ddb82745edce324",

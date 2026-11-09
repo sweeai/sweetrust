@@ -493,7 +493,7 @@ describe("steps 1 and 2 re-run: an approval never launders a violation", () => {
     expect(m.runs).toHaveLength(0)
   })
 
-  it("the purpose fields are checked again", async () => {
+  it("a changed purpose under the same grant hash cannot release the hold", async () => {
     const log = new ReceiptLog()
     const fields = (payees: string[]) => ({ purpose: { statement: "s", fields: { payees } }, grantHash: "5".repeat(64) })
     const purposeArgs = { purposeArgs: { payee: "to", amount: "amount" }, network: "sui:testnet", asset: "0x2::sui::SUI" }
@@ -503,7 +503,7 @@ describe("steps 1 and 2 re-run: an approval never launders a violation", () => {
     expect(r.ok).toBe(false)
     if (r.ok) return
     expect(r.receipt.decision).toBe("refused")
-    expect(r.refusal).toContain("not a payee this purpose names")
+    expect(r.refusal).toContain("approval-mismatch")
     expect(b.runs).toHaveLength(0)
   })
 

@@ -159,7 +159,7 @@ describe("I4: in enforce, every doubt case is judgment-held and execute never ru
     const { sink, runs, log } = judged(provider, { timeoutMs: 5 })
     const r = await sink(pay())
     expect(r.receipt.decision).toBe("judgment-held")
-    expect(r.ok ? undefined : r.refusal).toContain("no verdict")
+    expect(r.ok ? undefined : r.refusal).toBe("⚖ pay judgment-held")
     expect(r.receipt.reason).toContain("no verdict within 5ms")
     expect(signal.aborted).toBe(true)
     await later(null, 50)

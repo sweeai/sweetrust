@@ -326,6 +326,7 @@ describe("verdictDigest", () => {
     model: "m@1",
     actionDigest: "c".repeat(64),
     unkeyedActionDigest: "d".repeat(64),
+    scored: true,
     paymentDigest: null,
     grantHash: "b".repeat(64),
     purposeHash: "e".repeat(64),
@@ -338,7 +339,7 @@ describe("verdictDigest", () => {
     const a = "a".repeat(64), b = "b".repeat(64), c = "c".repeat(64), d = "d".repeat(64), e = "e".repeat(64)
     expect(verdictDigest(v)).toBe(
       sha(
-        `{"actionDigest":"${c}","assessment":"match","attestation":null,"confidence":0.9,"grantHash":"${b}","judgedAt":"2026-01-01T00:00:00.000Z","model":"m@1","paymentDigest":null,"provider":"p","purposeHash":"${e}","rationaleHash":"${a}","unkeyedActionDigest":"${d}"}`,
+        `{"actionDigest":"${c}","assessment":"match","attestation":null,"confidence":0.9,"grantHash":"${b}","judgedAt":"2026-01-01T00:00:00.000Z","model":"m@1","paymentDigest":null,"provider":"p","purposeHash":"${e}","rationaleHash":"${a}","scored":true,"unkeyedActionDigest":"${d}"}`,
       ),
     )
   })
@@ -351,6 +352,7 @@ describe("verdictDigest", () => {
     expect(verdictDigest({ ...v, confidence: 0.91 })).not.toBe(verdictDigest(v))
     expect(verdictDigest({ ...v, paymentDigest: "d".repeat(64) })).not.toBe(verdictDigest(v))
     expect(verdictDigest({ ...v, purposeHash: "f".repeat(64) })).not.toBe(verdictDigest(v))
+    expect(verdictDigest({ ...v, scored: false })).not.toBe(verdictDigest(v))
     expect(verdictDigest({ ...v, unkeyedActionDigest: "f".repeat(64) })).not.toBe(verdictDigest(v))
   })
 

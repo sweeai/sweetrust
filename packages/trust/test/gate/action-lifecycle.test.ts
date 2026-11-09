@@ -17,7 +17,15 @@ import {
   type JudgmentProvider,
   type Receipt,
 } from "../../src/gate/index.ts"
-import { reconcile, verifyVerdictPurpose } from "../../src/verify/index.ts"
+import {
+  SignedReceiptLog,
+  generateSigningKeypair,
+  makeEd25519ReceiptSigner,
+  parseJSONL,
+  reconcile,
+  verifySignedChain,
+  verifyVerdictPurpose,
+} from "../../src/verify/index.ts"
 
 const owner = generateKeyPairSync("ed25519")
 const approvalKey = owner.publicKey.export({ format: "der", type: "spki" }).toString("hex")
@@ -478,7 +486,7 @@ describe("the refusal does not teach the agent the rationale (default)", () => {
 describe("reconcile counts executions per action", () => {
   const verdict = (judgedAt: string, actionDigest = "c".repeat(64)) => ({
     assessment: "match" as const, confidence: 0.9, rationaleHash: "a".repeat(64), provider: "p", model: "m@1",
-    actionDigest, unkeyedActionDigest: actionDigest, paymentDigest: PD, grantHash: GRANTED.grantHash,
+    actionDigest, unkeyedActionDigest: actionDigest, scored: true, paymentDigest: PD, grantHash: GRANTED.grantHash,
     purposeHash: purposeHash(PURPOSE), judgedAt, attestation: null,
   })
   const PD = paymentDigest({ network: NET, asset: ASSET, recipient: "0xutility", amount: "5" })
@@ -506,5 +514,253 @@ describe("reconcile counts executions per action", () => {
     const other = { ...v, purposeHash: "e".repeat(64) }
     expect(reconcile({ gate: [receipt(other)], sui: [sui("TX1", other)], chain: [chain("TX1")], grants: [GRANT] })).toEqual({ ok: false, orphans: [{ digest: "TX1", reason: "purpose-mismatch" }] })
     expect(reconcile({ ...args, grants: [] })).toEqual({ ok: false, orphans: [{ digest: "TX1", reason: "purpose-mismatch" }] })
+  })
+})
+
+describe("code-review regressions (DAN-1406)", () => {
+  it("1: two sinks over one log, the same call at once, run once", async () => {
+    const log = new ReceiptLog()
+    const a = build(scripted(MATCH), { log })
+    const b = build(scripted(MATCH), { log })
+    const rs = await Promise.all([a.sink(pay()), b.sink(pay())])
+    expect(a.runs.length + b.runs.length).toBe(1)
+    expect(rs.filter((r) => r.ok)).toHaveLength(1)
+  })
+
+  it("1: two sinks over one log that both judge a mismatch leave one standing verdict", async () => {
+    const log = new ReceiptLog()
+    const rs = await Promise.all([build(scripted({ ...MISMATCH, rationale: "first" }), { log }).sink(pay()), build(scripted({ ...MISMATCH, rationale: "second" }), { log }).sink(pay())])
+    expect(rs.every((r) => r.receipt.decision === "judgment-blocked")).toBe(true)
+    expect(new Set(log.all().map((r) => verdictDigest(r.verdict!))).size).toBe(1)
+  })
+
+  it.each(["warn", "observe"] as const)("2: %s: a confident match on a call with an undeclared argument carries no authority", async (mode) => {
+    const { sink, runs } = build(scripted(MATCH), { mode })
+    const r = await sink({ ...pay(), junk: Sourced.fromChannel("x", "agent") })
+    expect(r.receipt.verdict).toBeDefined()
+    expect(runs[0]!.ctx).toBeUndefined()
+  })
+
+  it("3: a hold judged against another purpose under the same grant hash is not released", async () => {
+    const log = new ReceiptLog()
+    const first = build(scripted(UNSURE), { log })
+    const held = await first.sink(pay())
+    if (held.ok || !held.held) throw new Error("expected held")
+    const second = build(scripted(MATCH), { log, extra: { granted: { purpose: { statement: "Pay anyone" }, grantHash: GRANTED.grantHash } } })
+    const r = await second.sink.resume(pay(), approve(held.held))
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.refusal).toContain("approval-mismatch")
+    expect(second.runs).toHaveLength(0)
+  })
+
+  const otherGrant = { extra: { granted: { purpose: { statement: "Tenant B" }, grantHash: "c".repeat(64) } } }
+
+  it("4: another grant's receipt under the same sink name does not clear a standing block", async () => {
+    const log = new ReceiptLog()
+    const p = scripted(MISMATCH, MATCH)
+    const a = build(p, { log })
+    await a.sink(pay())
+    await build(scripted(UNSURE), { log, ...otherGrant }).sink(pay())
+    const r = await a.sink(pay())
+    expect(r.receipt.decision).toBe("judgment-blocked")
+    expect(p.calls).toBe(1)
+    expect(a.runs).toHaveLength(0)
+  })
+
+  it("4: another grant's attempt is not a duplicate of this action", async () => {
+    const log = new ReceiptLog()
+    expect((await build(scripted(MATCH), { log }).sink(pay())).ok).toBe(true)
+    const b = build(scripted(MATCH), { log, ...otherGrant })
+    expect((await b.sink(pay())).ok).toBe(true)
+    expect(b.runs).toHaveLength(1)
+  })
+
+  describe("5: reconcile accepts every record of a run the judge let through", () => {
+    const PD = paymentDigest({ network: NET, asset: ASSET, recipient: "0xutility", amount: "5" })
+    const v = {
+      assessment: "match" as const, confidence: 0.9, rationaleHash: "a".repeat(64), provider: "p", model: "m@1", scored: true,
+      actionDigest: "c".repeat(64), unkeyedActionDigest: "c".repeat(64), paymentDigest: PD, grantHash: GRANTED.grantHash,
+      purposeHash: purposeHash(PURPOSE), judgedAt: "2026-11-08T00:00:00.000Z", attestation: null,
+    }
+    const claim = { schema: "sweetrust-sui/receipt@2", verb: "spend", verdict: "executed", digest: "TX1", authorizedBy: { verdictDigest: verdictDigest(v), paymentDigest: PD } }
+    const spend = { digest: "TX1", status: "success" as const, network: NET, asset: ASSET, recipient: "0xutility", amount: "5" }
+    const run = (decision: string, over: Record<string, unknown> = {}) =>
+      reconcile({ gate: [{ at: v.judgedAt, sink: "pay", decision, args: {}, verdict: v, ...over } as unknown as Receipt], sui: [claim], chain: [spend] })
+
+    it("attempted with no outcome receipt is the log-failure case, and is clean", () => expect(run("attempted")).toEqual({ ok: true, orphans: [] }))
+    it("a clean observed run is clean", () => expect(run("observed")).toEqual({ ok: true, orphans: [] }))
+    it.each([["judgment-flagged", {}], ["warned", { reason: "mode=warn, violations: x" }], ["observed", { reason: "mode=observe, violations: x" }]])("%s %j grants no authority, so it stays no-verdict", (decision, over) => {
+      expect(run(decision as string, over as Record<string, unknown>)).toEqual({ ok: false, orphans: [{ digest: "TX1", reason: "no-verdict" }] })
+    })
+  })
+
+  it("6: a log failure on the intent write does not burn the owner's approval", async () => {
+    let fail = false
+    class Flaky extends ReceiptLog {
+      override append(e: Omit<Receipt, "seq" | "prevHash" | "hash">) {
+        if (fail && e.decision === "attempted") {
+          fail = false
+          throw new Error("disk full")
+        }
+        return super.append(e)
+      }
+    }
+    const { sink, runs } = build(scripted(UNSURE), { log: new Flaky() })
+    const held = await sink(pay())
+    if (held.ok || !held.held) throw new Error("expected held")
+    const approval = approve(held.held)
+    fail = true
+    await expect(sink.resume(pay(), approval)).rejects.toThrow("disk full")
+    expect(runs).toHaveLength(0)
+    expect((await sink.resume(pay(), approval)).ok).toBe(true)
+    expect(runs).toHaveLength(1)
+  })
+
+  describe("7: a judge failure holds the call and leaves no standing hold", () => {
+    it.each<[string, () => unknown]>([
+      ["a non-verdict answer", () => 7],
+      ["a throw", () => { throw new Error("scorer down") }],
+    ])("%s: held now, judged again next call", async (_name, fail) => {
+      let calls = 0
+      const p: JudgmentProvider = { name: "j", model: "j@1", assess: async () => { calls += 1; return (calls === 1 ? fail() : MATCH) as never } }
+      const { sink, runs } = build(p)
+      const first = await sink(pay())
+      expect(first.ok).toBe(false)
+      expect(first.receipt.decision).toBe("judgment-held")
+      if (!first.ok) expect(first.held).toBeDefined()
+      expect((await sink(pay())).ok).toBe(true)
+      expect(calls).toBe(2)
+      expect(runs).toHaveLength(1)
+    })
+
+    it("a real unsure still sticks", async () => {
+      const p = scripted(UNSURE, MATCH)
+      const { sink } = build(p)
+      await sink(pay())
+      expect((await sink(pay())).receipt.decision).toBe("judgment-held")
+      expect(p.calls).toBe(1)
+    })
+
+    it("a failed hold can still be approved", async () => {
+      const { sink, runs } = build(scripted(7))
+      const held = await sink(pay())
+      if (held.ok || !held.held) throw new Error("expected held")
+      expect((await sink.resume(pay(), approve(held.held))).ok).toBe(true)
+      expect(runs).toHaveLength(1)
+    })
+
+    it("an approval of a failed hold cannot pay again after a later call ran the action", async () => {
+      const { sink, runs } = build(scripted(7, MATCH))
+      const held = await sink(pay())
+      if (held.ok || !held.held) throw new Error("expected held")
+      expect((await sink(pay())).ok).toBe(true)
+      const r = await sink.resume(pay(), approve(held.held))
+      expect(r.ok).toBe(false)
+      if (!r.ok) expect(r.refusal).toContain("approval-replayed")
+      expect(runs).toHaveLength(1)
+    })
+  })
+
+  describe("8: a refusal says nothing an agent can climb", () => {
+    it.each([["a block", MISMATCH, "mismatch"], ["a hold", UNSURE, "unsure"]])("%s omits the assessment and confidence, first answer and retry", async (_name, answer, word) => {
+      const { sink } = build(scripted(answer))
+      for (let i = 0; i < 2; i++) {
+        const r = await sink(pay())
+        if (r.ok) throw new Error("expected a refusal")
+        expect(r.refusal).not.toContain(word as string)
+        expect(r.refusal).not.toMatch(/conf|0\.\d/)
+      }
+    })
+
+    it("rationaleInRefusal opts back in to all of it, retry included", async () => {
+      const { sink } = build(scripted(MISMATCH), { extra: { rationaleInRefusal: true } })
+      for (let i = 0; i < 2; i++) {
+        const r = await sink(pay())
+        if (r.ok) throw new Error("expected a refusal")
+        expect(r.refusal).toContain("mismatch")
+        expect(r.refusal).toContain("conf 0.95")
+      }
+    })
+  })
+
+  describe("restart: a log seeded from its prior receipts keeps the record", () => {
+    const roundTrip = (log: ReceiptLog) => JSON.parse(JSON.stringify(log.all())) as Receipt[]
+
+    it("ReceiptLog.fromReceipts: a block and an attempt survive, and the chain continues", async () => {
+      const log = new ReceiptLog()
+      const before = build(scripted(MISMATCH, MATCH), { log })
+      await before.sink(pay("0xblocked"))
+      const paid = build(scripted(MATCH), { log })
+      await paid.sink(pay("0xpaid"))
+      const restored = ReceiptLog.fromReceipts(roundTrip(log))
+      expect(restored.all()).toHaveLength(log.all().length)
+      expect(restored.head()).toBe(log.head())
+      const p = scripted(MATCH)
+      const after = build(p, { log: restored })
+      expect((await after.sink(pay("0xblocked"))).receipt.decision).toBe("judgment-blocked")
+      const dup = await after.sink(pay("0xpaid"))
+      expect(dup.ok).toBe(false)
+      if (!dup.ok) expect(dup.refusal).toContain("duplicate-action")
+      expect(p.calls).toBe(0)
+      expect(after.runs).toHaveLength(0)
+      expect(restored.verifyChain()).toBe(true)
+    })
+
+    it("an empty list is a fresh log", () => expect(ReceiptLog.fromReceipts([]).all()).toEqual([]))
+
+    it("restored receipts are the log's own frozen copies", async () => {
+      const log = new ReceiptLog()
+      await build(scripted(MATCH), { log }).sink(pay())
+      const rows = roundTrip(log)
+      const restored = ReceiptLog.fromReceipts(rows)
+      expect(Object.isFrozen(rows[0])).toBe(false)
+      expect(Object.isFrozen(restored.all()[0])).toBe(true)
+    })
+
+    it.each<[string, (rows: any[]) => unknown]>([
+      ["an edited receipt", (rows) => { rows[0].sink = "other"; return rows }],
+      ["a missing first receipt", (rows) => rows.slice(1)],
+      ["a key outside the hash", (rows) => { rows[0].note = "smuggled"; return rows }],
+      ["a non-array", () => ({})],
+      ["a non-record", () => [7]],
+    ])("%s refuses at load", async (_name, tamper) => {
+      const log = new ReceiptLog()
+      await build(scripted(MATCH), { log }).sink(pay())
+      expect(() => ReceiptLog.fromReceipts(tamper(roundTrip(log)) as never)).toThrow(TypeError)
+    })
+
+    const signedRun = async () => {
+      const signer = makeEd25519ReceiptSigner(generateSigningKeypair())
+      const log = new SignedReceiptLog(signer)
+      await build(scripted(MATCH), { log }).sink(pay())
+      return { signer, log, text: log.exportJSONL() }
+    }
+
+    it("SignedReceiptLog.fromSigned verifies, keeps the record, and both chains continue", async () => {
+      const { signer, log, text } = await signedRun()
+      const restored = SignedReceiptLog.fromSigned(parseJSONL(text), signer)
+      expect(restored.head()).toBe(log.head())
+      const p = scripted(MATCH)
+      const after = build(p, { log: restored })
+      const dup = await after.sink(pay())
+      expect(dup.ok).toBe(false)
+      expect(p.calls).toBe(0)
+      expect(verifySignedChain(restored.signed(), { trustedSignerPublicKeyHex: signer.publicKeyHex })).toMatchObject({ valid: true })
+      expect(restored.verifyChain()).toBe(true)
+    })
+
+    it("fromSigned refuses a tampered artifact and another signer's, and takes an empty one", async () => {
+      const { signer, text } = await signedRun()
+      const tampered = parseJSONL(text) as any[]
+      tampered[0].payload.sink = "other"
+      expect(() => SignedReceiptLog.fromSigned(tampered, signer)).toThrow(TypeError)
+      const stranger = makeEd25519ReceiptSigner(generateSigningKeypair())
+      expect(() => SignedReceiptLog.fromSigned(parseJSONL(text), stranger)).toThrow(TypeError)
+      expect(SignedReceiptLog.fromSigned([], signer).all()).toEqual([])
+    })
+
+    it("a signed log cannot be seeded through the unsigned door", async () => {
+      expect(() => (SignedReceiptLog as any).fromReceipts([])).toThrow(TypeError)
+    })
   })
 })

@@ -267,7 +267,7 @@ describe("the deadline", () => {
     const { sink, ran, log } = judged(p, { timeoutMs: 5 })
     const r = await sink({ to: good() })
     expect(r.ok).toBe(false)
-    if (!r.ok) expect(r.refusal).toContain("no verdict")
+    if (!r.ok) expect(r.refusal).toBe("⚖ pay judgment-held")
     expect(r.receipt.reason).toContain("no verdict within 5ms")
     expect(signal.aborted).toBe(true)
     expect(ran.count).toBe(0)
@@ -317,7 +317,7 @@ describe("the deadline", () => {
     const unhandled = await unhandledDuring(async () => {
       const { sink } = judged(p, { timeoutMs: 5 })
       const r = await sink({ to: good() })
-      if (!r.ok) expect(r.refusal).toContain("no verdict")
+      if (!r.ok) expect(r.refusal).toBe("⚖ pay judgment-held")
     })
     expect((reason as Error).name).toBe("TimeoutError")
     expect(unhandled).toEqual([])

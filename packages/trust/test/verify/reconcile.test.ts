@@ -22,6 +22,7 @@ const verdictOf = (over: Partial<Verdict> = {}): Verdict => ({
   model: "m@1",
   actionDigest: "c".repeat(64),
   unkeyedActionDigest: "c".repeat(64),
+  scored: true,
   paymentDigest: pd,
   grantHash: "b".repeat(64),
   purposeHash: "e".repeat(64),
@@ -76,7 +77,8 @@ describe("the four reasons", () => {
     }
   })
 
-  test.each(["refused", "observed", "warned", "judgment-blocked", "judgment-flagged", "judgment-held", "errored", "declassify-refused"])(
+  // A clean `observed` and an `attempted` do authorize (ADR 0010, test/gate/action-lifecycle.test.ts).
+  test.each(["refused", "warned", "judgment-blocked", "judgment-flagged", "judgment-held", "errored", "declassify-refused"])(
     "no-verdict: a gate receipt decided %s is not an execution",
     (decision) => {
       expect(pairs(run([gateOf({ decision })], [suiOf("D1")], [chainOf("D1")]))).toEqual([["D1", "no-verdict"]])

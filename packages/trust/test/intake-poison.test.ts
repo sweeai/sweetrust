@@ -754,6 +754,19 @@ describe("verify + signer: records, options bags, signer configs and sign/preima
   }
   const poisonRecords = (records: ReadonlyArray<SignedReceipt>) => records.map((r, i) => poison({ ...r }, `records[${i}]`))
 
+  test("ReceiptLog.fromReceipts and SignedReceiptLog.fromSigned read each record once", async () => {
+    const signer = makeEd25519ReceiptSigner(generateSigningKeypair())
+    const log = new SignedReceiptLog(signer)
+    log.append({ at: "2026-01-01T00:00:00.000Z", sink: "s", decision: "refused", args: {} })
+    log.append({ at: "2026-01-01T00:00:01.000Z", sink: "s", decision: "executed", args: {} })
+    const copies = () => JSON.parse(log.exportJSONL().trim().split("\n").map((l) => `[${l}]`).join("").replace(/\]\[/g, ",")) as ReadonlyArray<ReturnType<typeof log.signed>[number]>
+    const heads = (l: ReceiptLog) => [l.head(), l.all().length, l.verifyChain()]
+    expect(heads(ReceiptLog.fromReceipts(log.all()))).toEqual(heads(log))
+    sameVerdict("fromReceipts", () => heads(ReceiptLog.fromReceipts(log.all())), () => heads(ReceiptLog.fromReceipts(log.all().map((r, i) => poison({ ...r }, `row[${i}]`)))))
+    expect(heads(SignedReceiptLog.fromSigned(copies(), signer))).toEqual(heads(log))
+    sameVerdict("fromSigned", () => heads(SignedReceiptLog.fromSigned(copies(), signer)), () => heads(SignedReceiptLog.fromSigned(copies().map((r, i) => poison({ ...r }, `record[${i}]`)), signer)))
+  })
+
   test("verifyVerdictPurpose — its args bag, the verdict and the grant are read once", () => {
     const grant = () => ({ type: "grant", purpose: { statement: "Pay rent" } })
     const verdict = () => ({ grantHash: sha256Hex(canonicalJSON(grant())), purposeHash: purposeHash({ statement: "Pay rent" }) }) as never
@@ -900,6 +913,7 @@ describe("gate: the intent digests read their argument once", () => {
       model: "m@1",
       actionDigest: "c".repeat(64),
       unkeyedActionDigest: "c".repeat(64),
+      scored: true,
       paymentDigest: null,
       grantHash: "b".repeat(64),
       purposeHash: "e".repeat(64),

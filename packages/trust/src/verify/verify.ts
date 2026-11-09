@@ -49,6 +49,8 @@ import {
   type Verdict,
   verdictDigest,
 } from "../gate/index.ts"
+// Internal to the rail, and deliberately not on the gate's public surface.
+import { snapshotRows } from "../gate/trust.ts"
 
 // Re-exported so consumers of the receipt rail share ONE canonicalization, and
 // (since the 2026-10-13 verify audit) ONE preimage: a bring-your-own
@@ -147,6 +149,30 @@ export class SignedReceiptLog extends ReceiptLog {
     // holder must not be able to edit it in place (the 2026-11-08 audit, K8).
     this.signedEvents.push(Object.freeze(signedRecord))
     return receipt
+  }
+
+  /**
+   * A log that continues from a signed artifact, for a process that restarts
+   * (ADR 0010). The artifact must verify under `signer`'s key, as
+   * `verifySignedChain` checks it, or this is a TypeError. An empty list is a
+   * fresh log. The newest records can be cut without detection unless the host
+   * also checks an anchor, as for any chain (SECURITY.md).
+   */
+  static fromSigned<T extends SignedReceiptLog>(this: new (signer: ReceiptSigner) => T, records: ReadonlyArray<SignedReceipt>, signer: ReceiptSigner): T {
+    if (!Array.isArray(records)) throw new TypeError("fromSigned: records must be an array")
+    const copies = snapshotRows(records)
+    const log = new this(signer)
+    if (copies.length === 0) return log
+    const report = verifySignedChain(copies, { trustedSignerPublicKeyHex: signer.publicKeyHex })
+    if (!report.valid) throw new TypeError(`fromSigned: the artifact does not verify (${report.reason} at record ${report.firstInvalidIndex})`)
+    log.load(copies.map((r) => r.payload))
+    log.signedEvents = copies.map((r) => Object.freeze(r))
+    return log
+  }
+
+  /** The unsigned door would leave the two chains apart. */
+  static override fromReceipts(): never {
+    throw new TypeError("SignedReceiptLog is seeded with fromSigned, which verifies the signatures")
   }
 
   /** A copy. Handing out the live array let any caller truncate the artifact. */
@@ -701,7 +727,8 @@ function chainPayment(event: ChainEvent): string | null {
  * Compare the chain's real payments with the records, and name each one the
  * judge did not account for. Pure: it reads its arguments once and makes no
  * chain call. Each successful chain spend is joined on its transaction digest
- * to a receipt@2, then to an `executed` gate receipt by a `verdictDigest`
+ * to a receipt@2, then to the gate receipt of a run the judge let through
+ * (`executed`, `attempted`, or an `observed` with no violation) by a `verdictDigest`
  * recomputed from that receipt's `verdict`, so an edited verdict matches
  * nothing. A digest written anywhere in the records is never believed.
  *
@@ -709,7 +736,7 @@ function chainPayment(event: ChainEvent): string | null {
  * - `no-receipt`: no receipt@2 accounts for it. A `refused` receipt does not,
  *   since it says the spend never happened. An `errored` receipt does: its
  *   outcome was unknown, and the chain has now settled it.
- * - `no-verdict`: the receipt names no verdict, names one no `executed` gate
+ * - `no-verdict`: the receipt names no verdict, names one no authorizing gate
  *   receipt holds, or several receipts for this transaction name different ones.
  * - `double-spend`: a spend after the first under one verdict, first meaning
  *   first in chain order. It counts even if the payment also differs.
@@ -762,7 +789,12 @@ export function reconcile(args: ReconcileArgs): ReconcileReport {
       if (!isRecord(row)) throw new TypeError("not a receipt")
       const decision = ownField(row, "decision")
       if (typeof decision !== "string") throw new TypeError("not a receipt")
-      if (decision !== "executed") return
+      // The records of a run the judge let through. `attempted` alone is what a
+      // log failure after execute leaves. A clean `observed` is a confident match
+      // in observe. A reason on `observed`, like every `warned`, means the sink
+      // raised a violation, and such a run carries no authority (ADR 0010).
+      const authorizing = decision === "executed" || decision === "attempted" || (decision === "observed" && ownField(row, "reason") === undefined)
+      if (!authorizing) return
       const raw = ownField(row, "verdict")
       if (raw === undefined) return // an unjudged sink
       const verdict = copyVerdict(raw)
