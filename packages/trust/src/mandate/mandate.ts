@@ -38,6 +38,27 @@ const failMandate = (error: MandateError): never => {
 }
 
 /**
+ * The caller's `triggerSource`, read once by the caller of this function and
+ * held to the two values the type names (the 2026-11-08 audit, K2). Absent means
+ * "code". Anything else is a programmer error, a `TypeError`, before any
+ * authority decision.
+ *
+ * It used to reach the event unchecked, so an object carrying a `toJSON` went
+ * into the signed payload. A stateful `toJSON` made the signed bytes differ from
+ * the file bytes, and every owner operation on that store, revoke included,
+ * then threw `AuditLogCorrupt` until someone edited the file by hand. A
+ * re-entrant `toJSON` spent twice between the chain-head read and the append.
+ * Refusing it here means no live object ever reaches a record.
+ */
+const captureTriggerSource = (raw: unknown): TriggerSource => {
+  if (raw === undefined) return "code"
+  if (raw !== "code" && raw !== "external") {
+    throw new TypeError('triggerSource must be "code" or "external"')
+  }
+  return raw
+}
+
+/**
  * defineCapability — construct a capability from a stable string key. The
  * returned value carries only the `key` at runtime; the LITERAL key type is
  * preserved so the compile-time subset gate can distinguish capabilities.
@@ -918,7 +939,7 @@ export const useCapability = <
   // `ISSUED` has the shape of the hole). `mandate` is the one object the
   // walk, the log checks, the possession check and the record all name.
   const { mandate, capability } = args
-  const triggerSource: TriggerSource = args.triggerSource ?? "code"
+  const triggerSource = captureTriggerSource(args.triggerSource)
   const amountRaw: unknown = args.amount
   // A malformed digest is a programmer error, so it fails here, before any
   // authority decision, as a malformed purpose does at issue.
@@ -1035,7 +1056,7 @@ export const revokeMandate = (args: {
   // audit). `mandateId` is the one id the chain walk, the authorization and
   // the revoke record all name.
   const { mandateId, revokerScope, rationale } = args
-  const triggerSource: TriggerSource = args.triggerSource ?? "code"
+  const triggerSource = captureTriggerSource(args.triggerSource)
 
   // rationale pre-check
   const rationaleCheck = constitutionalPreCheck(rationale)
@@ -1149,7 +1170,7 @@ export const issueOrgMandate = <Caps extends ReadonlyArray<Capability>>(args: {
   const limits = captureLimits(args.limits, capabilityIds)
   capabilityIds.forEach(assertCapabilityIdentifierClean)
   const purpose = capturePurpose(args.purpose)
-  const triggerSource: TriggerSource = args.triggerSource ?? "code"
+  const triggerSource = captureTriggerSource(args.triggerSource)
 
   const rationaleCheck = constitutionalPreCheck(rationale)
   if (rationaleCheck) {
@@ -1228,7 +1249,7 @@ export const issueProjectMandate = <
   const limits = captureLimits(args.limits, capabilityIds)
   capabilityIds.forEach(assertCapabilityIdentifierClean)
   const purpose = capturePurpose(args.purpose)
-  const triggerSource: TriggerSource = args.triggerSource ?? "code"
+  const triggerSource = captureTriggerSource(args.triggerSource)
 
   const rationaleCheck = constitutionalPreCheck(rationale)
   if (rationaleCheck) {
@@ -1344,7 +1365,7 @@ export const issueAgentMandate = <
   const limits = captureLimits(args.limits, capabilityIds)
   capabilityIds.forEach(assertCapabilityIdentifierClean)
   const purpose = capturePurpose(args.purpose)
-  const triggerSource: TriggerSource = args.triggerSource ?? "code"
+  const triggerSource = captureTriggerSource(args.triggerSource)
 
   const rationaleCheck = constitutionalPreCheck(rationale)
   if (rationaleCheck) {
@@ -1463,7 +1484,7 @@ export const resumeMandate = <
   const capabilities = captureCapabilities(args.capabilities)
   const declaredIds = resolveCapabilityIds(capabilities)
   const declaredTier: unknown = args.tier
-  const triggerSource: TriggerSource = args.triggerSource ?? "code"
+  const triggerSource = captureTriggerSource(args.triggerSource)
 
   // The leaf's grant first, so the walk's fallback `revokedBy` is the real
   // grantor, as it is on the use path (blind review 2026-11-01, finding 4).
