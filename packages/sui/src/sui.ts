@@ -186,10 +186,12 @@ const MAX_COIN_TYPE_GENERICS = 16
 /**
  * `normalizeStructTag`, bounded. The SDK's parser is superlinear in nesting, and
  * a coin type can come from an agent: 15 KB of nested generics blocked the event
- * loop for 43 s, and 640 KB ended the process out of memory. Every call in this file goes through here.
+ * loop for 43 s, and 640 KB ended the process out of memory. Every direct call in this file goes
+ * through here, and a handle is bounded at intake, because `Transaction.coin` parses its asset too.
  */
+const boundedCoinType = (coinType: string): boolean => coinType.length <= MAX_COIN_TYPE_CHARS && coinType.split("<").length - 1 <= MAX_COIN_TYPE_GENERICS
 const parseCoinType = (coinType: string): string => {
-  if (coinType.length > MAX_COIN_TYPE_CHARS || coinType.split("<").length - 1 > MAX_COIN_TYPE_GENERICS) throw new TypeError("not a plausible Sui coin type")
+  if (!boundedCoinType(coinType)) throw new TypeError("not a plausible Sui coin type")
   return normalizeStructTag(coinType)
 }
 /** Is `asset` the coin a scale is bound to? A malformed asset is not, and never throws here. */
@@ -309,6 +311,7 @@ function snapshotHandle(where: string, h: SuiAllowance): SuiAllowance {
   for (const [k, v] of [["network", network], ["asset", asset], ["allowanceId", allowanceId], ["capId", capId], ["funder", funder], ["spender", spender]] as const) {
     if (typeof v !== "string") throw typeErr(where, `allowance.${k} must be a string`)
   }
+  if (!boundedCoinType(asset as string)) throw typeErr(where, "allowance.asset is too long or too nested to be a coin type")
   const held = snapshotLimits(where, limits)
   // open() refuses a bad window as a result (EBadRateLimit), so a handle that
   // carries one was not made by open(). Caught here, before anything is sent,
@@ -933,6 +936,11 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
       }
       return `${refused} This spend of ${payment} presented an authorization that no sink issued. A verdict digest or a copied object is not an authorization: this adapter spends the one-shot token a sink hands its execute().`
     }
+    // Before the token is spent, so a local spelling error cannot burn it, and before anything lowercases the string.
+    if (!validAddr(recipientRaw)) return notSent("invalid-address", `Refused in-process; nothing was sent. The recipient ${JSON.stringify(recipientRaw)} is not a Sui address.`)
+    const recipient = normAddr(recipientRaw)
+    // One recipient has one spelling, or a respelling is a new action that a judge's doubt does not cover.
+    if (recipientRaw !== recipient) return notSent("invalid-address", `Refused in-process; nothing was sent. The recipient ${JSON.stringify(recipientRaw)} is not in canonical form; spell it ${recipient}.`)
     if (requireAuthorization === true || authorization !== undefined) {
       const why = unauthorized()
       if (why !== null) return notSent("not-authorized", `${why} ${AUTHORIZATION_HELD}`)
@@ -940,10 +948,6 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
 
     if (h.network !== network) return notSent("wrong-network", `Refused in-process; nothing was sent. The allowance is on ${h.network}, and this adapter is connected to ${network}.`)
     if (amount <= 0n || amount > U64_MAX) return notSent("invalid-amount", `Refused in-process; nothing was sent. A spend must be a whole number of base units from 1 to ${U64_MAX}; this one is ${amount}.`)
-    if (!validAddr(recipientRaw)) return notSent("invalid-address", `Refused in-process; nothing was sent. The recipient ${JSON.stringify(recipientRaw)} is not a Sui address.`)
-    const recipient = normAddr(recipientRaw)
-    // One recipient has one spelling, or a respelling is a new action that a judge's doubt does not cover.
-    if (recipientRaw !== recipient) return notSent("invalid-address", `Refused in-process; nothing was sent. The recipient ${JSON.stringify(recipientRaw)} is not in canonical form; spell it ${recipient}.`)
     // A hand-built handle can carry a limit nobody holds; refuse rather than ignore it (ruling 1).
     const unheld = present.filter((l) => holder(l) === "nobody")
     if (unheld.length > 0) {

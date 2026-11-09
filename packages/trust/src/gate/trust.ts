@@ -475,7 +475,8 @@ export function allowlisted<T>(
   try {
     entry = registry.get(keyValue)
   } catch (err) {
-    return { ok: false, reason: `the ${registryName} lookup failed (${safely(() => firstLine(err))}) — refusing rather than guessing` }
+    // A fixed sentence: a database error can carry a connection string, and a reason can reach an agent.
+    return { ok: false, reason: `the ${registryName} lookup failed, so it is refused rather than guessed` }
   }
   if (entry === undefined) {
     return { ok: false, reason: `'${keyValue}' not in ${registryName}; candidate is ${candidate.describe()}` }
@@ -666,6 +667,12 @@ export function corroborate<T>(
 
 /** How much of a candidate's JSON humanConfirm puts in front of the human. */
 const HUMAN_CONFIRM_VALUE_CHARS = 256
+/** Characters JSON leaves raw that a renderer can act on: line separators, bidi overrides, C1 controls, zero-widths. */
+const QUESTION_UNSAFE = /[\u0080-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g
+/** One already-quoted field of the question: cut to length with its full length declared, then made inert. For display only. */
+const forQuestion = (quoted: string): string =>
+  (quoted.length > HUMAN_CONFIRM_VALUE_CHARS ? `${quoted.slice(0, HUMAN_CONFIRM_VALUE_CHARS)}… [${quoted.length} chars total; first ${HUMAN_CONFIRM_VALUE_CHARS} shown]` : quoted)
+    .replace(QUESTION_UNSAFE, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`)
 
 /**
  * Human confirmation → Verified. The provenance is RENDERED to the human
@@ -757,13 +764,10 @@ export async function humanConfirm<T>(
       reason: `human confirmation refused: the candidate (${candidate.describe()}) could not be rendered for the question (${safely(() => firstLine(err))})`,
     }
   }
-  const shown =
-    json.length > HUMAN_CONFIRM_VALUE_CHARS
-      ? `${json.slice(0, HUMAN_CONFIRM_VALUE_CHARS)}… [${json.length} chars total; first ${HUMAN_CONFIRM_VALUE_CHARS} shown]`
-      : json
+  const shown = forQuestion(json)
   // Quoted, as `allowlisted` quotes its key: an origin is a host-chosen string
   // that can carry message text, and this is the sentence a person says yes to.
-  const question = `Confirm the value with provenance ${show(candidate.describe())} — value: ${shown}?`
+  const question = `Confirm the value with provenance ${forQuestion(show(candidate.describe()))} — value: ${shown}?`
   // Everything above ran synchronously, at the call. The await below is the
   // first point at which time passes; nothing after it reads `candidate`.
   //

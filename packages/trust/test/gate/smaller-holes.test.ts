@@ -69,6 +69,20 @@ describe("the confirmation question quotes its provenance", () => {
     expect(question).toContain('\\"safe\\"')
   })
 
+  it("cuts a long provenance and declares its length", async () => {
+    let question = ""
+    await humanConfirm(Sourced.fromChannel("0xvalue", "x" + " ".repeat(4000)), (q) => { question = q; return false })
+    expect(question).toMatch(/chars total; first 256 shown/)
+    expect(question.indexOf(" — value:")).toBeLessThan(400)
+  })
+
+  it.each([["U+2028", "\u2028"], ["U+2029", "\u2029"], ["U+0085", "\u0085"], ["a bidi override", "\u202e"], ["a zero-width", "\u200b"]])("makes %s inert in the origin and the value", async (_name, char) => {
+    let question = ""
+    await humanConfirm(Sourced.fromChannel(`0x${char}feed`, `a${char}b`), (q) => { question = q; return false })
+    expect(question).not.toContain(char)
+    expect(question).toContain(`\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`)
+  })
+
   it("leaves describe() as it was", async () => {
     const { candidate } = await asked()
     expect(candidate.describe()).toContain(forged)
@@ -80,6 +94,11 @@ describe("a registry that throws", () => {
     const result = allowlisted(auth("ACME"), { get: () => { throw new Error("db down") } } as never, auth("k1"), "vendors")
     expect(result.ok).toBe(false)
     expect(!result.ok && result.reason).toContain("vendors")
+  })
+
+  it("keeps the registry's error out of the reason", () => {
+    const result = allowlisted(auth("ACME"), { get: () => { throw new Error("postgres://svc:hunter2@db") } } as never, auth("k1"), "vendors")
+    expect(JSON.stringify(result)).not.toContain("hunter2")
   })
 
   it("a working registry still promotes", () => {

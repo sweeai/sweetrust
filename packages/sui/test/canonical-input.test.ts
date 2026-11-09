@@ -2,7 +2,7 @@
  * A recipient has one spelling, and no coin type reaches the SDK's parser
  * unbounded (DAN-1458).
  */
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519"
 import { normalizeSuiAddress } from "@mysten/sui/utils"
 import { defineScale, suiAllowances, type SuiAllowance } from "../src/index.ts"
@@ -35,12 +35,26 @@ describe("spend", () => {
     expect(r.refusal?.why).toContain(MERCHANT)
   })
 
-  it("bounds a coin type on a handle before digesting it", async () => {
+  it.each([[true], [false]])("refuses a handle with an oversized coin type (requireAuthorization %s)", async (requireAuthorization) => {
+    const chain = chainFor()
+    const adapter = suiAllowances({ client: chain.client, network: "sui:testnet", scale, requireAuthorization })
+    await fast(async () => {
+      await expect(Promise.resolve().then(() => adapter.spend({ signer: agent, allowance: handle(NESTED), amount: 5n, recipient: MERCHANT }))).rejects.toThrow(/too long or too nested/)
+    })
+    expect(chain.executed).toHaveLength(0)
+  })
+
+  it("refuses an over-long recipient before lowercasing it", async () => {
     const chain = chainFor()
     const adapter = suiAllowances({ client: chain.client, network: "sui:testnet", scale, requireAuthorization: true })
-    const r = (await fast(() => adapter.spend({ signer: agent, allowance: handle(NESTED), amount: 5n, recipient: MERCHANT }))) as { refusal?: { code: string } }
-    expect(chain.executed).toHaveLength(0)
-    expect(r.refusal?.code).toBe("not-authorized")
+    const lowercasing = vi.spyOn(String.prototype, "toLowerCase")
+    try {
+      const r = await adapter.spend({ signer: agent, allowance: handle(), amount: 5n, recipient: "İ".repeat(70) })
+      expect(r.refusal?.code).toBe("invalid-address")
+      expect(lowercasing.mock.contexts.some((text) => String(text).includes("İ"))).toBe(false)
+    } finally {
+      lowercasing.mockRestore()
+    }
   })
 })
 
