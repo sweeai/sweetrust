@@ -59,6 +59,33 @@ unchanged. Only a judged sink's receipts change shape (ADR 0009).
   argument during the judge's wait changes nothing that executes. A tier violation is refused
   before the judge is called, so a judge that always says `match` cannot lift a refusal.
 
+- **A capability getter can no longer spend between the check and the record.** A `key` getter ran
+  after `useCapability` had read the log, so it could call `useCapability` again and spend 150
+  against a cap of 30 on a signed chain that verified. Every caller-supplied value is now a
+  primitive before the first log read. A scope's `capabilities` elements are rebuilt per scope: they
+  are no longer the objects you passed, and two scopes no longer share one. `capabilityKey` throws a
+  `TypeError` on a non-string `key`. 0.5.0 has this bug. Regression: `test/mandate/reentrancy.test.ts`.
+- **`triggerSource` must be `"code"` or `"external"`, and `rationale` must be a string, or the call
+  throws a `TypeError`.** An object with a `toJSON` used to reach the signed event, and every owner
+  operation on that store then threw `AuditLogCorrupt`. `constitutionalPreCheck` throws a `TypeError`
+  on anything that is not a string. 0.5.0 has this bug.
+- **`listAllSigned()` returns a copy.** A `.pop()` on the live array un-revoked a mandate, and the
+  shorter chain verified. 0.5.0 has this bug.
+- **A revoke is always recorded.** A rationale that trips the injection screen no longer refuses the
+  revoke. The record's `rationale` holds the matched pattern and a SHA-256 of the text instead, so
+  the injection is not persisted. Issuing still refuses. 0.5.0 has this bug.
+- **The in-memory signer verifies only its own marker,** so a forgery naming the operator's key
+  cannot pass the operator's pin through it.
+- **`grantedPurpose` refuses a revoked mandate or a revoked ancestor.** A judged sink built from a
+  revoked grant used to execute. A sink built before the revoke keeps its copy until the action
+  lifecycle work lands.
+- **Lower items.** `grantor`, a limit's `unit` and `resumedBy` are screened before persistence, adding
+  those three `inputKind` values. A child under a revoked grandparent is refused at issue.
+  `SignedReceiptLog.signed()` hands out frozen records. JSONL store files are created mode 600, and an
+  existing file keeps its mode. `SECURITY.md` now states the limits left as they are: amounts past
+  2^53, a store that does not name itself, a torn append, no fsync, and `reconcile` trusting unsigned
+  rows.
+
 ### Added
 
 - **A purpose on the grant.** `issueOrgMandate`, `issueProjectMandate` and `issueAgentMandate` take

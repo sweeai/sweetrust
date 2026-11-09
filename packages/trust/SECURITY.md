@@ -61,6 +61,10 @@ fields. Two things follow for a host:
 - **Hand each agent its own scope and nothing above it.** Passing an agent its parent's scope
   object hands it the parent's authority. A child's `parentScope` is a detached view and carries
   none, so the child itself is safe to hand over.
+- **Read a scope's authority from the log, not from `scope.capabilities`.** A scope's list is
+  frozen and its elements are its own copies, but a holder can still edit those copies. The kernel
+  never reads them back, so that changes no verdict. A host that lists or authorizes from them would
+  see the edit.
 - **A scope does not survive a process boundary.** A rehydrated scope cannot invoke. Authority
   that must cross processes belongs to the chain's own primitives. See `docs/adr/0001-authority-is-possession-of-an-issued-scope.md`.
 
@@ -76,8 +80,24 @@ cannot forge under a key it does not hold.
 
 **The same holds for a JSONL audit store on disk, and there it can re-arm authority.** Delete the
 last line of a signed store and the file still verifies, because it is a valid shorter chain. If
-that line was a revoke, the mandate is live again: `isRevoked` returns `false`. Protect the store
-file the way you protect the key, or anchor its head somewhere the host cannot write.
+that line was a revoke, the mandate is live again: `isRevoked` returns `false`. If it was a spend,
+the budget is refunded, because the cap is summed from this log. Anchors above are a receipt-chain
+feature: `verifyAuditChain` takes no anchor, so nothing in this package detects a cut tail on a
+mandate log. Protect the store file the way you protect the key. If a cut tail matters to you, copy
+each new head somewhere the host cannot write and compare it yourself. A store file is created mode
+600; a file that already exists keeps the mode it has.
+
+### The store file: what a signature does not cover, and how it fails
+
+- **A store does not name itself.** Two stores signed by one key are interchangeable: copy staging's
+  file over production's and it verifies, and `resume` will pick up its mandates. Use one key per
+  store if that matters.
+- **A torn append stops the store.** A crash mid-write leaves a line that does not parse, and every
+  later read, revoke included, throws `AuditLogCorrupt` until the line is removed by hand. That is
+  fail-closed on purpose: a torn tail and a tampered one look alike. A write that lost only its final
+  newline is worse: the record parses and verifies, the store looks healthy, and the next append
+  joins that line, and only then does every read refuse. Appends are not fsynced, so a power loss can
+  also lose the last record, which then reads as a valid shorter chain.
 
 ### A receipt artifact may be re-serialized, but not re-valued
 
@@ -149,6 +169,19 @@ log line that says less. It does not catch paraphrase
 framing untrusted text clearly and constraining what the model may output. Do not rely on forcing
 a tool call for that: some current models reject forced `tool_choice`.
 
+### Amounts are JavaScript numbers
+
+A cap is summed in double precision, so past 2^53 an addition stops changing the total: a cap of
+2^53 fully spent still allows further uses of 1. Keep caps and amounts well under
+`Number.MAX_SAFE_INTEGER`, in integer minor units. A chain's own allowance, not this log, is what
+enforces an exact on-chain amount.
+
+### `reconcile` trusts the payloads you hand it
+
+`reconcile` takes `gate`, `sui` and `chain` rows as plain data and verifies no signature on them.
+Fabricated rows reconcile clean. Verify the gate rows with `verifySignedChain` first, and treat its
+report as a statement about those inputs only.
+
 ### `allowlisted` hands you the registry's own object, and `fromAuthority` freezes it
 
 `allowlisted` returns the registry's record, never your candidate: the object it compared is the
@@ -219,6 +252,15 @@ artifact rather than the source, and the findings are recorded rather than quiet
   object-taking export was put under a second-read Proxy (`test/intake-poison.test.ts`), which
   caught three more double reads; and the sink's `errored` receipt for an async action was made to
   re-raise instead of swallowing the host's crash.
+
+- **2026-11-08** — a pass over the mandate kernel at the 0.6.0 candidate. One HIGH in practice
+  in-process: a capability `key` getter ran after `useCapability` had snapshotted the log, so it could
+  re-enter and spend 150 against a cap of 30 on a signed chain that verified (published in 0.5.0).
+  Also closed: a `triggerSource` carrying a `toJSON` that bricked every owner operation on the store;
+  `listAllSigned` handing out the live array, so a `.pop()` un-revoked a mandate; a revoke refused
+  because its rationale quoted the injection; the in-memory signer's `verify` ignoring the record's
+  key; `grantedPurpose` answering for a revoked mandate. Every caller value is now a primitive before
+  the first log read, and each regression was watched red on the base commit.
 
 🔑 **The lesson we keep relearning, offered because it will apply to your code too:** a check and
 the decision it authorizes must name the same binding. If you compare A and act on B, you have not
