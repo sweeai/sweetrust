@@ -21,6 +21,10 @@ export {
   receiptBody,
   makeSink,
   mockJudgmentProvider,
+  encodeAction,
+  actionDigest,
+  paymentDigest,
+  verdictDigest,
   type Tier,
   type UpgradeEvent,
   type Provenance,
@@ -30,4 +34,11 @@ export {
   type JudgmentProvider,
   type EnforcementMode,
   type SinkResult,
+  type Action,
+  type Payment,
+  type Verdict,
+  type Approval,
+  type HeldAction,
+  type AuthorizedBy,
 } from "./trust.ts"
+export type { GrantedPurpose, Purpose } from "../purpose.ts"

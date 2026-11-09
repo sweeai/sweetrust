@@ -53,7 +53,7 @@ Values carry their provenance, and privileged operations can demand it.
 - **The tier lattice** — `untrusted → corroborated → verified`. Combining taints **down**: mixing anything with untrusted data yields untrusted data. LLM output is born untrusted no matter how good the model. *Inference is not evidence.*
 - **Three declassifiers** — the only ways a value can rise, and the constructor is module-private — at runtime too, not only in the types — so there is no fourth. A successful ascent is recorded in the value's provenance; a refusal is not yet recorded anywhere (see `SECURITY.md`): `allowlisted` (matches a registry you control → verified), `corroborate` (independent sources agree → corroborated, never verified), `humanConfirm` (asks a person, with the provenance rendered into the question so the answer is informed rather than reflexive).
 - **Sinks that declare their appetite** — `makeSink` refuses under-tier arguments and fails closed, naming the tier gap in the refusal. Adoption ladder: `observe → warn → enforce`, so you can install it into a running system without breaking it on day one; a mode outside the ladder is a `TypeError` at construction, never a guess. `execute()` receives a snapshot of the declared arguments, read once when they were checked.
-- **The judgment seam** — a pluggable calibrated scorer that runs *after* the tiers pass, to catch the action that is in-bounds but still wrong. An `unsure` verdict never blocks — it flags and defers to a human. A `mismatch` at or above the sink's `floor` blocks in `enforce`, and so does a provider that throws or cannot score; both flag in `observe` and `warn`.
+- **The judgment seam** — a pluggable calibrated scorer that runs *after* the tiers pass, to catch the action that is in-bounds but still wrong. In `enforce`, only a `match` at or above the sink's `floor` runs and only a `mismatch` at or above it blocks. Everything else is **held** for a human: `unsure`, either answer below the floor, and a provider that times out, throws or cannot score. Nothing runs on doubt. In `observe` and `warn` the action runs, flagged, with the verdict on the receipt.
 - **`ReceiptLog`** — every **sink** decision, allow *and* refuse, lands on a hash-chained tamper-evident log. A declassifier's refusal does not (see `SECURITY.md`).
 
 <!-- readme-check: prelude
@@ -86,7 +86,7 @@ const payee   = allowlisted(account, PAYEE_REGISTRY, vendor, "payee-registry") /
 // value, so there is no way to spend the output without having looked.
 if (!payee.ok) throw new Error(payee.reason)
 
-pay({ to: payee.value, amount })
+await pay({ to: payee.value, amount })
 // Refused? The refusal names the tier gap AND renders the provenance —
 // and the refusal itself is on the receipt chain.
 ```
@@ -389,7 +389,7 @@ A free tier without enforcement is an advisory guardrail, which is the exact fai
 
 ## Status
 
-**v0.5.0 is current.** It breaks two entry points from 0.4.0, the first npm release: the mandate verbs move onto the client `createTrust({ store })` returns, and `humanConfirm` returns a Promise. It also adds capability limits and `trust.resume`. `CHANGELOG.md` § *[0.5.0]* has the migration. The package was formed 2026-07-30 by merging three unpublished packages (`@sweetrust/mandate`, `@sweetrust/gate`, `@sweetrust/verify`) into one with subpath exports, then hardened through the adversarial passes `SECURITY.md` lists. Before 0.4.0, npm held only a 0.0.1 name placeholder with no code. `CHANGELOG.md` ships in the tarball.
+**This tree is v0.6.0, not yet on npm; v0.5.0 is the latest published.** 0.6.0 adds the intent layer and makes every sink call return a Promise. `CHANGELOG.md` § *[0.6.0]* has the migration. The package was formed 2026-07-30 by merging three unpublished packages (`@sweetrust/mandate`, `@sweetrust/gate`, `@sweetrust/verify`) into one with subpath exports, then hardened through the adversarial passes `SECURITY.md` lists. Before 0.4.0, npm held only a 0.0.1 name placeholder with no code. `CHANGELOG.md` ships in the tarball.
 
 ## Versioning
 

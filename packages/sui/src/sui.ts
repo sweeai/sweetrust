@@ -24,7 +24,7 @@ import { Transaction, TransactionDataBuilder } from "@mysten/sui/transactions"
 import type { Signer } from "@mysten/sui/cryptography"
 import type { ClientWithCoreApi, SuiClientTypes } from "@mysten/sui/client"
 import { isValidSuiAddress, normalizeStructTag, normalizeSuiAddress } from "@mysten/sui/utils"
-import type { ReceiptLog } from "sweetrust/gate"
+import { paymentDigest, type ReceiptLog } from "sweetrust/gate"
 import {
   ABORTS, ALLOWANCE_MODULE, CLOCK_OBJECT_ID, decodeClockMs, MAX_NAME_BYTES, U256_MAX, U64_MAX,
   abortNameOf, currentWindow, decodeAllowance, type AllowanceState,
@@ -35,7 +35,7 @@ import {
   periodPhrase, presentLimits, shortAddress, type SpendFacts,
 } from "./explain.ts"
 import type {
-  AllowanceAdapter, AllowanceLimits, AllowanceReceipt, Caip2, Enforcement, HeldBy,
+  AllowanceAdapter, AllowanceLimits, AllowanceReceipt, AuthorizedBy, Caip2, Enforcement, HeldBy,
   LimitLine, LimitName, NativeAbort, Refusal, RefusalCode, Remaining, Verb,
 } from "./interface.ts"
 import { SUI, baseUnitsOf, type Scale } from "./scale.ts"
@@ -113,6 +113,14 @@ export interface SuiAllowancesOptions {
   readonly explorer?: ((network: Caip2, digest: string) => string | null) | null
   /** This machine's clock, for receipts of refusals that never reached the chain. Default `Date.now`. */
   readonly now?: () => number
+  /**
+   * Refuse every spend that does not name the verdict that approved it: no
+   * `authorizedBy`, or one whose `paymentDigest` differs from the digest of this
+   * payment. The check is the first thing `spend` does, before any chain read,
+   * and its refusal is `not-authorized`. It binds only spends routed through this
+   * library. Default false: `authorizedBy` is optional and repeated unchecked.
+   */
+  readonly requireAuthorization?: boolean
 }
 
 export type SuiAllowances = AllowanceAdapter<Signer, SuiAllowance>
@@ -120,7 +128,11 @@ export type SuiAllowances = AllowanceAdapter<Signer, SuiAllowance>
 const SUI_TYPE = "0x2::sui::SUI"
 const DEFAULT_GAS_BUDGET = 10_000_000n
 const DEFAULT_CONFIRM_TIMEOUT_MS = 30_000
-const SCHEMA = "sweetrust-sui/receipt@1" as const
+const SCHEMA = "sweetrust-sui/receipt@2" as const
+/** The shape of a SweeTrust gate digest. */
+const GATE_DIGEST = /^[0-9a-f]{64}$/
+/** What a `not-authorized` receipt says about who held the rule: this check is the library's, not Sui's. */
+const AUTHORIZATION_HELD = "Held by the library, in-process: this check binds only spends routed through this library, and the spender's key can still pay through another Sui client, up to the limits Sui holds."
 
 /**
  * The genesis checkpoint digest of each Sui network whose genesis never changes,
@@ -212,6 +224,21 @@ function snapshotLimits(where: string, l: AllowanceLimits): AllowanceLimits {
   return Object.freeze(out)
 }
 
+/**
+ * Exactly the two digests, each read once, into a copy of our own: a getter
+ * cannot show the check one answer and the receipt another, and extra keys never
+ * reach a receipt. A wrong JS type throws; a wrong value is `not-authorized`.
+ */
+function snapshotAuthorizedBy(where: string, a: AuthorizedBy | undefined): AuthorizedBy | null {
+  if (a === undefined) return null
+  if (typeof a !== "object" || a === null || Array.isArray(a)) throw typeErr(where, "authorizedBy must be { verdictDigest, paymentDigest }")
+  const verdictDigest = a.verdictDigest
+  const given = a.paymentDigest
+  if (typeof verdictDigest !== "string") throw typeErr(where, "authorizedBy.verdictDigest must be a string")
+  if (typeof given !== "string" && given !== null) throw typeErr(where, "authorizedBy.paymentDigest must be a string, or null")
+  return Object.freeze({ verdictDigest, paymentDigest: given })
+}
+
 function snapshotHandle(where: string, h: SuiAllowance): SuiAllowance {
   if (typeof h !== "object" || h === null) throw typeErr(where, "allowance must be the object open() returned")
   const network = h.network
@@ -246,6 +273,7 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
   const confirmTimeoutMs = options.confirmTimeoutMs ?? DEFAULT_CONFIRM_TIMEOUT_MS
   const explorerOpt = options.explorer
   const localNow = options.now ?? Date.now
+  const requireAuthorization = options.requireAuthorization
   if (typeof client !== "object" || client === null || typeof client.core !== "object") throw typeErr("suiAllowances", "client must be a @mysten/sui client (it needs client.core)")
   if (typeof network !== "string" || !/^sui:[-a-z0-9]{1,32}$/.test(network)) throw typeErr("suiAllowances", `network must be a CAIP-2 Sui chain id such as "sui:testnet", got ${JSON.stringify(network)}`)
   if (typeof gasBudget !== "bigint" || gasBudget <= 0n) throw typeErr("suiAllowances", "gasBudget must be a positive bigint (MIST)")
@@ -254,6 +282,7 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
   if (options.now !== undefined && typeof options.now !== "function") throw typeErr("suiAllowances", "now must be a function returning epoch milliseconds, e.g. Date.now (not Date.now())")
   if (explorerOpt !== undefined && explorerOpt !== null && typeof explorerOpt !== "function") throw typeErr("suiAllowances", "explorer must be a function (network, digest) => string | null, or null")
   if (scaleOpt !== undefined && (typeof scaleOpt !== "object" || scaleOpt === null || typeof scaleOpt.format !== "function")) throw typeErr("suiAllowances", "scale must be a Scale from defineScale()")
+  if (requireAuthorization !== undefined && typeof requireAuthorization !== "boolean") throw typeErr("suiAllowances", "requireAuthorization must be a boolean")
   const explorer = explorerOpt === undefined ? defaultExplorer : explorerOpt
   /**
    * The explorer link runs after the chain has moved, so it may not throw: a
@@ -301,7 +330,7 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
 
   const preflightNative = (abortName: string): NativeAbort => ({ module: ALLOWANCE_MODULE, abortName, abortCode: ABORTS[abortName], rawAbortCode: null })
 
-  type ReceiptFields = Omit<AllowanceReceipt, "schema" | "network" | "explorer"> & { readonly network?: Caip2 }
+  type ReceiptFields = Omit<AllowanceReceipt, "schema" | "network" | "explorer" | "authorizedBy"> & { readonly network?: Caip2; readonly authorizedBy?: AuthorizedBy | null }
   // Fields in reading order: what happened, where, the proof, when, who, how much, then why.
   const receiptOf = (f: ReceiptFields): AllowanceReceipt => ({
     schema: SCHEMA,
@@ -319,6 +348,7 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
     amount: f.amount,
     amountText: f.amountText,
     recipient: f.recipient,
+    authorizedBy: f.authorizedBy ?? null,
     limits: f.limits,
     refusal: f.refusal,
     summary: f.summary,
@@ -748,6 +778,7 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
     const h = snapshotHandle("spend", args.allowance)
     const amount = args.amount
     const recipientRaw = args.recipient
+    const authorizedBy = snapshotAuthorizedBy("spend", args.authorizedBy)
     if (typeof signer !== "object" || signer === null || typeof signer.toSuiAddress !== "function") throw typeErr("spend", "signer must be a @mysten/sui Signer (the spender's keypair)")
     if (typeof amount !== "bigint") throw typeErr("spend", "amount must be a bigint (base units)")
     if (typeof recipientRaw !== "string") throw typeErr("spend", "recipient must be an address string")
@@ -759,7 +790,7 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
 
     const base = {
       verb: "spend" as Verb, asset: h.asset, allowanceId: h.allowanceId, funder: h.funder, spender: signerAddr,
-      amount: amount.toString(), amountText, recipient: recipientRaw,
+      amount: amount.toString(), amountText, recipient: recipientRaw, authorizedBy,
     }
     // A chain-held limit's value comes from the chain object, never the handle; a
     // disagreement is flagged on the receipt, not hidden.
@@ -786,6 +817,31 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
         limits: present.map((l) => own[l] ?? line(l, limitValue(l, h.limits, scale), holder(l), "unchecked", "Not evaluated: nothing was sent to Sui.")),
         refusal: refusal(code, "library", null, why), summary: why,
       }))
+
+    /**
+     * Why this payment is not authorized, or null when it is. Recomputed over the
+     * values this adapter would actually send, so a verdict judged over anything
+     * else, a non-canonical address included, fails closed.
+     */
+    const unauthorized = (): string | null => {
+      const refused = "Refused in-process; nothing was sent."
+      const payment = `${amountText} to ${validAddr(recipientRaw) ? normAddr(recipientRaw) : JSON.stringify(recipientRaw)} on ${network}`
+      if (authorizedBy === null) return `${refused} This adapter requires every spend to name the verdict that approved it (requireAuthorization), and this spend of ${payment} named none.`
+      if (!GATE_DIGEST.test(authorizedBy.verdictDigest)) return `${refused} This spend of ${payment} names the verdict ${JSON.stringify(authorizedBy.verdictDigest)}, and a verdictDigest is 64 lowercase hex characters.`
+      if (authorizedBy.paymentDigest === null) return `${refused} This spend of ${payment} names a verdict with no payment digest, so that verdict approved no particular payment, and this adapter requires one that did.`
+      let actual: string
+      try {
+        actual = paymentDigest({ network, asset: normalizeStructTag(h.asset), recipient: normAddr(recipientRaw), amount })
+      } catch (e) {
+        return `${refused} This spend of ${payment} has no payment digest to compare, so no verdict can match it: ${clip(e)}`
+      }
+      if (authorizedBy.paymentDigest !== actual) return `${refused} This spend's verdict approved a different payment: it names payment digest ${JSON.stringify(authorizedBy.paymentDigest)}, and ${payment} digests to ${actual}.`
+      return null
+    }
+    if (requireAuthorization === true) {
+      const why = unauthorized()
+      if (why !== null) return notSent("not-authorized", `${why} ${AUTHORIZATION_HELD}`)
+    }
 
     if (h.network !== network) return notSent("wrong-network", `Refused in-process; nothing was sent. The allowance is on ${h.network}, and this adapter is connected to ${network}.`)
     if (amount <= 0n || amount > U64_MAX) return notSent("invalid-amount", `Refused in-process; nothing was sent. A spend must be a whole number of base units from 1 to ${U64_MAX}; this one is ${amount}.`)

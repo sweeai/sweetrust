@@ -51,7 +51,7 @@ const jqS = (line: string): string => JSON.stringify(sortKeysDeep(JSON.parse(lin
 // argument used to be enough to trip this; the nesting makes the point twice.
 const UNSORTED = { z: 1, a: 2, nested: { b: "two", a: "one" } }
 
-function sessionWith(log: ReceiptLog) {
+async function sessionWith(log: ReceiptLog) {
   const pay = makeSink<{ to: Sourced<typeof UNSORTED> }, string>({
     name: "pay",
     requires: { to: "verified" },
@@ -59,14 +59,14 @@ function sessionWith(log: ReceiptLog) {
     log,
     execute: ({ to }) => `paid ${to.value.z}`,
   })
-  pay({ to: Sourced.fromAuthority({ ...UNSORTED, nested: { ...UNSORTED.nested } }, "reg") }) // executed
-  pay({ to: Sourced.fromLLM({ ...UNSORTED, nested: { ...UNSORTED.nested } }, "Extract", []) }) // refused
+  await pay({ to: Sourced.fromAuthority({ ...UNSORTED, nested: { ...UNSORTED.nested } }, "reg") }) // executed
+  await pay({ to: Sourced.fromLLM({ ...UNSORTED, nested: { ...UNSORTED.nested } }, "Extract", []) }) // refused
 }
 
 describe("the interior receipt hash survives a key-order re-serialization", () => {
-  test("gate: receiptBody over a key-sorted copy of a receipt rebuilds the hash the log committed (what verifyChain recomputes per record)", () => {
+  test("gate: receiptBody over a key-sorted copy of a receipt rebuilds the hash the log committed (what verifyChain recomputes per record)", async () => {
     const log = new ReceiptLog()
-    sessionWith(log)
+    await sessionWith(log)
     for (const r of log.all()) {
       const resorted = sortKeysDeep(r) as Receipt
       expect(JSON.stringify(resorted)).not.toBe(JSON.stringify(r)) // the copy really is reordered
@@ -75,10 +75,10 @@ describe("the interior receipt hash survives a key-order re-serialization", () =
     expect(log.verifyChain()).toBe(true)
   })
 
-  test("verify: an exported artifact run through `jq -S -c` still verifies, every record", () => {
+  test("verify: an exported artifact run through `jq -S -c` still verifies, every record", async () => {
     const keys = generateSigningKeypair()
     const log = new SignedReceiptLog(makeEd25519ReceiptSigner(keys))
-    sessionWith(log)
+    await sessionWith(log)
     const lines = log.exportJSONL().split("\n").filter((l) => l.length > 0)
     const resorted = lines.map(jqS)
     expect(resorted).not.toEqual(lines) // the re-serialization changed bytes
@@ -88,20 +88,20 @@ describe("the interior receipt hash survives a key-order re-serialization", () =
     expect(report).toMatchObject({ valid: true, reason: "ok", firstInvalidIndex: null })
   })
 
-  test("CONTROL: the artifact as exportJSONL wrote it verifies (green before and after)", () => {
+  test("CONTROL: the artifact as exportJSONL wrote it verifies (green before and after)", async () => {
     const keys = generateSigningKeypair()
     const log = new SignedReceiptLog(makeEd25519ReceiptSigner(keys))
-    sessionWith(log)
+    await sessionWith(log)
     const report = verifySignedChain(parseJSONL(log.exportJSONL()), {
       trustedSignerPublicKeyHex: publicKeyHexFromPem(keys.publicKeyPem),
     })
     expect(report.valid).toBe(true)
   })
 
-  test("CONTROL: a re-sorted artifact with one VALUE changed is still refused — sorting did not blind the hash", () => {
+  test("CONTROL: a re-sorted artifact with one VALUE changed is still refused — sorting did not blind the hash", async () => {
     const keys = generateSigningKeypair()
     const log = new SignedReceiptLog(makeEd25519ReceiptSigner(keys))
-    sessionWith(log)
+    await sessionWith(log)
     const records = parseJSONL(log.exportJSONL().split("\n").filter((l) => l.length > 0).map(jqS).join("\n") + "\n")
     ;(records[0]!.payload.args.to!.value as { z: number }).z = 999
     const report = verifySignedChain(records, { trustedSignerPublicKeyHex: publicKeyHexFromPem(keys.publicKeyPem) })
@@ -123,9 +123,9 @@ describe("src/canon.ts is the one canonicalization, and a leaf", () => {
     expect(root.sha256Hex).toBe(canon.sha256Hex)
   })
 
-  test("receiptBody IS canonicalJSON over the receipt's seven fields — no second shape to keep in step", () => {
+  test("receiptBody IS canonicalJSON over the receipt's seven fields — no second shape to keep in step", async () => {
     const log = new ReceiptLog()
-    sessionWith(log)
+    await sessionWith(log)
     for (const r of log.all()) {
       const { hash: _hash, ...body } = r
       expect(receiptBody(r)).toBe(canon.canonicalJSON(body))

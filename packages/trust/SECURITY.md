@@ -161,6 +161,25 @@ left alone. If you keep editing a record after wrapping it, wrap a copy.
 factory or declassifier and was removed in the 2026-10-13 rail audit; a sink that requires it is a
 `TypeError` at construction.
 
+### `chainSpends` and `reconcile` trust an unauthenticated indexer
+
+`reconcile` is only as true as the chain list it is handed, and `sweetrust-sui`'s `chainSpends` reads
+that list from a GraphQL indexer. Nothing authenticates the answer: no signature or proof ties a row
+to a checkpoint. An indexer that lies, lags or withholds rows can hide a spend, invent one or misstate
+its amount, and a clean report then means only that the list agreed with the log.
+
+Point it at an endpoint you trust. `chainSpends` throws when the indexer knows nothing about the
+allowance, and a custom URL that shows neither a spend nor the allowance's creation throws too, since
+it may keep only part of the history. A partial answer that does contain spends is returned as it
+stands, and the list is only as complete as the indexer's retention.
+
+It reports what the chain charged, not what your program intended, and it can over-report. A spend is
+any transaction carrying a `FUNDS_WITHDRAWAL` input with `source: SENDER_ALLOWANCE` for this allowance,
+whichever Move module the commands call. `AllowanceWithdrawal` has `drop`, so a spender can name a
+withdrawal it never redeems: that lists as a spend with an unreadable payment, and `reconcile` calls
+it an orphan though nothing moved. Over-reporting fails closed, and only the spender can cause it,
+because a validator refuses at signing a withdrawal whose sender is not the allowance's spender.
+
 ---
 
 ## Adversarial history

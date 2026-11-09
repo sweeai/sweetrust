@@ -1,0 +1,9 @@
+{
+  "network": "sui:testnet",
+  "digest": "8yqHCsi6Ns9pKUE2sHr6iu4s5eLB4MndtVTWub2ZC6gV",
+  "verdictDigest": "e24352bdac82f51a15c02684a234aaa896820329654388619ddb82745edce324",
+  "invokeVerdictDigest": "e24352bdac82f51a15c02684a234aaa896820329654388619ddb82745edce324",
+  "gateReceiptVerdictDigest": "e24352bdac82f51a15c02684a234aaa896820329654388619ddb82745edce324",
+  "suiAuthorizedByVerdictDigest": "e24352bdac82f51a15c02684a234aaa896820329654388619ddb82745edce324",
+  "orphans": []
+}

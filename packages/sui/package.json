@@ -52,7 +52,7 @@
   },
   "peerDependencies": {
     "@mysten/sui": "^2.35.0",
-    "sweetrust": "^0.5.0"
+    "sweetrust": "^0.6.0"
   },
   "devDependencies": {
     "@mysten/sui": "2.35.0",

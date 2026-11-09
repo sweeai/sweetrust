@@ -20,6 +20,10 @@ same list.
 - **No per-spend maximum in 0.1.** `open()` refuses one rather than drop it.
 - **A receipt is this library's account.** It enters a SweeTrust log at tier `untrusted`; the
   transaction digest beside it is what a stranger checks on chain.
+- **`chainSpends` trusts an unauthenticated indexer.** Nothing proves its answer, so a lying or
+  lagging indexer can hide or invent a spend. It can also over-report: a spender can name a
+  withdrawal it never redeems, and that lists as a spend. Over-reporting fails closed
+  (`packages/trust/SECURITY.md`, "`chainSpends` and `reconcile` trust an unauthenticated indexer").
 - **The kernel's `revokeMandate` does not stop money.** Revoking a SweeTrust mandate writes to the
   kernel's audit log; only `revoke` here deletes the on-chain allowance (`packages/trust/SECURITY.md`,
   "Revoking here does not stop money a chain already holds").

@@ -39,7 +39,15 @@ import {
   signedPreimage,
   type Signed,
 } from "../mandate/index.ts"
-import { type Receipt, ReceiptLog, receiptBody } from "../gate/index.ts"
+import {
+  type AuthorizedBy,
+  paymentDigest,
+  type Receipt,
+  ReceiptLog,
+  receiptBody,
+  type Verdict,
+  verdictDigest,
+} from "../gate/index.ts"
 
 // Re-exported so consumers of the receipt rail share ONE canonicalization, and
 // (since the 2026-10-13 verify audit) ONE preimage: a bring-your-own
@@ -534,4 +542,263 @@ export function parseAnchorMemo(
   if (text.startsWith(ANCHOR_MEMO_PREFIX)) return { kind: "anchor", head: text.slice(ANCHOR_MEMO_PREFIX.length) }
   if (text.startsWith(RECEIPT_MEMO_PREFIX)) return { kind: "receipt", head: text.slice(RECEIPT_MEMO_PREFIX.length) }
   return null
+}
+
+// ── Reconciliation (spec I8) ─────────────────────────────────────────────────
+// The chain carries no verdict, so a payment made around the gate looks like
+// any other payment. This join finds it. The chain's list comes in as data from
+// an adapter (sweetrust-sui's chainSpends): the kernel makes no chain calls.
+
+export type OrphanReason = "no-receipt" | "no-verdict" | "payment-mismatch" | "double-spend"
+
+export interface Orphan {
+  /**
+   * The transaction digest. A record too malformed to name one is identified by
+   * where it sits in the input instead: `gate[2]`, `sui[0]`, `chain[5]`.
+   */
+  readonly digest: string
+  readonly reason: OrphanReason
+}
+
+export interface ReconcileReport {
+  /** True exactly when `orphans` is empty. */
+  readonly ok: boolean
+  readonly orphans: ReadonlyArray<Orphan>
+}
+
+/** The fields reconcile reads from an adapter receipt; sweetrust-sui's receipt@2 satisfies it. */
+export interface ReconcileSuiReceipt {
+  readonly schema: string
+  readonly verb: string
+  readonly verdict: string
+  readonly digest: string | null
+  readonly authorizedBy: AuthorizedBy | null
+}
+
+/** One spend as the chain recorded it; sweetrust-sui's ChainSpend satisfies it. */
+export interface ReconcileChainSpend {
+  readonly digest: string
+  readonly status: "success" | "failure"
+  readonly network: string
+  readonly asset: string
+  /** Null when the transaction could not be read; on a success that is a `payment-mismatch`. */
+  readonly recipient: string | null
+  readonly amount: string | null
+}
+
+export interface ReconcileArgs {
+  /** Plain gate receipts: for a signed log, each record's `payload`. */
+  readonly gate: ReadonlyArray<Receipt>
+  readonly sui: ReadonlyArray<ReconcileSuiReceipt>
+  /** Every spend, in chain order, of every allowance the `sui` receipts name. */
+  readonly chain: ReadonlyArray<ReconcileChainSpend>
+}
+
+const SUI_RECEIPT_SCHEMA = "sweetrust-sui/receipt@2"
+
+const isRecord = (v: unknown): v is object => typeof v === "object" && v !== null && !Array.isArray(v)
+const isDigest = (v: unknown): v is string => typeof v === "string" && v !== ""
+/** The one read of an own field. A prototype answers nothing. */
+const ownField = (owner: object, key: string): unknown => (Object.hasOwn(owner, key) ? (owner as Record<string, unknown>)[key] : undefined)
+
+/** Each element, read once. One that throws reads as undefined, which every walk reports. */
+function readList(value: unknown, name: string): unknown[] {
+  if (!Array.isArray(value)) throw new TypeError(`reconcile: ${name} must be an array`)
+  const list: unknown[] = []
+  const length = value.length
+  for (let i = 0; i < length; i++) {
+    try {
+      list.push(value[i])
+    } catch {
+      list.push(undefined)
+    }
+  }
+  return list
+}
+
+/**
+ * A once-read copy of a verdict, because it is both digested and consulted for
+ * its `paymentDigest`. Only a plain object of data properties is copied, so the
+ * copy cannot launder what `verdictDigest` would have refused in the original.
+ */
+function copyVerdict(raw: unknown): Record<string, unknown> {
+  if (!isRecord(raw)) throw new TypeError("not a verdict")
+  const proto: unknown = Reflect.getPrototypeOf(raw)
+  if (proto !== Object.prototype && proto !== null) throw new TypeError("not a verdict")
+  const entries: Array<[PropertyKey, unknown]> = []
+  for (const key of Reflect.ownKeys(raw)) {
+    const field = Reflect.getOwnPropertyDescriptor(raw, key)
+    if (field === undefined || !("value" in field) || !field.enumerable) throw new TypeError("not a verdict")
+    entries.push([key, field.value])
+  }
+  return Object.fromEntries(entries)
+}
+
+/** `authorizedBy` as this function can use it, or null when it names no verdict. */
+function readClaim(raw: unknown): AuthorizedBy | null {
+  if (!isRecord(raw)) return null
+  const named = ownField(raw, "verdictDigest")
+  const payment = ownField(raw, "paymentDigest")
+  if (typeof named !== "string") return null
+  return { verdictDigest: named, paymentDigest: typeof payment === "string" ? payment : null }
+}
+
+const sameClaim = (a: AuthorizedBy | null, b: AuthorizedBy | null): boolean =>
+  a === b || (a !== null && b !== null && a.verdictDigest === b.verdictDigest && a.paymentDigest === b.paymentDigest)
+
+const CHAIN_FIELDS = ["status", "network", "asset", "recipient", "amount"] as const
+type ChainEvent = Record<(typeof CHAIN_FIELDS)[number], unknown>
+
+/** The digest of what the chain moved, or null when the event does not describe one payment. */
+function chainPayment(event: ChainEvent): string | null {
+  try {
+    return paymentDigest({ network: event.network, asset: event.asset, recipient: event.recipient, amount: event.amount } as Parameters<typeof paymentDigest>[0])
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Compare the chain's real payments with the records, and name each one the
+ * judge did not account for. Pure: it reads its arguments once and makes no
+ * chain call. Each successful chain spend is joined on its transaction digest
+ * to a receipt@2, then to an `executed` gate receipt by a `verdictDigest`
+ * recomputed from that receipt's `verdict`, so an edited verdict matches
+ * nothing. A digest written anywhere in the records is never believed.
+ *
+ * A spend is reported once, under the first reason that applies:
+ * - `no-receipt`: no receipt@2 accounts for it. A `refused` receipt does not,
+ *   since it says the spend never happened. An `errored` receipt does: its
+ *   outcome was unknown, and the chain has now settled it.
+ * - `no-verdict`: the receipt names no verdict, names one no `executed` gate
+ *   receipt holds, or several receipts for this transaction name different ones.
+ * - `double-spend`: a spend after the first under one verdict, first meaning
+ *   first in chain order. It counts even if the payment also differs.
+ * - `payment-mismatch`: the chain's payment is not the one judged, is unreadable
+ *   (null amount or recipient), or the verdict has a null `paymentDigest`, which
+ *   cannot be proven to be this payment.
+ *
+ * A chain `failure` moved nothing and is a refusal, never an orphan.
+ *
+ * Two cases have no spend to name, and are reported rather than skipped, because
+ * an absence must not read as clean. An `executed` receipt@2 whose transaction
+ * is not in `chain` is a `payment-mismatch`: the records claim a payment the
+ * chain does not show, or the list is stale or for the wrong allowance. A record
+ * that cannot be read is reported by its position (`Orphan.digest`), so an
+ * unreadable verdict is a `no-verdict` at `gate[i]`, even beside a clean set. A
+ * wrong argument shape throws a TypeError.
+ *
+ * Empty inputs are clean, since an allowance with no spends has nothing to
+ * account for. `chain` is trusted to be complete: an unreadable indexer must
+ * throw before this is called, as `chainSpends` does.
+ *
+ * Honest limit (v1): this catches bypass and omission, not forgery by the log
+ * key holder. Whoever holds that key can write an `executed` receipt and a
+ * receipt@2 for a spend no judge saw, and they will reconcile. A judged payment
+ * that never left is also not reported: it is not a payment.
+ */
+export function reconcile(args: ReconcileArgs): ReconcileReport {
+  if (!isRecord(args)) throw new TypeError("reconcile: expected { gate, sui, chain }")
+  const gateRows = readList(ownField(args, "gate"), "gate")
+  const suiRows = readList(ownField(args, "sui"), "sui")
+  const chainRows = readList(ownField(args, "chain"), "chain")
+
+  const unreadable: Orphan[] = []
+
+  // Recomputed verdict digest → the payment that verdict judged, if it named one.
+  const judged = new Map<string, string | null>()
+  gateRows.forEach((row, i) => {
+    try {
+      if (!isRecord(row)) throw new TypeError("not a receipt")
+      const decision = ownField(row, "decision")
+      if (typeof decision !== "string") throw new TypeError("not a receipt")
+      if (decision !== "executed") return
+      const raw = ownField(row, "verdict")
+      if (raw === undefined) return // an unjudged sink
+      const verdict = copyVerdict(raw)
+      const judgedPayment = verdict.paymentDigest
+      judged.set(verdictDigest(verdict as unknown as Verdict), typeof judgedPayment === "string" ? judgedPayment : null)
+    } catch {
+      unreadable.push({ digest: `gate[${i}]`, reason: "no-verdict" })
+    }
+  })
+
+  // Transaction digest → what its receipts claim. Receipts that disagree claim nothing.
+  const claims = new Map<string, AuthorizedBy | null>()
+  const claimedExecuted = new Set<string>()
+  suiRows.forEach((row, i) => {
+    try {
+      if (!isRecord(row)) throw new TypeError("not a receipt")
+      const schema = ownField(row, "schema")
+      if (typeof schema !== "string") throw new TypeError("not a receipt")
+      if (schema !== SUI_RECEIPT_SCHEMA || ownField(row, "verb") !== "spend") return
+      const outcome = ownField(row, "verdict")
+      if (outcome === "refused") return
+      if (outcome !== "executed" && outcome !== "errored") throw new TypeError("not a receipt")
+      const digest = ownField(row, "digest")
+      if (!isDigest(digest)) {
+        if (outcome === "executed") unreadable.push({ digest: `sui[${i}]`, reason: "payment-mismatch" })
+        return
+      }
+      if (outcome === "executed") claimedExecuted.add(digest)
+      const claim = readClaim(ownField(row, "authorizedBy"))
+      if (!claims.has(digest)) claims.set(digest, claim)
+      else if (!sameClaim(claims.get(digest) ?? null, claim)) claims.set(digest, null)
+    } catch {
+      unreadable.push({ digest: `sui[${i}]`, reason: "no-receipt" })
+    }
+  })
+
+  // Transaction digest → its event, in chain order. A transaction happens once,
+  // so a repeated digest is one spend; a repeat that disagrees cannot be trusted.
+  const events = new Map<string, { readonly event: ChainEvent; conflict: boolean }>()
+  chainRows.forEach((row, i) => {
+    try {
+      if (!isRecord(row)) throw new TypeError("not a spend")
+      const digest = ownField(row, "digest")
+      if (!isDigest(digest)) throw new TypeError("not a spend")
+      const event = Object.fromEntries(CHAIN_FIELDS.map((f) => [f, ownField(row, f)])) as ChainEvent
+      const earlier = events.get(digest)
+      if (earlier === undefined) events.set(digest, { event, conflict: false })
+      else if (CHAIN_FIELDS.some((f) => !Object.is(earlier.event[f], event[f]))) earlier.conflict = true
+    } catch {
+      unreadable.push({ digest: `chain[${i}]`, reason: "payment-mismatch" })
+    }
+  })
+
+  const orphans: Orphan[] = []
+  const report = (digest: string, reason: OrphanReason): void => {
+    orphans.push({ digest, reason })
+  }
+  const spent = new Set<string>()
+  for (const [digest, { event, conflict }] of events) {
+    if (!conflict && event.status === "failure") continue
+    if (conflict || event.status !== "success") {
+      report(digest, "payment-mismatch") // never read an unknown status as a refusal
+      continue
+    }
+    if (!claims.has(digest)) {
+      report(digest, "no-receipt")
+      continue
+    }
+    const claim = claims.get(digest) ?? null
+    if (claim === null || !judged.has(claim.verdictDigest)) {
+      report(digest, "no-verdict")
+      continue
+    }
+    if (spent.has(claim.verdictDigest)) {
+      report(digest, "double-spend")
+      continue
+    }
+    spent.add(claim.verdictDigest)
+    const moved = chainPayment(event)
+    if (moved === null || moved !== judged.get(claim.verdictDigest) || moved !== claim.paymentDigest) report(digest, "payment-mismatch")
+  }
+
+  for (const digest of claimedExecuted) {
+    if (!events.has(digest)) report(digest, "payment-mismatch")
+  }
+
+  const all = orphans.concat(unreadable)
+  return { ok: all.length === 0, orphans: all }
 }
