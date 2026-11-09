@@ -14,6 +14,37 @@ verified by one version is unaffected by an upgrade; a chain that crosses a vers
 re-verified by the newer code, which may refuse it — each such change is a *Breaking* bullet in the
 release that makes it. A patch version changes none of these.
 
+## [0.5.1] — 2026-11-08
+
+A security patch. No call shape, error union, receipt hash or signed preimage changes, so upgrading
+from 0.5.0 needs no code change and existing logs verify as before. Upgrade if untrusted code can
+hand objects to this library in your process, or if a revoke rationale can quote untrusted text.
+
+### Security
+
+- **A spending cap can no longer be overrun from inside the check.** A capability object with a
+  `key` getter could run between the limit check and its record, re-enter `useCapability`, and spend
+  150 against a cap of 30 on a signed chain that still verified. Every caller value is now read
+  before the first log read.
+- **A revoke always lands.** A rationale that quoted an injection pattern made `revokeMandate`
+  throw and left the mandate live. The record now carries the matched pattern and a hash in place
+  of the text.
+- **Reading the log cannot un-revoke a mandate.** `listAllSigned` returned the live array, so a
+  `.pop()` undid a revoke and the chain still verified. It now returns a copy.
+- **A poisoned field cannot brick the store.** A `triggerSource` carrying a `toJSON` made the signed
+  bytes differ from the file bytes, and every later owner operation threw. A `triggerSource` or
+  rationale that is not what its type says is now refused.
+- **The in-memory test signer checks the key.** Its `verify` ignored the record's key, so a forged
+  record could pass a real pin.
+- **Smaller closes.** A child can no longer be issued under a revoked ancestor; capability elements
+  and `signed()` records are frozen; a store file is created mode 600 (an existing file keeps its
+  mode).
+
+### Documentation
+
+- `SECURITY.md` now states that a cut log tail refunds spend, that nothing in this package detects
+  a cut tail on a mandate log, and how a torn append fails.
+
 ## [0.5.0] — 2026-11-02
 
 **Upgrading from 0.4.0.** These call shapes change; each is a *Breaking* bullet below.
@@ -472,5 +503,6 @@ this repository and is not carried forward.
   protect — in particular that `revokeMandate` writes only to this package's log and stops no
   money a chain already holds.
 
+[0.5.1]: https://github.com/sweeai/sweetrust/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/sweeai/sweetrust/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/sweeai/sweetrust/releases/tag/v0.4.0

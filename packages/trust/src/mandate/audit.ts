@@ -204,7 +204,8 @@ export const makeInMemorySignedAuditLive = (
  * the next record with previousHash null, a second genesis mid-file.
  *
  * Limits, stated rather than hidden: deleting the LAST lines leaves a valid
- * shorter chain, which only an on-chain anchor detects (SECURITY.md). And
+ * shorter chain, and nothing in this package detects that on a mandate log:
+ * `verifyAuditChain` takes no anchor (SECURITY.md). And
  * appends are not locked across processes, so one store file needs one writer.
  * Verifying on every read costs one Ed25519 verification per record per call.
  * The previous version already re-parsed the whole file per call, so the

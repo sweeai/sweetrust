@@ -389,7 +389,7 @@ A free tier without enforcement is an advisory guardrail, which is the exact fai
 
 ## Status
 
-**v0.5.0 is current.** It breaks two entry points from 0.4.0, the first npm release: the mandate verbs move onto the client `createTrust({ store })` returns, and `humanConfirm` returns a Promise. It also adds capability limits and `trust.resume`. `CHANGELOG.md` § *[0.5.0]* has the migration. The package was formed 2026-07-30 by merging three unpublished packages (`@sweetrust/mandate`, `@sweetrust/gate`, `@sweetrust/verify`) into one with subpath exports, then hardened through the adversarial passes `SECURITY.md` lists. Before 0.4.0, npm held only a 0.0.1 name placeholder with no code. `CHANGELOG.md` ships in the tarball.
+**v0.5.1 is current,** a security patch over 0.5.0 with no API change (see `CHANGELOG.md`). 0.5.0 breaks two entry points from 0.4.0, the first npm release: the mandate verbs move onto the client `createTrust({ store })` returns, and `humanConfirm` returns a Promise. It also adds capability limits and `trust.resume`. `CHANGELOG.md` § *[0.5.0]* has the migration. The package was formed 2026-07-30 by merging three unpublished packages (`@sweetrust/mandate`, `@sweetrust/gate`, `@sweetrust/verify`) into one with subpath exports, then hardened through the adversarial passes `SECURITY.md` lists. Before 0.4.0, npm held only a 0.0.1 name placeholder with no code. `CHANGELOG.md` ships in the tarball.
 
 ## Versioning
 
