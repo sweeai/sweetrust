@@ -165,6 +165,31 @@ describe("a doubted action needs its owner", () => {
     expect(runs).toHaveLength(2)
   })
 
+  it("approving an outage hold does not answer a real doubt on the same action", async () => {
+    clock()
+    const { sink, runs } = build(scripted(NOT_A_VERDICT, MISMATCH, MATCH))
+    const outage = await sink(pay(), { idempotencyKey: "inv-1" })
+    if (outage.ok || outage.held === undefined) throw new Error("expected a hold")
+    expect((await sink(pay(), { idempotencyKey: "inv-2" })).receipt.decision).toBe("judgment-blocked")
+    expect((await sink.resume(pay(), approve(outage.held), { idempotencyKey: "inv-1" })).ok).toBe(true)
+    expect(runs).toHaveLength(1)
+    // The owner signed the outage hold and never saw the block, so the block still stands.
+    expect((await sink(pay(), { idempotencyKey: "inv-3" })).receipt.decision).toBe("judgment-blocked")
+    wait(BLOCK_MS + 1)
+    expect((await sink(pay(), { idempotencyKey: "inv-4" })).receipt.decision).toBe("judgment-held")
+    expect(runs).toHaveLength(1)
+  })
+
+  it("the hold written for a doubted match names the earlier doubt", async () => {
+    clock()
+    const { sink } = build(scripted(MISMATCH, MATCH))
+    await sink(pay())
+    wait(BLOCK_MS + 1)
+    const r = await sink(pay())
+    expect(r.receipt.decision).toBe("judgment-held")
+    expect(r.receipt.reason).toContain("an earlier judgment-blocked (j, mismatch, conf 0.95) on this action needs its owner")
+  })
+
   it("a late errored receipt from another payment does not erase a doubt", async () => {
     clock()
     let fail!: (e: Error) => void

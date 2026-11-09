@@ -178,7 +178,8 @@ the purpose, and a variant is then refused.
 A judge that times out, throws or answers with something that is not a verdict holds the call, and
 the next identical call asks the judge again. Only a real assessment sticks: once a judge has really
 doubted an action, a later `match` on it is held for the owner, however long the agent waits. Set
-`judgment.approvalKey`, or that exact action stays held for the life of the grant.
+`judgment.approvalKey`, or that exact action stays held, under any idempotency key, for the life of
+the grant.
 
 ### An idempotency key is host-attested
 

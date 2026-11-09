@@ -1983,7 +1983,8 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
    * lets `sink.resume` release a hold; without it every resume is refused.
    *
    * `blockWindowMs` (default one hour, never below the 15-minute approval
-   * window) is how long a block stands. `rationaleInRefusal` (default false)
+   * window) is how long a block stands before the judge is asked again; a
+   * `match` after it is held for the owner. `rationaleInRefusal` (default false)
    * puts the judge's assessment, confidence and words back in the refusal
    * string; the receipt always has them, its `reason` redacted per `redact`, so
    * a host that wants them kept from the agent must not hand it the receipt
@@ -2117,7 +2118,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
 
   // What this action already is, read back from the log in one synchronous
   // walk (ADR 0010). A later receipt moves the state: a judgment sets a block
-  // or a hold, and any attempt resolves it. Receipts under another grant or
+  // or a hold, and only the owner's approval of that doubt resolves it. Receipts under another grant or
   // purpose are skipped: they are someone else's action, or the owner has
   // changed what is being judged against. A hold with no real verdict behind it
   // (`scored: false`) is skipped too: an outage is not an answer.
@@ -2135,10 +2136,17 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
       if (decision === "judgment-blocked" || decision === "judgment-held") {
         if (verdict.scored) standing = { verdict, label: decision }
       } else if (decision === "attempted" || decision === "executed" || decision === "errored") {
-        // Only a run the owner released answers a doubt (DAN-1443). Anything else
-        // can land after the doubt without an owner: a late `errored` from an
-        // earlier payment, or a clean run on a warn sink over the same log.
-        if (decision === "attempted" && receipt.approval !== undefined) standing = undefined
+        // Only the owner's approval of this doubt answers it (DAN-1443). Anything
+        // else can land after the doubt without the owner having seen it: a late
+        // `errored` from an earlier payment, a clean run on a warn sink over the
+        // same log, or the release of an outage hold signed before the doubt.
+        if (decision === "attempted" && standing !== undefined) {
+          try {
+            if (receipt.approval?.verdictDigest === verdictDigest(standing.verdict)) standing = undefined
+          } catch {
+            // A verdict that will not digest cannot be shown to be the one approved.
+          }
+        }
         if (!action.keyed || verdict.actionDigest === action.digest) attempted = verdict
       }
     }
@@ -2698,16 +2706,19 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
         // but only the owner can turn that doubt into a run. `standingAnswer`
         // above has already answered any doubt still inside its window, and
         // nothing has been awaited since it read the log.
-        const doubted = cfg.mode === "enforce" && actionState(action, judge).standing !== undefined
-        if (!(confident && verdict.assessment === "match") || doubted) {
+        const earlier = cfg.mode === "enforce" ? actionState(action, judge).standing : undefined
+        if (!(confident && verdict.assessment === "match") || earlier !== undefined) {
           if (cfg.mode === "enforce") {
             // Only a confident mismatch is a judgment. Everything else is doubt.
             const label = confident && verdict.assessment === "mismatch" ? "judgment-blocked" : "judgment-held"
-            const receipt = cfg.log.append({ ...evidence, decision: label, reason: `⚖ ${cfg.name} ${label} (${providerName}, ${verdict.assessment}, ${confText}): ${rationale}${doubted ? "; an earlier doubt on this action needs its owner" : ""}` })
+            // The new sample alone would read as a clean match, so the receipt also
+            // names the doubt the owner is being asked to answer.
+            const earlierNote = earlier === undefined ? "" : `; an earlier ${earlier.label} (${earlier.verdict.provider}, ${earlier.verdict.assessment}, conf ${earlier.verdict.confidence}) on this action needs its owner`
+            const receipt = cfg.log.append({ ...evidence, decision: label, reason: `⚖ ${cfg.name} ${label} (${providerName}, ${verdict.assessment}, ${confText}): ${rationale}${earlierNote}` })
             // The refusal goes to the agent. The judge's words, its assessment
             // and its confidence would each teach it what to change, so they come
             // back only when the host opts in (ADR 0010).
-            const refusal = `⚖ ${cfg.name} ${judge.rationaleInRefusal ? label : STOPPED_BY_JUDGMENT}${judge.rationaleInRefusal ? ` (${providerName}, ${verdict.assessment}, ${confText}): ${rationaleText}` : ""}`
+            const refusal = `⚖ ${cfg.name} ${judge.rationaleInRefusal ? label : STOPPED_BY_JUDGMENT}${judge.rationaleInRefusal ? ` (${providerName}, ${verdict.assessment}, ${confText}): ${rationaleText}${earlier === undefined ? "" : "; an earlier doubt on this action needs its owner"}` : ""}`
             if (label === "judgment-blocked") return { ok: false, refusal, receipt }
             return {
               ok: false,

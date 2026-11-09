@@ -22,7 +22,9 @@ release that makes it. A patch version changes none of these.
   and a block after its window, and the next identical call was judged afresh, so a `match` ran with
   no approval and an agent could retry until the judge agreed. The judge is still asked, so the owner
   gets a fresh hold to approve, but a `match` on an action with a real doubt behind it is now held. A
-  judge outage is not a doubt, and a run the owner released clears it (ADR 0010, DAN-1443).
+  judge outage is not a doubt, and only the owner's approval of that doubt clears it (ADR 0010,
+  DAN-1443). A log from 0.6.0 in which an unapproved run followed an expired doubt keeps that doubt,
+  so the next repeat of that action is held until the owner approves it.
 
 ## [0.6.0] — 2026-11-08
 
