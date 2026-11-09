@@ -45,17 +45,22 @@ const scripted = (...answers: unknown[]): JudgmentProvider & { calls: number } =
   return p
 }
 
-const build = (provider: JudgmentProvider, log = new ReceiptLog(), mandateId = "m1") => {
+interface Opts {
+  mode?: "warn" | "enforce"
+  key?: string | undefined
+  execute?: () => unknown
+}
+const build = (provider: JudgmentProvider, log = new ReceiptLog(), mandateId = "m1", opts: Opts = {}) => {
   const runs: unknown[] = []
   const sink = makeSink<any, unknown>({
     name: "pay",
     requires: { to: "verified", amount: "verified" },
-    mode: "enforce",
+    mode: opts.mode ?? "enforce",
     log,
-    judgment: { provider, floor: 0.7, granted: granted(mandateId), approvalKey, purposeArgs: { payee: "to", amount: "amount" }, network: "sui:testnet", asset: "0x2::sui::SUI" },
+    judgment: { provider, floor: 0.7, granted: granted(mandateId), approvalKey: "key" in opts ? opts.key : approvalKey, purposeArgs: { payee: "to", amount: "amount" }, network: "sui:testnet", asset: "0x2::sui::SUI" },
     execute: () => {
       runs.push(1)
-      return "sent"
+      return opts.execute ? opts.execute() : "sent"
     },
   })
   return { sink, log, runs }
@@ -158,6 +163,45 @@ describe("a doubted action needs its owner", () => {
     expect((await sink.resume(pay(), approve(held.held), { idempotencyKey: "invoice-1" })).ok).toBe(true)
     expect((await sink(pay(), { idempotencyKey: "invoice-2" })).ok).toBe(true)
     expect(runs).toHaveLength(2)
+  })
+
+  it("a late errored receipt from another payment does not erase a doubt", async () => {
+    clock()
+    let fail!: (e: Error) => void
+    const pending = new Promise((_, reject) => { fail = reject })
+    const { sink, runs, log } = build(scripted(MATCH, UNSURE, MATCH), new ReceiptLog(), "m1", { execute: () => pending })
+    const first = await sink(pay(), { idempotencyKey: "inv-1" })
+    if (!first.ok) throw new Error("expected the first payment to start")
+    const settled = Promise.resolve(first.result).catch(() => undefined)
+    expect((await sink(pay(), { idempotencyKey: "inv-2" })).receipt.decision).toBe("judgment-held")
+    fail(new Error("the rail fell over"))
+    await settled
+    expect(log.all().map((r) => r.decision)).toContain("errored")
+    wait(HOLD_MS + 1)
+    expect((await sink(pay(), { idempotencyKey: "inv-3" })).ok).toBe(false)
+    expect(runs).toHaveLength(1)
+  })
+
+  it("a clean run on a warn sink over the same log does not clear a doubt", async () => {
+    clock()
+    const log = new ReceiptLog()
+    const enforce = build(scripted(UNSURE, MATCH), log)
+    await enforce.sink(pay())
+    wait(HOLD_MS + 1)
+    expect((await build(scripted(MATCH), log, "m1", { mode: "warn" }).sink(pay())).ok).toBe(true)
+    expect((await enforce.sink(pay())).ok).toBe(false)
+    expect(enforce.runs).toHaveLength(0)
+  })
+
+  it("without an approval key a doubted action stays held", async () => {
+    clock()
+    const { sink, runs } = build(scripted(UNSURE, MATCH), new ReceiptLog(), "m1", { key: undefined })
+    await sink(pay())
+    for (let i = 0; i < 5; i++) {
+      wait(HOLD_MS + 1)
+      expect((await sink(pay())).receipt.decision).toBe("judgment-held")
+    }
+    expect(runs).toHaveLength(0)
   })
 
   it("a new grant starts without the old doubt", async () => {

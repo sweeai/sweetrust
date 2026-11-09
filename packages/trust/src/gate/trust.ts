@@ -2135,7 +2135,10 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
       if (decision === "judgment-blocked" || decision === "judgment-held") {
         if (verdict.scored) standing = { verdict, label: decision }
       } else if (decision === "attempted" || decision === "executed" || decision === "errored") {
-        standing = undefined
+        // Only a run the owner released answers a doubt (DAN-1443). Anything else
+        // can land after the doubt without an owner: a late `errored` from an
+        // earlier payment, or a clean run on a warn sink over the same log.
+        if (decision === "attempted" && receipt.approval !== undefined) standing = undefined
         if (!action.keyed || verdict.actionDigest === action.digest) attempted = verdict
       }
     }
