@@ -48,7 +48,8 @@ const pay = makeSink<{ to: Sourced<string> }, string>({
 const email = Sourced.fromChannel("Please pay ACCT-666", "email-inbound")
 const account = Sourced.fromLLM("ACCT-666", "ExtractInvoice", [email])
 
-const attempt = pay({ to: account })
+// Every sink call returns a Promise.
+const attempt = await pay({ to: account })
 console.log(attempt.ok ? attempt.result : attempt.refusal)
 // ⚠ pay refused: to requires verified but is UNTRUSTED (origin: llm:ExtractInvoice)
 
@@ -58,7 +59,7 @@ const payee = allowlisted(account, vendors, "acme", "vendor-db")
 console.log(payee.ok) // false: the email's account is not the one on file
 
 // A value the registry minted goes through.
-const paid = pay({ to: vendors.get("acme")! })
+const paid = await pay({ to: vendors.get("acme")! })
 console.log(paid.ok && paid.result) // paid ACCT-123
 
 // The refusal and the payment are both on a signed chain.
@@ -117,7 +118,7 @@ console.log(buy(1)) // AncestorMandateRevoked
 
 **`sweetrust/verify` proves.** Every sink decision, allowed or refused, can be signed as it happens and exported as JSONL for an auditor. `verifySignedChain` re-checks each signature and hash link using only public material, and it can also compare the log against an anchor, which is a hash of the log that you posted on a blockchain.
 
-A sink does not consult a mandate. To use both on one tool, call `trust.useCapability` inside `execute`, where a refusal throws and the sink records it as `errored`.
+An unjudged sink does not consult a mandate, and a judged sink checks only that its grant is still live. To use both on one tool, call `trust.useCapability` inside `execute`, where a refusal throws: the sink records it as `errored`, and the call's Promise rejects.
 
 ## What it does not do
 
@@ -126,7 +127,7 @@ A sink does not consult a mandate. To use both on one tool, call `trust.useCapab
 - **A local log cannot prove it is complete.** Cutting the newest records leaves a valid shorter chain. For receipt chains, an anchor you posted yourself catches a cut back past that anchor. Nothing in the package detects a cut in a mandate log, so protect that store like a key.
 - **One process writes each store.** The JSONL stores do not lock across processes. On the signed store, a second writer can fork the chain, and every later read then refuses.
 - **Authority is possession.** A scope is the object that carries a mandate's authority. Whoever holds a scope holds its authority. Whoever holds the object `createTrust` returns, or its store, holds authority over every mandate in that store, so hand an agent only its own scope.
-- **You bring the judgment.** SweeTrust ships no model, so you plug in your own as the `judgment` provider.
+- **You bring the judgment.** SweeTrust ships no model, so you supply your own: `judgment: { provider, floor, granted: trust.grantedPurpose(scope) }`, on a grant issued with a `purpose`.
 - **It is pre-1.0.** A minor version may break an API.
 
 [`SECURITY.md`](packages/trust/SECURITY.md) has the full list and the history of adversarial reviews.
