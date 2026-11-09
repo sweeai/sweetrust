@@ -39,6 +39,8 @@ export {
   type EnforcementMode,
   type SinkResult,
   type Action,
+  type ArgumentTrust,
+  type JudgmentInput,
   type Payment,
   type Verdict,
   type Approval,

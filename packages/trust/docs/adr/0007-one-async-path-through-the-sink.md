@@ -56,6 +56,16 @@ return shape.**
    rejects, an `errored` receipt carrying the verdict is recorded. `execute` gains an optional
    second argument, `{ authorizedBy }`, which ADR 0008 relies on.
 
+## Limits the sink cannot close
+
+The sink runs the provider in its own process, so two things a provider can do are out of its reach.
+Both were found in the 2026-11-08 audit (G5) and stand as documented limits in `SECURITY.md`.
+
+- **An abort listener that throws** at the deadline surfaces as an uncaught exception. It can end the
+  process before the call has a receipt, and no `try` in the sink is on that stack.
+- **A provider that blocks synchronously** outlasts the deadline, because the deadline is a timer and
+  a timer cannot fire while the event loop is blocked.
+
 ## Alternatives considered
 
 1. **`assess` returns `V | Promise<V>`, and the sink is async only when judged** (DAN-1205, option

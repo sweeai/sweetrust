@@ -165,7 +165,7 @@ describe("the judge's contract", () => {
     expect(decisions(log)).toEqual(["attempted", "executed"])
   })
 
-  it("assess receives exactly { purpose, action }, and a signal that has not fired", async () => {
+  it("assess receives exactly { purpose, action, trust }, and a signal that has not fired", async () => {
     const calls: Array<{ input: Record<string, unknown>; signal: AbortSignal; extra: number }> = []
     const p: JudgmentProvider = {
       name: "j",
@@ -179,7 +179,7 @@ describe("the judge's contract", () => {
     await sink({ to: good() })
     const { input, signal, extra } = calls[0]!
     expect(extra).toBe(2)
-    expect(Object.keys(input).sort()).toEqual(["action", "purpose"])
+    expect(Object.keys(input).sort()).toEqual(["action", "purpose", "trust"])
     expect(input.purpose).toEqual(GRANTED.purpose)
     expect(input.action).toEqual({ sink: "pay", args: { to: "ACME" } })
     expect(signal).toBeInstanceOf(AbortSignal)
@@ -248,7 +248,7 @@ describe("the judge's contract", () => {
     expect(p.model.length).toBeGreaterThan(0)
     const yes = judged(p).sink
     await expect(yes({ to: good() })).resolves.toMatchObject({ ok: false }) // no amount: mismatch
-    const verdict = await p.assess({ purpose: GRANTED.purpose, action: { sink: "pay", args: { to: "ACME", amount: 50 } } }, new AbortController().signal)
+    const verdict = await p.assess({ purpose: GRANTED.purpose, action: { sink: "pay", args: { to: "ACME", amount: 50 } }, trust: {} }, new AbortController().signal)
     expect(verdict.assessment).toBe("match")
   })
 })
@@ -391,7 +391,7 @@ describe("the deadline", () => {
       import { makeSink, ReceiptLog, Sourced } from ${JSON.stringify(gateUrl)}
       const sink = makeSink({
         name: "pay", requires: { to: "verified" }, mode: "enforce", log: new ReceiptLog(),
-        judgment: { provider: { name: "j", model: "j@1", assess: async () => ({ assessment: "match", confidence: 0.9, rationale: "" }) }, floor: 0.8, timeoutMs: 600000, granted: { purpose: { statement: "s" }, grantHash: "${"a".repeat(64)}" } },
+        judgment: { provider: { name: "j", model: "j@1", assess: async () => ({ assessment: "match", confidence: 0.9, rationale: "ok" }) }, floor: 0.8, timeoutMs: 600000, granted: { purpose: { statement: "s" }, grantHash: "${"a".repeat(64)}" } },
         execute: () => "sent",
       })
       const r = await sink({ to: Sourced.fromAuthority("ACME", "reg") })
@@ -446,7 +446,7 @@ describe("no answer, or an answer that is not a verdict, fails closed", () => {
         return reads === 1 ? "match" : "mismatch"
       },
       confidence: 0.99,
-      rationale: "",
+      rationale: "ok",
     }
     const { sink, ran } = judged(provider(flip))
     const r = await sink({ to: good() })

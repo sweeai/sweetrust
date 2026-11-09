@@ -172,6 +172,47 @@ host, for example a payment's own invoice id, and never from anything an agent w
 forwards an agent's value as the key has handed the agent the decision to repeat a payment. It
 cannot evade a block or a hold, and that is all it cannot do.
 
+### A hand-built `granted` gets no revocation
+
+`trust.grantedPurpose(scope)` returns `{ purpose, grantHash, isLive }`. A judged sink calls `isLive`
+before judging and again immediately before `execute`, and refuses a grant it cannot confirm is
+live, in every mode, with a `refused` receipt reading `grant-not-live`. A store that fails during the
+check therefore stops the sink, and the receipt does not claim anyone revoked anything. A `granted` built by hand as `{ purpose, grantHash }` has no
+check, so it keeps working and **no revoke ever reaches that sink**. If you copy the fields out of
+`grantedPurpose`'s result, copy `isLive` too. A revoke that lands after the second check is too late
+for that call: `execute` has started. And a revoke here stops this kernel's sinks only; it does not
+stop money a chain already holds (above).
+
+### A `maxPerAction` with no asset is only as scoped as the host
+
+A sink that takes its asset as an argument refuses to build from a `maxPerAction` with no
+`purpose.fields.asset`. A sink with a fixed `judgment.asset` does not need one, because the host
+settles the unit. So one grant with no asset, used to build two fixed-asset sinks for two coins, caps
+both at the same number of base units, and the owner's signature names neither. Set `asset` in the
+purpose when the cap is meant for one asset.
+
+### A judge can read what an agent wrote
+
+`assess` receives `action.args` as raw values, and an argument can hold text an agent wrote: a memo,
+an invoice description, a payee name. The agent's own rationale never reaches a judge, but those
+values do. The provider also receives `trust`, each argument's tier and provenance, so it can read
+an `untrusted` argument as data rather than as instructions. The gate delivers that information; it
+cannot make a model use it, and a judge that follows instructions in an argument can still be
+talked into a `match`. Provenance is built from the channel and authority names your host passed,
+so a host that names a channel after agent text has handed the agent that string too.
+
+### A provider can do two things the sink cannot catch
+
+**An abort listener that throws.** At the deadline the sink calls `controller.abort()`. Node reports
+an exception from an abort listener as an uncaught exception, which ends the process unless the host
+handles it, and the sink has no way to catch it. The call then leaves no receipt. Do not throw from
+an abort listener.
+
+**A provider that blocks synchronously.** The deadline is a timer, and a timer cannot fire while
+JavaScript is blocking the event loop. A provider that spins in `assess`, or does synchronous work
+longer than `timeoutMs`, outlasts the deadline and stalls the whole process. Do blocking work off the
+main thread. Both limits apply to any code the host puts in the provider (ADR 0007).
+
 ### A sink cannot check that `granted` belongs together
 
 `judgment.granted` is `{ purpose, grantHash }`, and the gate cannot recompute a grant's hash without

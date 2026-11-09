@@ -253,7 +253,7 @@ export type MandateError =
       // first failure.
       readonly _tag: "PurposeNotNarrowing"
       readonly grantorMandateId: MandateId
-      readonly field: "purpose" | "statement" | "payees" | "maxPerAction" | "actions"
+      readonly field: "purpose" | "statement" | "payees" | "maxPerAction" | "actions" | "asset"
     }
   | {
       // Raised by `resume` when what the caller declares about the mandate

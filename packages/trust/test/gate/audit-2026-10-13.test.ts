@@ -521,12 +521,13 @@ describe("#6 — the declassifiers return a verdict for a BigInt and blame the r
     if (!r.ok) expect(r.reason).toContain("comparator exploded")
   })
 
-  it("a circular value in the 'disagree' reason is named, not thrown on", () => {
+  it("a circular claim is refused with a reason, not thrown on", () => {
     const cyc: Record<string, unknown> = { iban: "DE99" }
     cyc.self = cyc
     const r = corroborate(Sourced.fromChannel(cyc, "a"), Sourced.fromChannel({ iban: "DE98" }, "b"), () => false)
     expect(r.ok).toBe(false)
-    if (!r.ok) expect(r.reason).toContain("[unserializable")
+    // Since the 2026-11-08 audit (G2) a cycle is refused before any comparison.
+    if (!r.ok) expect(r.reason).toContain("claim is not plain JSON")
   })
 
   it("allowlisted: a bigint candidate against a bigint record is a match, and the registry record is what comes back", () => {
@@ -901,7 +902,7 @@ describe("#7 — the judgment wall fails closed when it cannot score", () => {
   })
 
   it.each([undefined, null, NaN, Infinity, 1.5, -0.1, "0.8"])("(c) floor %j is a TypeError at construction", (floor) => {
-    const { make } = sink(verdict({ assessment: "match", confidence: 1, rationale: "" }), "enforce", floor)
+    const { make } = sink(verdict({ assessment: "match", confidence: 1, rationale: "because" }), "enforce", floor)
     expect(make).toThrow(TypeError)
     expect(make).toThrow(/floor/)
   })
@@ -912,12 +913,12 @@ describe("#7 — the judgment wall fails closed when it cannot score", () => {
   })
 
   it("CONTROL: floor 0 and 1 construct; match executes; a mismatch below the floor and an unsure both hold (flagged before DAN-1386)", async () => {
-    expect(sink(verdict({ assessment: "match", confidence: 1, rationale: "" }), "enforce", 0).make).not.toThrow()
-    expect(sink(verdict({ assessment: "match", confidence: 1, rationale: "" }), "enforce", 1).make).not.toThrow()
-    expect((await sink(verdict({ assessment: "match", confidence: 0.9, rationale: "" })).make()({ to: good() })).receipt.decision).toBe("executed")
-    expect((await sink(verdict({ assessment: "mismatch", confidence: 0.3, rationale: "" })).make()({ to: good() })).receipt.decision).toBe("judgment-held")
-    expect((await sink(verdict({ assessment: "unsure", confidence: 0.99, rationale: "" })).make()({ to: good() })).receipt.decision).toBe("judgment-held")
-    expect((await sink(verdict({ assessment: "mismatch", confidence: 0.95, rationale: "" })).make()({ to: good() })).receipt.decision).toBe("judgment-blocked")
+    expect(sink(verdict({ assessment: "match", confidence: 1, rationale: "because" }), "enforce", 0).make).not.toThrow()
+    expect(sink(verdict({ assessment: "match", confidence: 1, rationale: "because" }), "enforce", 1).make).not.toThrow()
+    expect((await sink(verdict({ assessment: "match", confidence: 0.9, rationale: "because" })).make()({ to: good() })).receipt.decision).toBe("executed")
+    expect((await sink(verdict({ assessment: "mismatch", confidence: 0.3, rationale: "because" })).make()({ to: good() })).receipt.decision).toBe("judgment-held")
+    expect((await sink(verdict({ assessment: "unsure", confidence: 0.99, rationale: "because" })).make()({ to: good() })).receipt.decision).toBe("judgment-held")
+    expect((await sink(verdict({ assessment: "mismatch", confidence: 0.95, rationale: "because" })).make()({ to: good() })).receipt.decision).toBe("judgment-blocked")
   })
 })
 
@@ -1034,7 +1035,7 @@ describe("#3 — execute() and the judge see the checked snapshot, never the cal
       assess: async ({ action }) => {
         judgeKeys = Object.keys(action.args)
         judgeProto = Object.getPrototypeOf(action.args)
-        return { assessment: "match", confidence: 1, rationale: "" }
+        return { assessment: "match", confidence: 1, rationale: "ok" }
       },
     }
     const log = new ReceiptLog()
