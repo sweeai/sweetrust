@@ -720,9 +720,9 @@ describe("gate: the sink spec, its nested bags, the call's args bag, the log ent
   test("allowlisted, corroborate, humanConfirm — their Sourced arguments and the registry, every verdict", async () => {
     // A Sourced is frozen and rail-minted, so no caller can put a getter on
     // one; poisoning it here holds the declassifiers to the same discipline as
-    // everything else, so the rule has no carve-out.
+    // everything else. The one exception is `allowlisted`'s key: it is brand-
+    // checked before any field is read, so a Proxy is refused rather than read.
     const registry = () => new Map([["acme", Sourced.fromAuthority("ACME", "reg")]])
-    // The key is not poisoned: a Proxy fails its brand check, which allowlisted-key.test.ts proves.
     const hostKey = (key: string) => Sourced.fromAuthority(key, "purchase-orders")
     sameVerdict(
       "allowlisted (match)",

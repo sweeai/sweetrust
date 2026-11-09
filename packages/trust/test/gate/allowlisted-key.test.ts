@@ -6,7 +6,7 @@
  * corroborated key yielding a `verified` value would launder past that rule.
  */
 import { describe, expect, it, vi } from "vitest"
-import { Sourced, allowlisted, corroborate } from "../../src/gate/index.ts"
+import { Sourced, allowlisted, corroborate, humanConfirm } from "../../src/gate/index.ts"
 import { poison, readsOf } from "../helpers/poison.ts"
 
 const KEY = "acme-secret-vendor-id"
@@ -57,9 +57,17 @@ describe("allowlisted takes a key with a pedigree", () => {
     const r = allowlisted(claim(), registry, hostKey(), "payee-registry")
     if (!r.ok) throw new Error(r.reason)
     const event = r.value.provenance.chain[0]!
-    expect(event.evidence).toContain("verified key")
-    expect(event.evidence).toContain("authority:purchase-orders")
+    expect(event.evidence).toContain("by key VERIFIED (origin: authority:purchase-orders")
     expect(Object.keys(event).sort()).toEqual(["at", "declassifier", "evidence", "from", "to"])
+  })
+
+  it("a promoted key shows how it earned its tier, not only where it was born", async () => {
+    const { registry } = watched()
+    const confirmed = await humanConfirm(Sourced.fromChannel(KEY, "email-inbound"), () => true)
+    if (!confirmed.ok) throw new Error(confirmed.reason)
+    const r = allowlisted(claim(), registry, confirmed.value, "payee-registry")
+    if (!r.ok) throw new Error(r.reason)
+    expect(r.value.provenance.chain[0]!.evidence).toContain("humanConfirm")
   })
 
   it("a plain string key is a TypeError", () => {

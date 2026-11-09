@@ -445,7 +445,7 @@ export function allowlisted<T>(
   // could answer differently on a second read; neither carries the brand, and a
   // genuine Sourced is frozen data, so reading it once below is the only read.
   if (!Sourced.is(key)) {
-    throw new TypeError("allowlisted: key must be a Sourced<string>, so the gate knows where it came from; wrap a key your host holds in Sourced.fromAuthority")
+    throw new TypeError("allowlisted: key must be a Sourced<string> so the gate knows where it came from. Take it from a record your host holds, never from the message: wrapping a message-derived key in Sourced.fromAuthority defeats this check (SECURITY.md)")
   }
   const { value: keyValue, tier: keyTier, provenance: { origin: keyOrigin } } = key
   // Neither refusal echoes the key: below `verified` it may be the attacker's text.
@@ -529,7 +529,7 @@ export function allowlisted<T>(
       declassifier: "allowlisted",
       from: entryTier,
       to: "verified",
-      evidence: `matched ${registryName}[${keyValue}] by a ${keyTier} key from ${keyOrigin} — candidate presented was ${candidate.describe()}`,
+      evidence: `matched ${registryName}[${keyValue}] by key ${key.describe()} — candidate presented was ${candidate.describe()}`,
       at: now(),
     }),
   }
