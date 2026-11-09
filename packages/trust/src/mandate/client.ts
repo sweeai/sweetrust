@@ -170,8 +170,9 @@ export interface TrustClient {
   /**
    * The purpose this scope's grant event records and the hash naming that
    * grant, for the host to hand a judged sink. Read from the log. A copy of a
-   * scope, or a scope from another store, is refused; a grant with no purpose
-   * is a TypeError (DAN-1384).
+   * scope, a scope from another store, and a mandate that is revoked or has a
+   * revoked ancestor are refused; a grant with no purpose is a TypeError
+   * (DAN-1384).
    */
   readonly grantedPurpose: (scope: MandateScope<any, any, any>) => GrantedPurpose
 

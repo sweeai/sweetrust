@@ -400,10 +400,10 @@ describe("2026-10-13 verify audit, finding 5 — a getter record is read once, b
       for (const field of fields) {
         const { rec, reads } = withGetter(signed, field, [signed[field]])
         expect(signer.verify(rec as unknown as SignedMandateAuditEvent), `${label}: ${field}`).toBe(true)
-        // The in-memory signer never needs the record's key: its signature is
-        // a function of the other five fields alone. Zero reads there is the
-        // honest count, not a regression.
-        expect(reads(), `${label} read ${field}`).toBe(label === "in-memory" && field === "signerPublicKeyHex" ? 0 : 1)
+        // Every signer reads the record's key once. The in-memory signer used
+        // to read it zero times, which is what let a forgery name the
+        // operator's key (the 2026-11-08 audit, K4).
+        expect(reads(), `${label} read ${field}`).toBe(1)
       }
     }
   })

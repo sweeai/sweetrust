@@ -141,7 +141,10 @@ export class SignedReceiptLog extends ReceiptLog {
     const previousHash = prev ? sha256Hex(canonicalJSON(prev)) : null
     const signedRecord = this.signer.sign(receipt, previousHash) // may throw — nothing committed yet
     this.commit(receipt)
-    this.signedEvents.push(signedRecord)
+    // Frozen once it is committed: its payload is the receipt `commit` just
+    // deep-froze, and the envelope around it is handed out by `signed()`, so a
+    // holder must not be able to edit it in place (the 2026-11-08 audit, K8).
+    this.signedEvents.push(Object.freeze(signedRecord))
     return receipt
   }
 

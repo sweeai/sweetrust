@@ -30,6 +30,14 @@ import type {
 
 type AuditLogCorrupt = Extract<MandateError, { readonly _tag: "AuditLogCorrupt" }>
 
+/**
+ * A store file is created readable by its owner alone (the 2026-11-08 audit,
+ * K9): SECURITY.md tells a host to protect it like a key, and it was created
+ * 644. `mode` applies only when the append creates the file, so an existing
+ * store keeps its mode.
+ */
+const STORE_FILE_OPTIONS = { encoding: "utf-8", mode: 0o600 } as const
+
 const corrupt = (
   storePath: string,
   line: number,
@@ -128,10 +136,15 @@ export interface SignedMandateAuditService {
  * Tests + demos that don't need signing continue to use
  * `makeInMemoryAuditLive`.
  *
- * Because execution is synchronous, the read-sign-append sequence is
- * inherently serialized: within one process no other caller can run between
- * the read of the chain head and the append, so no lock is needed. Across
- * processes it is NOT serialized — one writer per store file (SECURITY.md).
+ * Execution is synchronous, so the read-sign-append sequence is serialized for
+ * as long as signing runs no caller code. The kernel keeps that true for every
+ * event it records: each field is a primitive or a frozen plain copy before the
+ * event is built (the 2026-11-08 audit, K2). A store holder calling this store's
+ * `record` or `recordSigned` directly owns that duty: an event carrying a live
+ * object with a `toJSON` runs that code between the read of the chain head and
+ * the append, so pass plain data. (The JSONL store takes a plain copy first, so
+ * there the duty is gone.) Across processes it is NOT serialized — one writer
+ * per store file (SECURITY.md).
  */
 export const makeInMemorySignedAuditLive = (
   signer: MandateSignerService,
@@ -162,7 +175,9 @@ export const makeInMemorySignedAuditLive = (
   const signedAudit: SignedMandateAuditService = {
     recordSigned: (event) => signAndRecord(event),
     querySigned: (mandateId) => events.filter((e) => e.payload.mandateId === mandateId),
-    listAllSigned: () => events,
+    // A copy. Handing out the live array let any reader pop a revoke off the
+    // log, and the shorter chain still verified (the 2026-11-08 audit, K3).
+    listAllSigned: () => [...events],
   }
 
   return { mandateAudit, signedAudit }
@@ -189,7 +204,8 @@ export const makeInMemorySignedAuditLive = (
  * the next record with previousHash null, a second genesis mid-file.
  *
  * Limits, stated rather than hidden: deleting the LAST lines leaves a valid
- * shorter chain, which only an on-chain anchor detects (SECURITY.md). And
+ * shorter chain, and nothing in this package detects that on a mandate log:
+ * `verifyAuditChain` takes no anchor (SECURITY.md). And
  * appends are not locked across processes, so one store file needs one writer.
  * Verifying on every read costs one Ed25519 verification per record per call.
  * The previous version already re-parsed the whole file per call, so the
@@ -224,12 +240,17 @@ export const makeJsonlSignedAuditLive = (
   }
 
   const signAndRecord = (event: MandateAuditEvent): SignedMandateAuditEvent => {
+    // One plain copy, before the head read, and it is what gets signed and what
+    // gets written. Serializing the live event twice let a stateful `toJSON` sign
+    // one set of bytes and write another, which bricked the store for every later
+    // read (the 2026-11-08 audit, K2). Key order and values are unchanged.
+    const payload = JSON.parse(JSON.stringify(event)) as MandateAuditEvent
     // Reading verifies, so corruption stops the append before anything is signed.
     const existing = readEvents()
     const previousHash =
       existing.length > 0 ? sha256Hex(canonicalJSON(existing[existing.length - 1]!)) : null
-    const signed = signer.sign({ payload: event, previousHash, domain: MANDATE_AUDIT_DOMAIN })
-    appendFileSync(storePath, JSON.stringify(signed) + "\n", "utf-8")
+    const signed = signer.sign({ payload, previousHash, domain: MANDATE_AUDIT_DOMAIN })
+    appendFileSync(storePath, JSON.stringify(signed) + "\n", STORE_FILE_OPTIONS)
     return signed
   }
 
@@ -271,7 +292,7 @@ export const makeJsonlAuditLive = (storePath: string): MandateAuditService => {
 
   return {
     record: (event) => {
-      appendFileSync(storePath, JSON.stringify(event) + "\n", "utf-8")
+      appendFileSync(storePath, JSON.stringify(event) + "\n", STORE_FILE_OPTIONS)
     },
     query: (mandateId: MandateId) => readEvents().filter((e) => e.mandateId === mandateId),
     isRevoked: (mandateId: MandateId) =>
