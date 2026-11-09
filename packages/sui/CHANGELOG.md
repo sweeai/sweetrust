@@ -14,7 +14,7 @@ from `library` or `nobody` to `chain` when a Sui primitive with a public package
 
 ## [0.1.0] — Unreleased
 
-The first release. Not yet on npm. It needs `sweetrust` 0.6.0, and its first public receipt format
+The first release. Not yet on npm. It needs `sweetrust` 0.7.0, because 0.6.0 ignores `judgment.spelling`, and its first public receipt format
 is receipt@2, so no consumer of receipt@1 exists. Out of 0.1, so you can plan around it: app-bound
 allowances (`allowance::propose_for_app`, the slot a Sui agent product with a public package fills
 later, which is where recipients and a per-payment cap can move on chain); reserve-then-commit
@@ -39,8 +39,8 @@ on mainnet; this package has spent only on testnet). Tested against `@mysten/sui
 - **`suiPaymentSpelling`, Sui's canonical form of an address and a coin type.** Pass it as a judged
   sink's `judgment.spelling` so a respelled payee is refused before a judge runs. A sink's `asset`
   and a purpose's `payees` must then be in the long form it returns, and something that is not an
-  address or a resolved coin type is refused too. It needs the `sweetrust` release after 0.6.0,
-  which ignores the option (DAN-1457).
+  address or a resolved coin type is refused too. A coin type over 1,024 characters or 16 sets of
+  type arguments is refused before it is parsed, because the parser runs on agent input (DAN-1457).
 
 - **Each spend is authorized by a one-shot token (ADR 0010, DAN-1406).** `spend` takes
   `authorization`, the `SpendAuthorization` a sink hands its `execute`, and every receipt@2 repeats

@@ -107,6 +107,27 @@ describe("a sink that declares its rail's spelling", () => {
     expect(state.judged).toBe(1)
   })
 
+  it("keeps the functions it read, whatever happens to the host's object afterward", async () => {
+    const codec = {
+      asset: lower,
+      payee(value: string) {
+        return this.asset(value)
+      },
+    }
+    const { sink, state } = judged({ ...FIXED, spelling: codec })
+    codec.asset = (value: string) => value
+    expect((await sink({ to: auth("0xABC"), amount: auth("5") })).ok).toBe(false)
+    expect(state.judged).toBe(0)
+  })
+
+  it("does not trust a call method planted on the function", async () => {
+    const spell = (value: string) => value.toLowerCase()
+    const { sink, state } = judged({ ...FIXED, spelling: { payee: spell } })
+    Object.defineProperty(spell, "call", { value: (_self: unknown, value: string) => value })
+    expect((await sink({ to: auth("0xABC"), amount: auth("5") })).ok).toBe(false)
+    expect(state.judged).toBe(0)
+  })
+
   it("names the argument and not the value, so a redacting receipt stays redacted", async () => {
     const { sink } = judged({ ...FIXED, spelling: { payee: lower } }, { redact: { to: "hash" } })
     const result = await sink({ to: auth("0xABCDEF"), amount: auth("5") })
@@ -131,10 +152,15 @@ describe("a sink that declares no spelling", () => {
     expect(state).toEqual({ judged: 1, ran: 1 })
   })
 
-  it("the digests are the ones a spelling never touches", () => {
-    expect(actionDigest({ sink: "pay", args: { to: "0xABC" } })).not.toBe(actionDigest({ sink: "pay", args: { to: "0xabc" } }))
-    const payment = { network: "sui:testnet", asset: "0xcoin", amount: "5" }
-    expect(paymentDigest({ ...payment, recipient: "0xABC" })).not.toBe(paymentDigest({ ...payment, recipient: "0xabc" }))
+  it("a spelled sink's verdict carries the same digests as an unspelled sink's", async () => {
+    const call = { to: auth("0xabc"), amount: auth("5") }
+    const spelled = (await judged({ ...FIXED, spelling: { payee: lower, asset: lower } }).sink(call)).receipt.verdict!
+    const plain = (await judged(FIXED).sink(call)).receipt.verdict!
+    expect(spelled.actionDigest).toBe(plain.actionDigest)
+    expect(spelled.unkeyedActionDigest).toBe(plain.unkeyedActionDigest)
+    expect(spelled.paymentDigest).toBe(plain.paymentDigest)
+    expect(spelled.paymentDigest).toBe(paymentDigest({ network: "sui:testnet", asset: "0xcoin", recipient: "0xabc", amount: "5" }))
+    expect(spelled.actionDigest).toBe(actionDigest({ sink: "pay", args: { to: "0xabc", amount: "5" } }))
   })
 })
 

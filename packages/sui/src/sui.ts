@@ -189,6 +189,9 @@ const boundTo = (coinType: string | null, asset: string): boolean => {
   }
 }
 const normAddr = (a: string): string => normalizeSuiAddress(a)
+/** Far above a real coin type: an address, two 128-character identifiers, and room for a few type arguments. */
+const MAX_COIN_TYPE_CHARS = 1024
+const MAX_COIN_TYPE_GENERICS = 16
 /**
  * Sui's canonical spelling of a payee and a coin type, for a judged sink's
  * `judgment.spelling`. A sink holding its payment to this refuses a respelled
@@ -201,11 +204,15 @@ const normAddr = (a: string): string => normalizeSuiAddress(a)
  */
 export const suiPaymentSpelling = Object.freeze({
   payee: (address: string): string => {
-    const canonical = normalizeSuiAddress(address)
-    if (!isValidSuiAddress(canonical)) throw new TypeError("not a Sui address")
+    const canonical = normAddr(address)
+    if (!validAddr(canonical)) throw new TypeError("not a Sui address")
     return canonical
   },
   asset: (coinType: string): string => {
+    // Before the SDK sees it: its parser is superlinear in nesting and runs on
+    // the agent's string, synchronously. 15 KB of nested generics blocked the
+    // event loop for 43 s, and 640 KB ended the process out of memory.
+    if (coinType.length > MAX_COIN_TYPE_CHARS || coinType.split("<").length - 1 > MAX_COIN_TYPE_GENERICS) throw new TypeError("not a plausible Sui coin type")
     const canonical = normalizeStructTag(coinType)
     if (!isValidStructTag(canonical) || canonical.includes("/")) throw new TypeError("not a resolved Sui coin type")
     return canonical

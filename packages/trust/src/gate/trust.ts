@@ -1732,13 +1732,17 @@ function bindSpelling(where: string, spelling: unknown): { readonly payee: Spell
   const member = (role: "payee" | "asset"): Spelling | undefined => {
     const spell = ownOf(spelling, role)
     if (spell !== undefined && typeof spell !== "function") throw new TypeError(`${where}: judgment.spelling.${role} must be a function, got ${preview(spell)}`)
-    return spell === undefined ? undefined : (value) => (spell as Spelling).call(spelling, value)
+    return spell as Spelling | undefined
   }
   const payee = member("payee")
   const asset = member("asset")
   // `{}`, or a class whose functions live on its prototype, would look like a declared spelling and hold nothing to one.
   if (payee === undefined && asset === undefined) throw new TypeError(`${where}: judgment.spelling must set payee or asset as its own function`)
-  return Object.freeze({ payee, asset })
+  // `this` is a frozen copy of the two functions read above, never the caller's
+  // object, which could answer differently once the sink is built.
+  const self = Object.freeze({ payee, asset })
+  const bound = (spell: Spelling | undefined): Spelling | undefined => (spell === undefined ? undefined : (value) => Reflect.apply(spell, self, [value]) as string)
+  return Object.freeze({ payee: bound(payee), asset: bound(asset) })
 }
 
 /**

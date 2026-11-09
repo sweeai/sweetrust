@@ -41,6 +41,24 @@ describe("suiPaymentSpelling", () => {
     expect(() => suiPaymentSpelling.asset(asset)).toThrow()
   })
 
+  it.each([
+    ["deep nesting that exhausted the heap", "0x2::a::B<".repeat(60000) + "u8" + ">".repeat(60000)],
+    ["nested vectors that blocked for 43 s", "0x2::a::B<vector<".repeat(800) + "u8" + ">>".repeat(800)],
+    ["many generics inside the length limit", "0x2::a::B<".repeat(17) + "u8" + ">".repeat(17)],
+    ["one long identifier", SUI_COIN + "x".repeat(2000)],
+  ])("refuses without parsing: %s", (_name, asset) => {
+    const started = performance.now()
+    expect(() => suiPaymentSpelling.asset(asset)).toThrow(/plausible/)
+    expect(performance.now() - started).toBeLessThan(100)
+  })
+
+  it("still accepts a coin type at the limits", () => {
+    const L = "0x" + "0".repeat(63) + "2"
+    const atDepth8 = `${L}::a::B<`.repeat(8) + "u8" + ">".repeat(8)
+    expect(atDepth8.length).toBeLessThan(1024)
+    expect(suiPaymentSpelling.asset(atDepth8)).toBe(atDepth8)
+  })
+
   it("keeps a generic coin type in canonical form", () => {
     const generic = `${"0x" + "0".repeat(63) + "2"}::a::B<${SUI_COIN}>`
     expect(suiPaymentSpelling.asset(generic)).toBe(generic)
