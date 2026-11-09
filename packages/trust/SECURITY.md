@@ -52,6 +52,13 @@ With resume, a client holder can resume ANY mandate in the log, act as that hold
 subtree; before resume a leaked client was root over new trees only. Hand an agent its scope,
 never the client (ADR 0006).
 
+### Pass a sink plain values
+
+A receipt records a value when it is rendered, and `execute()` runs the same object. A value with a
+`toJSON`, a getter or a `Proxy` runs code in between, so the receipt can differ from what ran, and
+the chain still verifies. Code that can poison a global such as `Object.prototype.toJSON` is outside
+what this library can defend against. Keep the `.value` inside each `Sourced` you pass a sink plain JSON.
+
 ### A mandate scope is a capability: whoever holds the object holds the authority
 
 Authority in `sweetrust/mandate` is **possession of a scope object this module issued**. A
@@ -379,14 +386,16 @@ artifact rather than the source, and the findings are recorded rather than quiet
   caught three more double reads; and the sink's `errored` receipt for an async action was made to
   re-raise instead of swallowing the host's crash.
 
-- **2026-11-08** — a pass over the mandate kernel at the 0.6.0 candidate. One HIGH in practice
-  in-process: a capability `key` getter ran after `useCapability` had snapshotted the log, so it could
-  re-enter and spend 150 against a cap of 30 on a signed chain that verified (published in 0.5.0).
-  Also closed: a `triggerSource` carrying a `toJSON` that bricked every owner operation on the store;
-  `listAllSigned` handing out the live array, so a `.pop()` un-revoked a mandate; a revoke refused
-  because its rationale quoted the injection; the in-memory signer's `verify` ignoring the record's
-  key; `grantedPurpose` answering for a revoked mandate. In `useCapability`, every caller value except the scope, checked by identity, is a primitive before
-  the first log read, and each regression was watched red on the base commit.
+- **2026-11-08** — a pass over the mandate kernel, fixed in 0.5.1. One HIGH in practice in-process:
+  a capability `key` getter ran after `useCapability` had snapshotted the log, so it could re-enter
+  and spend 150 against a cap of 30 on a signed chain that verified. Also closed: a `triggerSource`
+  carrying a `toJSON` that bricked every owner operation on the store; `listAllSigned` handing out
+  the live array, so a `.pop()` un-revoked a mandate; a revoke refused because its rationale quoted
+  the injection; the in-memory signer's `verify` ignoring the record's key. In `useCapability`,
+  every caller value except the scope, checked by identity, is a primitive before the first log
+  read, and each regression was watched red on `v0.5.0`.
+  The same pass found `grantedPurpose` answering for a revoked mandate. That API first ships in 0.6.0
+  and is fixed there.
 
 🔑 **The lesson we keep relearning, offered because it will apply to your code too:** a check and
 the decision it authorizes must name the same binding. If you compare A and act on B, you have not
