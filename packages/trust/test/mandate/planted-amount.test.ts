@@ -40,7 +40,7 @@ describe("a malformed amount in the log refuses the next spend", () => {
   it.each([["negative", "-999"], ["overflowing to Infinity", "1e999"], ["a string", '"5"'], ["null", "null"]])("%s", (_label, raw) => {
     const { buy, plant } = setup()
     plant(raw)
-    expect(buy(50)).toBe("MandateLimitExceeded")
+    expect(buy(5)).toBe("MandateLimitExceeded")
   })
 
   it("CONTROL: an honest log still allows what fits", () => {

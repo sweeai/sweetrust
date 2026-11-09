@@ -390,7 +390,7 @@ A free tier without enforcement is an advisory guardrail, which is the exact fai
 
 ## Status
 
-**This tree is v0.6.0, not yet on npm; v0.5.0 is the latest published.** 0.6.0 adds the intent layer and makes every sink call return a Promise. `CHANGELOG.md` § *[0.6.0]* has the migration. The package was formed 2026-07-30 by merging three unpublished packages (`@sweetrust/mandate`, `@sweetrust/gate`, `@sweetrust/verify`) into one with subpath exports, then hardened through the adversarial passes `SECURITY.md` lists. Before 0.4.0, npm held only a 0.0.1 name placeholder with no code. `CHANGELOG.md` ships in the tarball.
+**This tree is v0.6.0, not yet on npm; v0.5.1 is the latest published.** 0.6.0 adds the intent layer and makes every sink call return a Promise. `CHANGELOG.md` § *[0.6.0]* has the migration. The package was formed 2026-07-30 by merging three unpublished packages (`@sweetrust/mandate`, `@sweetrust/gate`, `@sweetrust/verify`) into one with subpath exports, then hardened through the adversarial passes `SECURITY.md` lists. Before 0.4.0, npm held only a 0.0.1 name placeholder with no code. `CHANGELOG.md` ships in the tarball.
 
 ## Versioning
 

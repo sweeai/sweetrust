@@ -114,7 +114,7 @@ unchanged. Only a judged sink's receipts change shape (ADR 0009).
   verdict, answers `unsure`, or answers `match` below the floor leaves the action held and
   `execute` uncalled. A failed judge is recorded as `unsure` with confidence 0. A verdict that
   arrives after the deadline is discarded, and the abort signal has fired by then.
-- **The judge sees a frozen view with exactly two keys, `purpose` and `action`.** Editing a nested
+- **The judge sees a frozen view with three keys, `purpose`, `action` and `trust`.** Editing a nested
   argument during the judge's wait changes nothing that executes. A tier violation is refused
   before the judge is called, so a judge that always says `match` cannot lift a refusal.
 
@@ -136,8 +136,8 @@ unchanged. Only a judged sink's receipts change shape (ADR 0009).
 - **The in-memory signer verifies only its own marker,** so a forgery naming the operator's key
   cannot pass the operator's pin through it.
 - **`grantedPurpose` refuses a revoked mandate or a revoked ancestor.** A judged sink built from a
-  revoked grant used to execute. A sink built before the revoke keeps its copy until the action
-  lifecycle work lands.
+  revoked grant used to execute. A sink built before the revoke is stopped by the action
+  lifecycle's liveness check.
 - **Lower items.** `grantor`, a limit's `unit` and `resumedBy` are screened before persistence, adding
   those three `inputKind` values. A child under a revoked grandparent is refused at issue.
   `SignedReceiptLog.signed()` hands out frozen records. JSONL store files are created mode 600, and an

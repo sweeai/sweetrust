@@ -11,7 +11,7 @@ verified_by: "pnpm -C packages/trust test (test/mandate/settle.test.ts, watched 
 
 **Status:** Accepted
 **Force:** invariant. The check is `test/mandate/settle.test.ts`.
-**Date:** 2026-11-08 · **Amends:** ADR 0005 (how a limit is counted) · **Design of record:** the SweeBroker reconcile spec, § 2 and § 4
+**Date:** 2026-11-08 · **Amends:** ADR 0005 (how a limit is counted) · **Design of record:** the broker's reconcile spec, § 2 and § 4
 
 ## Context
 
