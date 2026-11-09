@@ -86,12 +86,25 @@ describe("a sink that declares its rail's spelling", () => {
     ["throws", () => { throw new Error("0xsecret-in-the-message") }],
     ["returns a non-string", () => 7],
     ["returns a promise", async (value: string) => value],
+    ["returns a promise that rejects", async () => { throw new Error("0xsecret-in-the-message") }],
   ])("refuses when the spelling function %s", async (_name, spell) => {
     const { sink, state } = judged({ ...FIXED, spelling: { payee: spell } })
     const result = await sink({ to: auth("0xabc"), amount: auth("5") })
     expect(result.ok).toBe(false)
     expect(state).toEqual({ judged: 0, ran: 0 })
     expect(JSON.stringify(result.receipt)).not.toContain("0xsecret-in-the-message")
+  })
+
+  it("calls a spelling function with its own object as this", async () => {
+    const codec = {
+      asset: lower,
+      payee(value: string) {
+        return this.asset(value)
+      },
+    }
+    const { sink, state } = judged({ ...FIXED, spelling: codec })
+    expect((await sink({ to: auth("0xabc"), amount: auth("5") })).ok).toBe(true)
+    expect(state.judged).toBe(1)
   })
 
   it("names the argument and not the value, so a redacting receipt stays redacted", async () => {
@@ -159,6 +172,9 @@ describe("a malformed spelling is refused at build", () => {
     ["a misspelled key", { ...FIXED, spelling: { payees: lower } }, /unknown key "payees"/],
     ["not an object", { ...FIXED, spelling: lower }, /spelling must be/],
     ["an array", { ...FIXED, spelling: [lower] }, /spelling must be/],
+    ["an empty object", { ...FIXED, spelling: {} }, /must set payee or asset/],
+    ["only undefined members", { ...FIXED, spelling: { payee: undefined } }, /must set payee or asset/],
+    ["functions on a prototype", { ...FIXED, spelling: new (class { payee(v: string) { return v } })() }, /must set payee or asset/],
   ])("%s", (_name, judgment, message) => {
     expect(() => judged(judgment as Record<string, unknown>)).toThrow(message as RegExp)
   })

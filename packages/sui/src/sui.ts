@@ -23,7 +23,7 @@
 import { Transaction, TransactionDataBuilder } from "@mysten/sui/transactions"
 import type { Signer } from "@mysten/sui/cryptography"
 import type { ClientWithCoreApi, SuiClientTypes } from "@mysten/sui/client"
-import { isValidSuiAddress, normalizeStructTag, normalizeSuiAddress } from "@mysten/sui/utils"
+import { isValidStructTag, isValidSuiAddress, normalizeStructTag, normalizeSuiAddress } from "@mysten/sui/utils"
 import { paymentDigest, SpendAuthorization, type ReceiptLog } from "sweetrust/gate"
 import {
   ABORTS, ALLOWANCE_MODULE, CLOCK_OBJECT_ID, decodeClockMs, MAX_NAME_BYTES, U256_MAX, U64_MAX,
@@ -194,10 +194,22 @@ const normAddr = (a: string): string => normalizeSuiAddress(a)
  * `judgment.spelling`. A sink holding its payment to this refuses a respelled
  * address or a short-form coin type before a judge runs, so spell a sink's
  * `asset` and a purpose's `payees` in the long form this returns.
+ *
+ * Both throw on what is not an address or a fully resolved coin type, because
+ * the SDK's normalizers rewrite without validating: `0xzz…` and an MVR name such
+ * as `@org/app::coin::COIN` would otherwise map to themselves and read as canonical.
  */
 export const suiPaymentSpelling = Object.freeze({
-  payee: (address: string): string => normalizeSuiAddress(address),
-  asset: (coinType: string): string => normalizeStructTag(coinType),
+  payee: (address: string): string => {
+    const canonical = normalizeSuiAddress(address)
+    if (!isValidSuiAddress(canonical)) throw new TypeError("not a Sui address")
+    return canonical
+  },
+  asset: (coinType: string): string => {
+    const canonical = normalizeStructTag(coinType)
+    if (!isValidStructTag(canonical) || canonical.includes("/")) throw new TypeError("not a resolved Sui coin type")
+    return canonical
+  },
 })
 /** A full-length address only: normalizing first would pad `""` to the zero address and `0x12` to a real one. */
 const validAddr = (a: string): boolean => typeof a === "string" && isValidSuiAddress(a)

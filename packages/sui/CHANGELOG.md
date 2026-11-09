@@ -21,12 +21,6 @@ later, which is where recipients and a per-payment cap can move on chain); reser
 spends (Sui settles each spend, so `spend` is one step); and mainnet spends (the module is present
 on mainnet; this package has spent only on testnet). Tested against `@mysten/sui` 2.35.0 only.
 
-### Added
-
-- **`suiPaymentSpelling`, Sui's canonical form of an address and a coin type.** Pass it as a judged
-  sink's `judgment.spelling` so a respelled payee is refused before a judge runs. A sink's `asset`
-  and a purpose's `payees` must then be in the long form it returns (DAN-1457).
-
 ### Security
 
 - **`chainSpends` now finds a spend from what moved, not from the command list.** It lists a
@@ -41,6 +35,12 @@ on mainnet; this package has spent only on testnet). Tested against `@mysten/sui
   cannot read as "no spends". `chainSpends` trusts its indexer; see `SECURITY.md`.
 
 ### Added
+
+- **`suiPaymentSpelling`, Sui's canonical form of an address and a coin type.** Pass it as a judged
+  sink's `judgment.spelling` so a respelled payee is refused before a judge runs. A sink's `asset`
+  and a purpose's `payees` must then be in the long form it returns, and something that is not an
+  address or a resolved coin type is refused too. It needs the `sweetrust` release after 0.6.0,
+  which ignores the option (DAN-1457).
 
 - **Each spend is authorized by a one-shot token (ADR 0010, DAN-1406).** `spend` takes
   `authorization`, the `SpendAuthorization` a sink hands its `execute`, and every receipt@2 repeats

@@ -1710,7 +1710,11 @@ const isStringList = (v: unknown): v is ReadonlyArray<string> => Array.isArray(v
 /** Is `value` already in the form `spell` gives it? A spelling that throws, or answers with anything but that same string, says no. */
 const isSpelled = (spell: Spelling, value: string): boolean => {
   try {
-    return spell(value) === value
+    const answer: unknown = spell(value)
+    // A promise is no answer. One that rejects must not become an unhandled
+    // rejection, which would end the host's process on an agent's input.
+    if (typeof answer !== "string") void Promise.resolve(answer).catch(() => {})
+    return answer === value
   } catch {
     return false
   }
@@ -1728,9 +1732,13 @@ function bindSpelling(where: string, spelling: unknown): { readonly payee: Spell
   const member = (role: "payee" | "asset"): Spelling | undefined => {
     const spell = ownOf(spelling, role)
     if (spell !== undefined && typeof spell !== "function") throw new TypeError(`${where}: judgment.spelling.${role} must be a function, got ${preview(spell)}`)
-    return spell as Spelling | undefined
+    return spell === undefined ? undefined : (value) => (spell as Spelling).call(spelling, value)
   }
-  return Object.freeze({ payee: member("payee"), asset: member("asset") })
+  const payee = member("payee")
+  const asset = member("asset")
+  // `{}`, or a class whose functions live on its prototype, would look like a declared spelling and hold nothing to one.
+  if (payee === undefined && asset === undefined) throw new TypeError(`${where}: judgment.spelling must set payee or asset as its own function`)
+  return Object.freeze({ payee, asset })
 }
 
 /**

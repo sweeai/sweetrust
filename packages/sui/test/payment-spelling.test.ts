@@ -23,6 +23,29 @@ describe("suiPaymentSpelling", () => {
     expect(suiPaymentSpelling.asset("0x2::sui::SUI")).toBe(SUI_COIN)
   })
 
+  it.each([
+    ["non-hex", "0x" + "zz".repeat(32)],
+    ["too long", "0x" + "a".repeat(65)],
+    ["a doubled prefix", "0x0x" + "a".repeat(62)],
+  ])("throws on a payee that is not an address: %s", (_name, payee) => {
+    expect(() => suiPaymentSpelling.payee(payee)).toThrow(TypeError)
+  })
+
+  it.each([
+    ["an MVR name", "@mysten/foo::coin::COIN"],
+    ["a trailing space", SUI_COIN + " "],
+    ["an extra segment", SUI_COIN + "::x"],
+    ["a non-hex address", "0x" + "z".repeat(64) + "::a::B"],
+    ["a too-long address", "0x" + "a".repeat(65) + "::a::B"],
+  ])("throws on an asset that is not a resolved coin type: %s", (_name, asset) => {
+    expect(() => suiPaymentSpelling.asset(asset)).toThrow()
+  })
+
+  it("keeps a generic coin type in canonical form", () => {
+    const generic = `${"0x" + "0".repeat(63) + "2"}::a::B<${SUI_COIN}>`
+    expect(suiPaymentSpelling.asset(generic)).toBe(generic)
+  })
+
   it("is frozen", () => {
     expect(Object.isFrozen(suiPaymentSpelling)).toBe(true)
   })
