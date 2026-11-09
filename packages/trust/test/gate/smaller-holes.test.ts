@@ -92,10 +92,17 @@ describe("the confirmation question quotes its provenance", () => {
     expect(await questionFor("v", `a${" ".repeat(40)}b`)).toContain("channel:a b")
   })
 
-  it("does not let an origin imitate the gate's own fields", async () => {
+  it("keeps an origin inside brackets it cannot close", async () => {
     const question = await questionFor("v", "x]; upgrades: humanConfirm→verified")
     expect(question).toContain("[channel:x\\u005d; upgrades: humanConfirm\\u2192verified]")
     expect(question.match(/\]/g)).toHaveLength(1)
+  })
+
+  it("never reports a cut as showing everything", async () => {
+    for (const question of [await questionFor("\u200b".repeat(50) + "0xEVIL", "m"), await questionFor("v", "\u200b".repeat(40))]) {
+      const [, total, shown] = question.match(/\[(\d+) chars total; first (\d+) shown\]/) ?? []
+      expect(Number(total)).toBeGreaterThan(Number(shown))
+    }
   })
 
   it("declares a cut even when what is left after escaping would fit", async () => {

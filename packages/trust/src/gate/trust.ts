@@ -676,7 +676,7 @@ const HUMAN_CONFIRM_VALUE_CHARS = 256
 const HUMAN_CONFIRM_ORIGIN_CHARS = 64
 /**
  * The most of any one field the question escapes. Far more than a field shows, and a bound, because
- * escaping can multiply a string's length, and a string past V8's maximum ends the process, uncatchably.
+ * replacing every character of a very large string can exhaust memory and end the process, uncatchably.
  */
 const HUMAN_CONFIRM_ESCAPED_INPUT_CHARS = 4096
 /** Characters JSON leaves raw that a renderer can act on or a person cannot see: line separators, bidi overrides, controls, zero-widths, tag characters, private-use and unassigned code points, the blank braille cell. */
@@ -703,7 +703,7 @@ const fieldForQuestion = (raw: string, limit: number, escape: (bounded: string) 
     if (kept + match[0].length > limit) break
     kept += match[0].length
   }
-  return `${escaped.slice(0, kept)}… [${raw.length} chars total; first ${kept} shown]`
+  return `${escaped.slice(0, kept)}… [${whole ? escaped.length : raw.length} chars total; first ${kept} shown]`
 }
 /** The value, already quoted as JSON, made inert and cut. For display only. */
 const valueForQuestion = (quoted: string): string => fieldForQuestion(quoted, HUMAN_CONFIRM_VALUE_CHARS, (text) => text.replace(QUESTION_UNSAFE, inertChar))
