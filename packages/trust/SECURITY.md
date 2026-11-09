@@ -314,7 +314,8 @@ The key picks which record a candidate is compared against, so a key read from t
 the attacker's own record. `allowlisted` takes the key as a `Sourced<string>`, refuses one below
 `verified` without reading the registry, and records the key's tier and origin on the ascent.
 `Sourced.fromAuthority` is your claim, not a check: wrapping a value the message supplied passes
-this test and defeats it.
+this test and defeats it. A key a person confirmed also passes, and they vouched for that string,
+which can still have come from the message. A key that is not a `Sourced` at all is a `TypeError`.
 
 ### The ladder is three tiers
 

@@ -442,15 +442,18 @@ export function allowlisted<T>(
   registryName: string,
 ): DeclassifyResult<T> {
   // The brand comes first. Parsed JSON can say `tier: "verified"`, and a Proxy
-  // could answer differently on a second read; neither carries the brand, and a
-  // genuine Sourced is frozen data, so reading it once below is the only read.
+  // could answer differently on a second read; neither carries the brand.
   if (!Sourced.is(key)) {
     throw new TypeError("allowlisted: key must be a Sourced<string> so the gate knows where it came from. Take it from a record your host holds, never from the message: wrapping a message-derived key in Sourced.fromAuthority defeats this check (SECURITY.md)")
   }
-  const { value: keyValue, tier: keyTier, provenance: { origin: keyOrigin } } = key
-  // Neither refusal echoes the key: below `verified` it may be the attacker's text.
-  if (keyTier !== "verified") {
-    return { ok: false, reason: `the key for ${registryName} is ${keyTier} (origin: ${keyOrigin}); a key picks the record to compare against, so it must be verified` }
+  // The key is read here and nowhere after. Its rendering is quoted because an
+  // origin is a host-chosen string that can carry message text, and the evidence
+  // is what an auditor reads.
+  const { value: keyValue, tier: keyTier } = key
+  const keyShown = show(key.describe())
+  // Neither refusal echoes the key or its origin: either may be the attacker's text.
+  if (!meetsTier(keyTier, "verified")) {
+    return { ok: false, reason: `the key for ${registryName} is ${keyTier}; a key picks the record to compare against, so it must be verified` }
   }
   if (typeof keyValue !== "string") {
     return { ok: false, reason: `the key for ${registryName} is not a string` }
@@ -529,7 +532,7 @@ export function allowlisted<T>(
       declassifier: "allowlisted",
       from: entryTier,
       to: "verified",
-      evidence: `matched ${registryName}[${keyValue}] by key ${key.describe()} — candidate presented was ${candidate.describe()}`,
+      evidence: `matched ${registryName}[${show(keyValue)}] by key ${keyShown} — candidate presented was ${candidate.describe()}`,
       at: now(),
     }),
   }
