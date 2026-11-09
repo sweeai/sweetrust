@@ -140,7 +140,7 @@ restart. A log that does not return what was appended, or that two processes wri
 loses them: a per-process log forgets the block at restart, and the identical action judges afresh.
 Give a judged enforce sink a log that outlives the process (ADR 0010). The check is in-process and
 keyed per sink name and per action digest; it does not stop a host from calling `execute`'s work
-some other way.
+some other way. Each judged call walks the log once, so its cost grows with the log's length.
 
 ### An idempotency key is host-attested
 
