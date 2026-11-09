@@ -1437,8 +1437,15 @@ export interface ArgumentTrust {
 /**
  * The payment a sink resolved from its `purposeArgs`: the same four values the
  * verdict's `paymentDigest` is computed over, so what the judge was shown and
- * what the verdict binds cannot disagree. `amount` is the decimal string that
- * digest hashes, whichever of bigint or string the argument was.
+ * what the verdict binds cannot disagree (`paymentDigest` calls `payee` its
+ * `recipient`). `amount` is the decimal string that digest hashes, whichever of
+ * bigint or string the argument was. It is in the unit the argument uses,
+ * normally the asset's base units, and no decimals come with it, so a provider
+ * that shows it to a model must say what it counts.
+ *
+ * This names what the verdict binds and vouches for none of it. `payee`, `amount`
+ * and an asset taken from an argument are that argument's value at whatever tier
+ * the sink admitted, so read them as data, as with `action.args`.
  */
 export interface JudgmentPayment {
   readonly payee: string
@@ -2602,12 +2609,11 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
     // no longer switches the judge off and erases the verdict (ADR 0010).
     let snapshot: ActionSnapshot | undefined
     let paymentOfCall: JudgmentPayment | null = null
-    let paymentDigestOfCall: string | null = null
     if (judge !== undefined && violations.length === undeclared) {
       snapshot = snapshotAction(cfg.name, checked, violations, idempotencyKey, judge.purpose.payment?.amountArg)
       if (snapshot !== undefined) paymentOfCall = checkPurpose(judge.purpose, cfg.name, snapshot.values, violations)
-      paymentDigestOfCall = digestOfResolved(paymentOfCall)
     }
+    const paymentDigestOfCall = digestOfResolved(paymentOfCall)
 
     // Tier wall — hard structural gate (Rule 4). A purpose-field or snapshot
     // failure is a violation too, so it refuses here and the judge never runs.
@@ -2691,12 +2697,14 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
         }
       }
 
-      const input = Object.freeze({
+      // Null-prototype, because `payment` can be absent: on an ordinary object a
+      // provider's `input.payment` would then read Object.prototype.
+      const input: JudgmentInput = Object.freeze(Object.assign(Object.create(null) as object, {
         purpose: judge.granted.purpose,
         action: Object.freeze({ sink: cfg.name, args: action.values }),
         trust: action.trust,
         ...(paymentOfCall === null ? {} : { payment: paymentOfCall }),
-      })
+      }))
       const providerName = judge.name
 
       try {

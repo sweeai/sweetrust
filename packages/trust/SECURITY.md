@@ -214,8 +214,10 @@ an invoice description, a payee name. The agent's own rationale never reaches a 
 values do. The provider also receives `trust`, each argument's tier and provenance, so it can read
 an `untrusted` argument as data rather than as instructions. On a sink that names `purposeArgs` it
 also receives `payment`, the payee, amount, asset and network the sink resolved and the verdict's
-`paymentDigest` binds, so a provider need not work them out again from the arguments. The gate
-delivers that information; it cannot make a model use it, and a judge that follows instructions in
+`paymentDigest` binds, so a provider need not work them out again from the arguments. `payment` says
+what the verdict binds and vouches for none of it: a payee can be text an agent wrote, at whatever
+tier the sink admitted, so a judge must read it as data too. Its `amount` comes with no decimals. The
+gate delivers that information; it cannot make a model use it, and a judge that follows instructions in
 an argument can still be talked into a `match`. Provenance is built from the channel and authority names your host passed,
 so a host that names a channel after agent text has handed the agent that string too.
 

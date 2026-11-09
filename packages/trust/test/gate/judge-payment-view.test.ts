@@ -90,4 +90,16 @@ describe("the judge's view of the payment", () => {
     await sink({ to: auth("0xabc"), amount: auth("5"), extra: auth("x") })
     expect(seen[0]!.payment).toEqual({ payee: "0xabc", amount: "5", asset: "0x2::sui::SUI", network: "sui:testnet" })
   })
+
+  it("a payment planted on Object.prototype does not reach a sink with no purposeArgs", async () => {
+    const { sink, seen } = judged({})
+    const prototype = Object.prototype as { payment?: unknown }
+    prototype.payment = { payee: "0xplanted", amount: "1", asset: "a", network: "n" }
+    try {
+      await sink({ to: auth("0xabc"), amount: auth("5") })
+      expect(seen[0]!.payment).toBeUndefined()
+    } finally {
+      delete prototype.payment
+    }
+  })
 })
