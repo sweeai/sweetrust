@@ -132,6 +132,23 @@ const assertCapabilityIdentifierClean = (key: string): void => {
 }
 
 /**
+ * Screen one authored name before it is persisted (AGENTS.md; the 2026-11-08
+ * audit, K8: `grantor`, `unit` and `resumedBy` reached the log unscreened). A
+ * non-string is a `TypeError` from the screen itself.
+ */
+const assertAuthoredNameClean = (value: string, inputKind: "grantor" | "unit" | "resumedBy"): void => {
+  const match = constitutionalPreCheck(value)
+  if (match) {
+    failMandate({
+      _tag: "MaliciousMandateMetadata",
+      inputKind,
+      matchedPatternId: match.patternId,
+      evidence: match.evidence,
+    })
+  }
+}
+
+/**
  * Generate a sortable identifier with crypto-strong randomness.
  *
  * Format: MAN_<base36-ms-timestamp>_<16-hex-chars-from-crypto.randomBytes>.
@@ -455,6 +472,7 @@ const captureLimits = (raw: unknown, capabilityIds: ReadonlyArray<string>): Capa
     if (unit !== undefined && typeof unit !== "string") {
       throw new TypeError(`limits["${key}"].unit must be a string`)
     }
+    if (unit !== undefined) assertAuthoredNameClean(unit, "unit")
     if (amount === undefined && count === undefined) {
       throw new TypeError(`limits["${key}"] caps nothing: set amount and/or count`)
     }
@@ -747,25 +765,15 @@ const assertWithinLimit = (
  * grantor's `MandateScope` reference was captured but BEFORE the child issue
  * fires would silently produce an orphan child mandate (parent revoked, child
  * still callable until ancestor-chain check at use time catches it). The
- * issue-time check stops the orphan from ever entering the audit log.
+ * issue-time check stops the orphan from ever entering the audit log. It runs
+ * the same walk as use, so a revoked grandparent stops it too (the 2026-11-08
+ * audit, K8: the child used to be minted and refused only at use).
  */
 const checkGrantorNotRevoked = (
   audit: MandateAuditService,
   grantorScope: { readonly id: MandateId; readonly grantor: GrantorId },
 ): void => {
-  const revoked = audit.isRevoked(grantorScope.id)
-  if (!revoked) return
-  const events = audit.query(grantorScope.id)
-  const revokeEvent = events.find((e) => e.type === "revoke")
-  failMandate({
-    _tag: "MandateRevoked",
-    mandateId: grantorScope.id,
-    revokedAt: revokeEvent?.timestamp ?? nowISO(),
-    revokedBy:
-      revokeEvent?.type === "revoke" ? revokeEvent.revokedBy : grantorScope.grantor,
-    rationale:
-      revokeEvent?.type === "revoke" ? revokeEvent.rationale : "grantor revoked",
-  })
+  void walkChain(audit, grantorScope.id, grantorScope.grantor)
 }
 
 /**
@@ -1189,6 +1197,8 @@ export const issueOrgMandate = <Caps extends ReadonlyArray<Capability>>(args: {
     })
   }
 
+  assertAuthoredNameClean(grantor, "grantor")
+
   const newId = freshMandateId(audit)
   const grantTimestamp = nowISO()
 
@@ -1267,6 +1277,8 @@ export const issueProjectMandate = <
       evidence: rationaleCheck.evidence,
     })
   }
+
+  assertAuthoredNameClean(grantor, "grantor")
 
   // Resolved before the first log read, as in `useCapability` (K1).
   const grantorCapIds = new Set(claimedCapabilityIds(grantorScope))
@@ -1384,6 +1396,8 @@ export const issueAgentMandate = <
     })
   }
 
+  assertAuthoredNameClean(grantor, "grantor")
+
   // Resolved before the first log read, as in `useCapability` (K1).
   const grantorCapIds = new Set(claimedCapabilityIds(grantorScope))
 
@@ -1488,6 +1502,7 @@ export const resumeMandate = <
   // Every caller-supplied field is read exactly once (the intake rule).
   const { mandateId } = args
   const resumedBy: GrantorId = grantorId(args.resumedBy as string)
+  assertAuthoredNameClean(resumedBy, "resumedBy")
   const capabilities = captureCapabilities(args.capabilities)
   const declaredIds = resolveCapabilityIds(capabilities)
   const declaredTier: unknown = args.tier
