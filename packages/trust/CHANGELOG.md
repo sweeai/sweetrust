@@ -14,6 +14,18 @@ verified by one version is unaffected by an upgrade; a chain that crosses a vers
 re-verified by the newer code, which may refuse it — each such change is a *Breaking* bullet in the
 release that makes it. A patch version changes none of these.
 
+## [Unreleased]
+
+### Security
+
+- **A doubted action needs its owner, however long the agent waits.** A hold expired after 15 minutes
+  and a block after its window, and the next identical call was judged afresh, so a `match` ran with
+  no approval and an agent could retry until the judge agreed. The judge is still asked, so the owner
+  gets a fresh hold to approve, but a `match` on an action with a real doubt behind it is now held. A
+  judge outage is not a doubt, and only the owner's approval of that doubt clears it (ADR 0010,
+  DAN-1443). A log from 0.6.0 in which an unapproved run followed an expired doubt keeps that doubt,
+  so the next repeat of that action is held until the owner approves it.
+
 ## [0.6.0] — 2026-11-08
 
 This release adds the intent layer: the owner's purpose is signed into the mandate,

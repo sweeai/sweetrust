@@ -44,6 +44,14 @@ executing, executed. It is claimed synchronously before the first await.**
    call, on a `judgment-held` receipt with `scored: false`, but leaves no standing hold, so the next
    call asks the judge again. An outage is not an answer. An owner may still approve that hold,
    and the approval is refused as a replay if a later call has already run the action.
+   **Amended 2026-11-09 (DAN-1443): a real doubt outlives its window.** When a scored block or hold
+   expires, the next identical call is judged again, so the owner gets a fresh hold to approve, but
+   a `match` on it is held rather than run. A `mismatch` blocks. Only an `attempted` receipt carrying
+   the owner's approval of that doubt clears it, so a late `errored`, a run on a warn sink or the
+   release of an earlier outage hold cannot. A sink with no `approvalKey` can never release one, so
+   that exact action stays held under that grant, whatever its idempotency key. Before this, an
+   agent could wait out each window and resample the judge until it said `match`, which is the retry
+   this record exists to stop.
 2. **Execution dedupe keys on the action plus an idempotency key.** The sink's second argument is
    `{ idempotencyKey }`, supplied by the host and never agent-controlled, and it enters the action
    digest. With no key, an identical action that has already been attempted is refused as a
