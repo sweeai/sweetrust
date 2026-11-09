@@ -305,7 +305,7 @@ report as a statement about those inputs only.
 object it promotes, and `result.value.value` IS the value object you put in the registry, by
 reference. So that nothing holding the result can rewrite the registry through it,
 `Sourced.fromAuthority` freezes an object or array value **in place, shallowly**, the moment it
-becomes an authority value. Nested objects, Maps and Sets inside it are not frozen; typed arrays are
+becomes an authority value, and `allowlisted` does the same to a row that reached `verified` another way. Nested objects, Maps and Sets inside it are not frozen; typed arrays are
 left alone. If you keep editing a record after wrapping it, wrap a copy.
 
 ### `allowlisted` needs a key your host holds

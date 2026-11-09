@@ -542,6 +542,11 @@ export function allowlisted<T>(
   // 🔑 The rule this file keeps relearning: THE OBJECT YOU CHECKED MUST BE THE
   // OBJECT YOU PROMOTE. Checking A and shipping B is not a weaker check, it is
   // no check at all.
+  //
+  // A verified row need not have been born at an authority (`humanConfirm` makes
+  // one too), and the caller gets this very object, so it is frozen here as
+  // `fromAuthority` would have: the result must not be able to rewrite the registry.
+  if (typeof entryValue === "object" && entryValue !== null && !ArrayBuffer.isView(entryValue)) Object.freeze(entryValue)
   return {
     ok: true,
     value: ascend({ value: entryValue, provenance: entryProvenance }, {

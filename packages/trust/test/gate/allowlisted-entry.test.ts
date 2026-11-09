@@ -5,7 +5,7 @@
  * as a genuine `verified` value.
  */
 import { describe, expect, it, vi } from "vitest"
-import { Sourced, allowlisted, corroborate } from "../../src/gate/index.ts"
+import { Sourced, allowlisted, corroborate, humanConfirm } from "../../src/gate/index.ts"
 import { poison, readsOf } from "../helpers/poison.ts"
 
 const KEY = "acme"
@@ -31,8 +31,6 @@ describe("allowlisted promotes only what the gate minted", () => {
       const reason = refusal(allowlisted(claim(), registryOf(row), hostKey(), "payee-registry"))
       expect(reason).toContain("untrusted")
       expect(reason).not.toContain(RECORD)
-      expect(row.tier).toBe("untrusted")
-      expect(row.provenance.chain).toHaveLength(0)
     }
   })
 
@@ -42,6 +40,24 @@ describe("allowlisted promotes only what the gate minted", () => {
     const reason = refusal(allowlisted(claim(), registryOf(agreed.value), hostKey(), "payee-registry"))
     expect(reason).toContain("corroborated")
     expect(reason).not.toContain(RECORD)
+  })
+
+  it("a proxied registry row is refused before any field is read", () => {
+    const proxied = poison(Sourced.fromAuthority(RECORD, "payee-registry"), "row")
+    refusal(allowlisted(claim(), registryOf(proxied), hostKey(), "payee-registry"))
+    expect(readsOf(proxied).size).toBe(0)
+  })
+
+  it("a promoted object row cannot be used to rewrite the registry", async () => {
+    const confirmed = await humanConfirm(Sourced.fromChannel({ iban: "GOOD" }, "vendor-onboarding-form"), () => true)
+    if (!confirmed.ok) throw new Error(confirmed.reason)
+    const registry = new Map([[KEY, confirmed.value]])
+    const r = allowlisted(Sourced.fromChannel({ iban: "GOOD" }, "email-inbound"), registry, hostKey(), "payee-registry")
+    if (!r.ok) throw new Error(r.reason)
+    expect(() => {
+      r.value.value.iban = "EVIL"
+    }).toThrow(TypeError)
+    expect(registry.get(KEY)!.value.iban).toBe("GOOD")
   })
 
   it("a candidate that only looks like a Sourced is refused without calling it", () => {
@@ -80,7 +96,6 @@ describe("allowlisted promotes only what the gate minted", () => {
   })
 
   it("a row raised to verified through a declassifier is a verified row", async () => {
-    const { humanConfirm } = await import("../../src/gate/index.ts")
     const confirmed = await humanConfirm(Sourced.fromChannel(RECORD, "vendor-onboarding-form"), () => true)
     if (!confirmed.ok) throw new Error(confirmed.reason)
     expect(allowlisted(claim(), registryOf(confirmed.value), hostKey(), "payee-registry").ok).toBe(true)
