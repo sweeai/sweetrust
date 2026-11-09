@@ -691,8 +691,9 @@ const inertChar = (c: string): string => {
 }
 /**
  * One field of the question. The input is bounded first, then escaped, then cut on a unit boundary, so
- * an escape or a surrogate pair is never split and the limit is what is really shown. Any input past the
- * bound is declared as cut, even when what is left would fit, since escaping can also shorten a string.
+ * the cut never splits an escape or a surrogate pair and the limit is what is really shown. The bound's
+ * own slice can halve a pair; in an origin that half shows as an escape, under a declared cut. Any input
+ * past the bound is declared as cut, even when what is left would fit, since escaping can also shorten a string.
  */
 const fieldForQuestion = (raw: string, limit: number, escape: (bounded: string) => string): string => {
   const whole = raw.length <= HUMAN_CONFIRM_ESCAPED_INPUT_CHARS
