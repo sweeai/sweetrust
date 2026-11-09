@@ -73,7 +73,7 @@ Save it as `demo.ts` and run `node demo.ts` on Node 22.18 or later.
 
 ## What's inside
 
-**`sweetrust/gate` enforces.** Every value carries a trust tier (`untrusted`, `corroborated`, `verified`) and its full provenance, and mixing in untrusted data taints the result. Three functions called declassifiers are the only way to raise an existing value's trust: `allowlisted` checks a registry you control, `corroborate` requires independent sources to agree, and `humanConfirm` asks a person. Trusted host code mints verified values with `Sourced.fromAuthority`.
+**`sweetrust/gate` enforces.** Every value carries a trust tier (`untrusted`, `corroborated`, `verified`) and its full provenance. Taint is not automatic: `Sourced.fromLLM` is always `untrusted`, and anything computed from a `.value` is plain until you wrap it. Three functions called declassifiers are the only way to raise an existing value's trust: `allowlisted` checks a registry you control, `corroborate` requires independent sources to agree, and `humanConfirm` asks a person. Trusted host code mints verified values with `Sourced.fromAuthority`.
 
 Sinks wrap the actions that matter, and in `enforce` mode they refuse anything that falls short. You can adopt them gradually through `observe` and `warn`. An optional `judgment` provider you supply can also block an action that passes the tiers but looks wrong.
 
@@ -124,8 +124,8 @@ A sink does not consult a mandate. To use both on one tool, call `trust.useCapab
 - **It runs inside your process.** Code that shares the process can get around it, so use it to define and record your trust boundaries, and do not make it the only thing protecting custody of funds.
 - **Revoking here does not stop money a chain already holds.** `revokeMandate` writes to this log. A limit that must hold when the host is compromised belongs to the payment rail, such as Sui's native `sui::allowance` or a card issuer's limit.
 - **A local log cannot prove it is complete.** Cutting the newest records leaves a valid shorter chain. For receipt chains, an anchor you posted yourself catches a cut back past that anchor. Nothing in the package detects a cut in a mandate log, so protect that store like a key.
-- **One process writes each store.** The JSONL stores do not lock across processes, and a second writer forks the chain so every later read refuses.
-- **Authority is possession.** A scope is the object that carries a mandate's authority. Whoever holds a scope, the client or the store holds that authority, so hand an agent only its own scope.
+- **One process writes each store.** The JSONL stores do not lock across processes. On the signed store, a second writer can fork the chain, and every later read then refuses.
+- **Authority is possession.** A scope is the object that carries a mandate's authority. Whoever holds a scope holds its authority. Whoever holds the object `createTrust` returns, or its store, holds authority over every mandate in that store, so hand an agent only its own scope.
 - **You bring the judgment.** SweeTrust ships no model, so you plug in your own as the `judgment` provider.
 - **It is pre-1.0.** A minor version may break an API.
 
