@@ -167,7 +167,9 @@ export const makeInMemorySignedAuditLive = (
   const signedAudit: SignedMandateAuditService = {
     recordSigned: (event) => signAndRecord(event),
     querySigned: (mandateId) => events.filter((e) => e.payload.mandateId === mandateId),
-    listAllSigned: () => events,
+    // A copy. Handing out the live array let any reader pop a revoke off the
+    // log, and the shorter chain still verified (the 2026-11-08 audit, K3).
+    listAllSigned: () => [...events],
   }
 
   return { mandateAudit, signedAudit }
