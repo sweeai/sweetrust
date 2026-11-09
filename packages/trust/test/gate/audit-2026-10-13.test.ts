@@ -21,6 +21,8 @@ import { Sourced, allowlisted, corroborate, humanConfirm, makeSink, meetsTier, m
 import type { GrantedPurpose } from "../../src/purpose.ts"
 import { GRANTED } from "../helpers/granted.ts"
 
+const hostKey = (key: string) => Sourced.fromAuthority(key, "purchase-orders")
+
 // ── #1 HIGH — sealAncestors' forEach leaked the raw Set ──────────────────────
 // ADVERTISED (sealAncestors): "Seal a Set so the mutators throw while reads
 // stay ordinary." A1 proved delete/clear throw when called on the sealed view.
@@ -532,7 +534,7 @@ describe("#6 — the declassifiers return a verdict for a BigInt and blame the r
 
   it("allowlisted: a bigint candidate against a bigint record is a match, and the registry record is what comes back", () => {
     const reg = new Map([["acme", Sourced.fromAuthority(1_000_000_000n, "payee-registry")]])
-    const r = allowlisted(mist(), reg, "acme", "payee-registry")
+    const r = allowlisted(mist(), reg, hostKey("acme"), "payee-registry")
     expect(r.ok).toBe(true)
     if (r.ok) {
       expect(r.value.value).toBe(1_000_000_000n)
@@ -542,7 +544,7 @@ describe("#6 — the declassifiers return a verdict for a BigInt and blame the r
 
   it("allowlisted: a string candidate against a bigint record is a MISMATCH, not 'candidate could not be serialized'", () => {
     const reg: ReadonlyMap<string, Sourced<unknown>> = new Map([["acme", Sourced.fromAuthority(1_000_000_000n, "payee-registry")]])
-    const r = allowlisted(Sourced.fromChannel("1000000000", "webhook") as Sourced<unknown>, reg, "acme", "payee-registry")
+    const r = allowlisted(Sourced.fromChannel("1000000000", "webhook") as Sourced<unknown>, reg, hostKey("acme"), "payee-registry")
     expect(r.ok).toBe(false)
     if (!r.ok) {
       expect(r.reason).toContain("does NOT match")
@@ -554,7 +556,7 @@ describe("#6 — the declassifiers return a verdict for a BigInt and blame the r
     const cyc: Record<string, unknown> = { iban: "GOOD" }
     cyc.self = cyc
     const reg = new Map([["acme", Sourced.fromAuthority(cyc, "payee-registry")]])
-    const r = allowlisted(Sourced.fromChannel({ iban: "GOOD" }, "email"), reg, "acme", "payee-registry")
+    const r = allowlisted(Sourced.fromChannel({ iban: "GOOD" }, "email"), reg, hostKey("acme"), "payee-registry")
     expect(r.ok).toBe(false)
     if (!r.ok) {
       expect(r.reason).toContain("record")
@@ -649,7 +651,7 @@ describe("#9 — fromAuthority freezes an object value, so an allowlisted hand-o
 
   it("ATTACK: mutating the object allowlisted returns no longer poisons the registry", () => {
     const registry = new Map([["Acme", Sourced.fromAuthority({ iban: "DE11-GOOD" }, "payee-registry")]])
-    const r = allowlisted(Sourced.fromChannel({ iban: "DE11-GOOD" }, "email"), registry, "Acme", "payee-registry")
+    const r = allowlisted(Sourced.fromChannel({ iban: "DE11-GOOD" }, "email"), registry, hostKey("Acme"), "payee-registry")
     expect(r.ok).toBe(true)
     if (!r.ok) return
     expect(r.value.value).toBe(registry.get("Acme")!.value) // identity: the 2026-08-31 invariant stands
@@ -657,7 +659,7 @@ describe("#9 — fromAuthority freezes an object value, so an allowlisted hand-o
       ;(r.value.value as { iban: string }).iban = "DE99-EVIL"
     }).toThrow(TypeError)
     expect(registry.get("Acme")!.value.iban).toBe("DE11-GOOD")
-    expect(allowlisted(Sourced.fromChannel({ iban: "DE99-EVIL" }, "email"), registry, "Acme", "payee-registry").ok).toBe(false)
+    expect(allowlisted(Sourced.fromChannel({ iban: "DE99-EVIL" }, "email"), registry, hostKey("Acme"), "payee-registry").ok).toBe(false)
   })
 
   it("primitives, null and ArrayBuffer views pass through untouched", () => {

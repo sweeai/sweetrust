@@ -16,6 +16,15 @@ release that makes it. A patch version changes none of these.
 
 ## [Unreleased]
 
+### Breaking
+
+- **`allowlisted` takes its key as a `Sourced<string>` and refuses one below `verified`.** The key
+  picks the record a candidate is compared against, so a key the message supplied could pick the
+  attacker's own record. Migrate by wrapping the key your host holds:
+  `allowlisted(candidate, registry, Sourced.fromAuthority(po.vendorId, "purchase-orders"), name)`.
+  A plain string is a `TypeError`. The key's tier and origin are now in the ascent's `evidence`
+  (DAN-1444).
+
 ### Security
 
 - **A doubted action needs its owner, however long the agent waits.** A hold expired after 15 minutes

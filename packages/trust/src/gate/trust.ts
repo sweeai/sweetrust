@@ -428,16 +428,36 @@ export type DeclassifyResult<T> =
 /**
  * Registry membership → Verified. An authority act: the value matches an
  * entry in a registry THIS deployment governs.
+ *
+ * The key is `Sourced` because it steers the ascent: it picks which record the
+ * candidate is compared against, so a key the attacker wrote can pick the
+ * attacker's own record. It must be `verified`, not merely corroborated:
+ * accumulation never raises a value past `corroborated` (Rule 3a), and a
+ * corroborated key that yielded a `verified` value would launder past that.
  */
 export function allowlisted<T>(
   candidate: Sourced<T>,
   registry: ReadonlyMap<string, Sourced<T>>,
-  key: string,
+  key: Sourced<string>,
   registryName: string,
 ): DeclassifyResult<T> {
-  const entry = registry.get(key)
+  // The brand comes first. Parsed JSON can say `tier: "verified"`, and a Proxy
+  // could answer differently on a second read; neither carries the brand, and a
+  // genuine Sourced is frozen data, so reading it once below is the only read.
+  if (!Sourced.is(key)) {
+    throw new TypeError("allowlisted: key must be a Sourced<string>, so the gate knows where it came from; wrap a key your host holds in Sourced.fromAuthority")
+  }
+  const { value: keyValue, tier: keyTier, provenance: { origin: keyOrigin } } = key
+  // Neither refusal echoes the key: below `verified` it may be the attacker's text.
+  if (keyTier !== "verified") {
+    return { ok: false, reason: `the key for ${registryName} is ${keyTier} (origin: ${keyOrigin}); a key picks the record to compare against, so it must be verified` }
+  }
+  if (typeof keyValue !== "string") {
+    return { ok: false, reason: `the key for ${registryName} is not a string` }
+  }
+  const entry = registry.get(keyValue)
   if (entry === undefined) {
-    return { ok: false, reason: `'${key}' not in ${registryName}; candidate is ${candidate.describe()}` }
+    return { ok: false, reason: `'${keyValue}' not in ${registryName}; candidate is ${candidate.describe()}` }
   }
   // Each Sourced is read once, here (AGENTS.md, "Intake"). The comparison
   // below and the ascent at the bottom both use these locals.
@@ -462,7 +482,7 @@ export function allowlisted<T>(
   } catch (err) {
     return {
       ok: false,
-      reason: `'${key}' IS in ${registryName} but the ${registryName} record could not be serialized for comparison (${firstLine(err)}) — refusing rather than guessing; candidate is ${candidate.describe()}`,
+      reason: `'${keyValue}' IS in ${registryName} but the ${registryName} record could not be serialized for comparison (${firstLine(err)}) — refusing rather than guessing; candidate is ${candidate.describe()}`,
     }
   }
   let candidateJSON: string | undefined
@@ -471,13 +491,13 @@ export function allowlisted<T>(
   } catch (err) {
     return {
       ok: false,
-      reason: `'${key}' IS in ${registryName} but the candidate could not be serialized for comparison (${firstLine(err)}) — refusing rather than guessing`,
+      reason: `'${keyValue}' IS in ${registryName} but the candidate could not be serialized for comparison (${firstLine(err)}) — refusing rather than guessing`,
     }
   }
   if (entryJSON !== candidateJSON) {
     return {
       ok: false,
-      reason: `'${key}' IS in ${registryName} but the ${registryName} record does NOT match — candidate is ${candidate.describe()}`,
+      reason: `'${keyValue}' IS in ${registryName} but the ${registryName} record does NOT match — candidate is ${candidate.describe()}`,
     }
   }
 
@@ -509,7 +529,7 @@ export function allowlisted<T>(
       declassifier: "allowlisted",
       from: entryTier,
       to: "verified",
-      evidence: `matched ${registryName}[${key}] — candidate presented was ${candidate.describe()}`,
+      evidence: `matched ${registryName}[${keyValue}] by a ${keyTier} key from ${keyOrigin} — candidate presented was ${candidate.describe()}`,
       at: now(),
     }),
   }
