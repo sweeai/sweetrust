@@ -74,6 +74,8 @@ describe("the judge's view of the payment", () => {
     const { receipt } = await sink({ to: auth("0xabc"), amount: auth("5") })
     const { payee, amount, asset, network } = seen[0]!.payment!
     expect(receipt.verdict!.paymentDigest).toBe(paymentDigest({ network, asset, recipient: payee, amount }))
+    // And against a digest computed from nothing the sink produced.
+    expect(receipt.verdict!.paymentDigest).toBe(paymentDigest({ network: "sui:testnet", asset: "0x2::sui::SUI", recipient: "0xabc", amount: "5" }))
   })
 
   it("a bigint amount is shown as the decimal string its digest hashes", async () => {
@@ -82,6 +84,7 @@ describe("the judge's view of the payment", () => {
     const { payee, amount, asset, network } = seen[0]!.payment!
     expect(amount).toBe("5")
     expect(JSON.stringify(seen[0]!.payment)).toContain('"amount":"5"')
+    expect(receipt.verdict!.paymentDigest).toBe(paymentDigest({ network: "sui:testnet", asset: "0x2::sui::SUI", recipient: "0xabc", amount: 5n }))
     expect(receipt.verdict!.paymentDigest).toBe(paymentDigest({ network, asset, recipient: payee, amount }))
   })
 

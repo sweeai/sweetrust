@@ -1462,7 +1462,8 @@ export interface ArgumentTrust {
  * `recipient`). `amount` is the decimal string that digest hashes, whichever of
  * bigint or string the argument was. It is in the unit the argument uses,
  * normally the asset's base units, and no decimals come with it, so a provider
- * that shows it to a model must say what it counts.
+ * that shows it to a model must say what it counts. `action.args` can still hold
+ * the bigint, so `JSON.stringify(input)` can throw where this view cannot.
  *
  * This names what the verdict binds and vouches for none of it. `payee`, `amount`
  * and an asset taken from an argument are that argument's value at whatever tier
