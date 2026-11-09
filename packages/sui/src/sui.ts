@@ -23,7 +23,7 @@
 import { Transaction, TransactionDataBuilder } from "@mysten/sui/transactions"
 import type { Signer } from "@mysten/sui/cryptography"
 import type { ClientWithCoreApi, SuiClientTypes } from "@mysten/sui/client"
-import { isValidSuiAddress, normalizeStructTag, normalizeSuiAddress } from "@mysten/sui/utils"
+import { isValidStructTag, isValidSuiAddress, normalizeStructTag, normalizeSuiAddress } from "@mysten/sui/utils"
 import { paymentDigest, SpendAuthorization, type ReceiptLog } from "sweetrust/gate"
 import {
   ABORTS, ALLOWANCE_MODULE, CLOCK_OBJECT_ID, decodeClockMs, MAX_NAME_BYTES, U256_MAX, U64_MAX,
@@ -189,6 +189,39 @@ const boundTo = (coinType: string | null, asset: string): boolean => {
   }
 }
 const normAddr = (a: string): string => normalizeSuiAddress(a)
+/** Far above a real coin type: an address, two 128-character identifiers, and room for a few type arguments. */
+const MAX_COIN_TYPE_CHARS = 1024
+const MAX_COIN_TYPE_GENERICS = 16
+/** `0x` and 64 hex digits, the longest a canonical address can be. */
+const SUI_ADDRESS_CHARS = 66
+/**
+ * Sui's canonical spelling of a payee and a coin type, for a judged sink's
+ * `judgment.spelling`. A sink holding its payment to this refuses a respelled
+ * address or a short-form coin type before a judge runs, so spell a sink's
+ * `asset` and a purpose's `payees` in the long form this returns.
+ *
+ * Both throw on what is not an address or a fully resolved coin type, because
+ * the SDK's normalizers rewrite without validating: `0xzz…` and an MVR name such
+ * as `@org/app::coin::COIN` would otherwise map to themselves and read as canonical.
+ */
+export const suiPaymentSpelling = Object.freeze({
+  payee: (address: string): string => {
+    // Before lowercasing: an agent string past V8's maximum once lowercased ends the process, uncatchably.
+    if (address.length > SUI_ADDRESS_CHARS) throw new TypeError("not a Sui address")
+    const canonical = normAddr(address)
+    if (!validAddr(canonical)) throw new TypeError("not a Sui address")
+    return canonical
+  },
+  asset: (coinType: string): string => {
+    // Before the SDK sees it: its parser is superlinear in nesting and runs on
+    // the agent's string, synchronously. 15 KB of nested generics blocked the
+    // event loop for 43 s, and 640 KB ended the process out of memory.
+    if (coinType.length > MAX_COIN_TYPE_CHARS || coinType.split("<").length - 1 > MAX_COIN_TYPE_GENERICS) throw new TypeError("not a plausible Sui coin type")
+    const canonical = normalizeStructTag(coinType)
+    if (!isValidStructTag(canonical) || canonical.includes("/")) throw new TypeError("not a resolved Sui coin type")
+    return canonical
+  },
+})
 /** A full-length address only: normalizing first would pad `""` to the zero address and `0x12` to a real one. */
 const validAddr = (a: string): boolean => typeof a === "string" && isValidSuiAddress(a)
 

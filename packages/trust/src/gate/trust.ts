@@ -1690,11 +1690,60 @@ interface BoundPurpose {
   readonly maxPerAction: bigint | undefined
   readonly actions: ReadonlyArray<string> | undefined
   readonly asset: string | undefined
-  readonly payment: { readonly payeeArg: string; readonly amountArg: string; readonly assetArg: string | undefined; readonly asset: string | undefined; readonly network: string } | undefined
+  readonly payment: {
+    readonly payeeArg: string
+    readonly amountArg: string
+    readonly assetArg: string | undefined
+    readonly asset: string | undefined
+    readonly network: string
+    readonly payeeSpelling: Spelling | undefined
+    readonly assetSpelling: Spelling | undefined
+  } | undefined
 }
+
+/** A rail's canonical form of a payee or asset, supplied by the host. The kernel knows no chain's spelling. */
+type Spelling = (value: string) => string
 
 const ownOf = (o: object, k: string): unknown => (Object.hasOwn(o, k) ? (o as Record<string, unknown>)[k] : undefined)
 const isStringList = (v: unknown): v is ReadonlyArray<string> => Array.isArray(v) && v.every((x) => typeof x === "string")
+
+/** Is `value` already in the form `spell` gives it? A spelling that throws, or answers with anything but that same string, says no. */
+const isSpelled = (spell: Spelling, value: string): boolean => {
+  try {
+    const answer: unknown = spell(value)
+    // A promise is no answer. One that rejects must not become an unhandled
+    // rejection, which would end the host's process on an agent's input.
+    if (typeof answer !== "string") void Promise.resolve(answer).catch(() => {})
+    return answer === value
+  } catch {
+    return false
+  }
+}
+
+/** Read `judgment.spelling` once, as own keys. An unknown key is refused: a misspelled `payee` would hold nothing to a spelling and say nothing. */
+function bindSpelling(where: string, spelling: unknown): { readonly payee: Spelling | undefined; readonly asset: Spelling | undefined } | undefined {
+  if (spelling === undefined) return undefined
+  if (typeof spelling !== "object" || spelling === null || Array.isArray(spelling)) {
+    throw new TypeError(`${where}: judgment.spelling must be { payee?, asset? }, got ${preview(spelling)}`)
+  }
+  for (const key of Object.keys(spelling)) {
+    if (key !== "payee" && key !== "asset") throw new TypeError(`${where}: judgment.spelling has an unknown key ${JSON.stringify(key)}; its keys are payee and asset`)
+  }
+  const member = (role: "payee" | "asset"): Spelling | undefined => {
+    const spell = ownOf(spelling, role)
+    if (spell !== undefined && typeof spell !== "function") throw new TypeError(`${where}: judgment.spelling.${role} must be a function, got ${preview(spell)}`)
+    return spell as Spelling | undefined
+  }
+  const payee = member("payee")
+  const asset = member("asset")
+  // `{}`, or a class whose functions live on its prototype, would look like a declared spelling and hold nothing to one.
+  if (payee === undefined && asset === undefined) throw new TypeError(`${where}: judgment.spelling must set payee or asset as its own function`)
+  // `this` is a frozen copy of the two functions read above, never the caller's
+  // object, which could answer differently once the sink is built.
+  const self = Object.freeze({ payee, asset })
+  const bound = (spell: Spelling | undefined): Spelling | undefined => (spell === undefined ? undefined : (value) => Reflect.apply(spell, self, [value]) as string)
+  return Object.freeze({ payee: bound(payee), asset: bound(asset) })
+}
 
 /**
  * Read the purpose's fields and the sink's payment mapping once, as own keys,
@@ -1706,7 +1755,7 @@ function bindPurpose(
   where: string,
   purpose: Purpose,
   requires: Readonly<Record<string, Tier>>,
-  config: { readonly purposeArgs: unknown; readonly network: unknown; readonly asset: unknown },
+  config: { readonly purposeArgs: unknown; readonly network: unknown; readonly asset: unknown; readonly spelling: unknown },
 ): BoundPurpose {
   const fieldsRaw = ownOf(purpose, "fields")
   if (fieldsRaw !== undefined && (typeof fieldsRaw !== "object" || fieldsRaw === null || Array.isArray(fieldsRaw))) {
@@ -1727,6 +1776,7 @@ function bindPurpose(
   }
 
   const { purposeArgs, network, asset } = config
+  const spelling = bindSpelling(where, config.spelling)
   let payment: BoundPurpose["payment"]
   if (purposeArgs !== undefined) {
     if (typeof purposeArgs !== "object" || purposeArgs === null) {
@@ -1752,7 +1802,19 @@ function bindPurpose(
     if (assetArg !== undefined && asset !== undefined) {
       throw new TypeError(`${where}: judgment.asset and judgment.purposeArgs.asset are both set, so the asset of a payment would be ambiguous`)
     }
-    payment = { payeeArg, amountArg, assetArg, asset: asset as string | undefined, network }
+    payment = { payeeArg, amountArg, assetArg, asset: asset as string | undefined, network, payeeSpelling: spelling?.payee, assetSpelling: spelling?.asset }
+  }
+  if (spelling !== undefined) {
+    if (payment === undefined) throw new TypeError(`${where}: judgment.spelling needs judgment.purposeArgs to name the payment it holds to a spelling`)
+    // Refused here for the same reason as the checks below: no call could satisfy it.
+    const mustBeSpelled = (field: string, spell: Spelling | undefined, values: ReadonlyArray<string>): void => {
+      if (spell !== undefined && !values.every((value) => isSpelled(spell, value))) {
+        throw new TypeError(`${where}: ${field} is not in the spelling judgment.spelling gives it, so no call could satisfy it`)
+      }
+    }
+    mustBeSpelled("judgment.granted.purpose.fields.payees", spelling.payee, payees ?? [])
+    mustBeSpelled("judgment.granted.purpose.fields.asset", spelling.asset, typeof fieldAsset === "string" ? [fieldAsset] : [])
+    mustBeSpelled("judgment.asset", spelling.asset, payment.asset === undefined ? [] : [payment.asset])
   }
   if (payees !== undefined && payment === undefined) {
     throw new TypeError(`${where}: the purpose sets payees, so judgment.purposeArgs must name the payee argument`)
@@ -1804,6 +1866,11 @@ function checkPurpose(bound: BoundPurpose, sink: string, values: Readonly<Record
   const asset = payment.assetArg === undefined ? payment.asset : ownOf(values, payment.assetArg)
   if (typeof recipient !== "string") {
     violations.push(`${payment.payeeArg} must be a string to name a payee`)
+  } else if (payment.payeeSpelling !== undefined && !isSpelled(payment.payeeSpelling, recipient)) {
+    // One payee has one spelling, or "0xABC" is a new action that escapes a
+    // doubt on "0xabc". Refused rather than rewritten, like the amount below,
+    // so what runs is what was asked for and `paymentDigest` hashes it as written.
+    violations.push(`${payment.payeeArg} is not in the spelling this sink's rail uses`)
   } else if (bound.payees !== undefined && !bound.payees.includes(recipient)) {
     violations.push(`${payment.payeeArg} is not a payee this purpose names`)
   }
@@ -1824,6 +1891,7 @@ function checkPurpose(bound: BoundPurpose, sink: string, values: Readonly<Record
     if (!within) violations.push(`${payment.amountArg} is over this purpose's maxPerAction`)
   }
   if (typeof asset !== "string") violations.push(`the payment's asset must be a string`)
+  else if (payment.assetArg !== undefined && payment.assetSpelling !== undefined && !isSpelled(payment.assetSpelling, asset)) violations.push(`${payment.assetArg} is not in the spelling this sink's rail uses`)
   else if (bound.asset !== undefined && asset !== bound.asset) violations.push(`the payment's asset is not the asset this purpose names`)
   if (violations.length > before) return null
   return Object.freeze({ payee: recipient as string, amount: String(amount), asset: asset as string, network: payment.network })
@@ -1929,6 +1997,7 @@ function bindJudge(
     readonly purposeArgs?: unknown
     readonly network?: unknown
     readonly asset?: unknown
+    readonly spelling?: unknown
     readonly blockWindowMs?: number | undefined
     readonly rationaleInRefusal?: boolean | undefined
   },
@@ -1936,7 +2005,7 @@ function bindJudge(
 ): BoundJudge {
   // `floor: undefined` made `confidence >= floor` false forever, so a
   // mismatch at 0.99 never blocked (the 2026-10-13 gate audit).
-  const { provider, floor, timeoutMs = DEFAULT_JUDGMENT_TIMEOUT_MS, granted, purposeArgs, network, asset, blockWindowMs = DEFAULT_BLOCK_WINDOW_MS, rationaleInRefusal = false } = config
+  const { provider, floor, timeoutMs = DEFAULT_JUDGMENT_TIMEOUT_MS, granted, purposeArgs, network, asset, spelling, blockWindowMs = DEFAULT_BLOCK_WINDOW_MS, rationaleInRefusal = false } = config
   if (typeof provider !== "object" || provider === null) {
     throw new TypeError(`${where}: judgment.provider must be an object with an assess() method, got ${preview(provider)}`)
   }
@@ -1971,7 +2040,7 @@ function bindJudge(
     timeoutMs,
     granted: pinned,
     purposeHash: purposeHash(pinned.purpose),
-    purpose: bindPurpose(where, pinned.purpose, requires, { purposeArgs, network, asset }),
+    purpose: bindPurpose(where, pinned.purpose, requires, { purposeArgs, network, asset, spelling }),
     blockWindowMs,
     rationaleInRefusal,
   }
@@ -2134,6 +2203,12 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
    * in its `reason` unless the sink redacts an argument, so
    * a host that wants them kept from the agent must not hand it the receipt
    * (ADR 0010).
+   *
+   * `spelling` gives the rail's canonical form of a payee and of an asset. A
+   * payee or asset argument that its function does not map to itself is
+   * refused before any judge runs, because a block or hold names the action
+   * as written and a respelling would be a new action. It needs `purposeArgs`.
+   * Without it the two are compared as written.
    */
   readonly judgment?: {
     readonly provider: JudgmentProvider
@@ -2143,6 +2218,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
     readonly purposeArgs?: { readonly payee: keyof Args & string; readonly amount: keyof Args & string; readonly asset?: keyof Args & string }
     readonly network?: string
     readonly asset?: string
+    readonly spelling?: { readonly payee?: (value: string) => string; readonly asset?: (value: string) => string }
     readonly approvalKey?: string
     readonly blockWindowMs?: number
     readonly rationaleInRefusal?: boolean
@@ -2200,6 +2276,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
             purposeArgs: judgmentField("purposeArgs"),
             network: judgmentField("network"),
             asset: judgmentField("asset"),
+            spelling: judgmentField("spelling"),
             approvalKey: judgmentField("approvalKey"),
             blockWindowMs: judgmentField("blockWindowMs"),
             rationaleInRefusal: judgmentField("rationaleInRefusal"),
