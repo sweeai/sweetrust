@@ -434,6 +434,8 @@ export type DeclassifyResult<T> =
  * attacker's own record. It must be `verified`, not merely corroborated:
  * accumulation never raises a value past `corroborated` (Rule 3a), and a
  * corroborated key that yielded a `verified` value would launder past that.
+ * The registry row is held to the same bar, and it and the candidate must be
+ * the gate's own values.
  */
 export function allowlisted<T>(
   candidate: Sourced<T>,
@@ -458,14 +460,28 @@ export function allowlisted<T>(
   if (typeof keyValue !== "string") {
     return { ok: false, reason: `the key for ${registryName} is not a string` }
   }
+  // A candidate or a row the gate did not mint is data arriving with a claim, so
+  // it is refused rather than thrown on. No method on a forged candidate runs: its
+  // `describe()` would write its own words into the evidence (DAN-1448).
+  if (!Sourced.is(candidate)) {
+    return { ok: false, reason: `the candidate for ${registryName} was not minted by the gate` }
+  }
   const entry = registry.get(keyValue)
   if (entry === undefined) {
     return { ok: false, reason: `'${keyValue}' not in ${registryName}; candidate is ${candidate.describe()}` }
+  }
+  if (!Sourced.is(entry)) {
+    return { ok: false, reason: `the ${registryName} record for this key was not minted by the gate` }
   }
   // Each Sourced is read once, here (AGENTS.md, "Intake"). The comparison
   // below and the ascent at the bottom both use these locals.
   const { value: entryValue, tier: entryTier, provenance: entryProvenance } = entry
   const { value: candidateValue } = candidate
+  // The same rule as the key: a row below `verified` coming out `verified` would
+  // launder past Rule 3a. Neither refusal echoes the record.
+  if (!meetsTier(entryTier, "verified")) {
+    return { ok: false, reason: `the ${registryName} record for this key is ${entryTier}; only a verified record can be promoted` }
+  }
 
   // The comparison runs on the CANDIDATE, so it executes candidate-controlled
   // code (`toJSON`, getters) and can throw on a circular value. A declassifier
@@ -481,6 +497,11 @@ export function allowlisted<T>(
   // match/mismatch — what comes back is the registry's record, below.
   let entryJSON: string | undefined
   try {
+    // A verified row need not have been born at an authority (`humanConfirm` makes
+    // one too). It is frozen shallowly here, before the candidate's `toJSON` runs
+    // below, so the record compared is the record promoted, and so the object the
+    // caller gets back cannot have its own fields rewritten (SECURITY.md).
+    if (typeof entryValue === "object" && entryValue !== null && !ArrayBuffer.isView(entryValue)) Object.freeze(entryValue)
     entryJSON = receiptJSON(entryValue)
   } catch (err) {
     return {
@@ -675,7 +696,7 @@ export async function humanConfirm<T>(
   // the ascent both use these locals.
   const { value: liveValue, tier: candidateTier, provenance: candidateProvenance } = candidate
   // SNAPSHOT, not a reference. A Sourced is frozen, but the object it carries
-  // is not (only `fromAuthority` freezes its value), and whoever handed it in
+  // is not (`humanConfirm` does not freeze what it mints here), and whoever handed it in
   // still holds that object. Once a human answers over a network, the await
   // below can last minutes, and a reference would let the holder rewrite the
   // value after the human saw it: shown "GB00-ALICE", promoted "DE99-EVIL"
