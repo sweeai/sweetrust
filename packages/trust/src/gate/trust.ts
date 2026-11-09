@@ -1059,8 +1059,8 @@ export interface Verdict {
   readonly confidence: number
   /**
    * For a scored verdict this attests only the text the provider returned. It
-   * says nothing about the model's reasoning, and it is an unsigned digest the
-   * gate computes, so it does not prove the provider wrote that text. When the
+   * says nothing about the model's reasoning. The gate computes it and the
+   * provider signs nothing, so it does not prove the provider wrote that text. When the
    * judge gave no answer it hashes the gate's "gave no verdict" line, which can
    * include the provider's error text.
    */
@@ -1436,9 +1436,11 @@ export interface JudgmentVerdict {
    * documentation; this interface has no field for that. The sink compares it
    * with the floor and takes it as given. One provider's number may measure only
    * how concentrated its answer is, which is not how often it is right, so a
-   * floor set for one provider or pinned model means nothing on another.
+   * floor set for one provider or pinned model means nothing on another. Outside
+   * [0,1] the sink treats the answer as no verdict.
    */
   readonly confidence: number
+  /** Required: an empty or blank string makes the answer no verdict. Free text, so it can echo what the provider saw. */
   readonly rationale: string
 }
 
@@ -1461,9 +1463,10 @@ export interface JudgmentProvider {
   /**
    * Score a proposed action against the owner's purpose. If this throws or
    * rejects, remember that an error message can echo arguments: its first line
-   * reaches the receipt unless the sink redacts an argument, and a malformed
-   * verdict's fields reach it the same way. `rationaleInRefusal` sends that text
-   * to the agent even on a sink that redacts (SECURITY.md).
+   * reaches the receipt unless the sink redacts an argument, and a string in a
+   * malformed verdict, or returned in place of one, reaches it the same way. A
+   * host that opts in with `rationaleInRefusal` sends that text to the agent even
+   * on a sink that redacts (SECURITY.md).
    */
   assess(input: JudgmentInput, signal: AbortSignal): Promise<JudgmentVerdict>
 }
@@ -2035,8 +2038,8 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
    * immediately before `execute`, and a grant no longer live is refused in
    * every mode: a revoke is the owner's word, not a tier the ladder can relax. `timeoutMs` (default 5000) is the
    * judge's deadline: at it the provider's signal fires, any later answer is
-   * discarded, and the call has no verdict: enforce holds it for the owner, while
-   * observe and warn run it unscored. Set this from the provider's real latency:
+   * discarded, and the call has no verdict: enforce holds that call, a retry asks
+   * the judge again, and observe and warn run it unscored. Set this from the provider's real latency:
    * a provider with a cold start needs a longer timeoutMs, and one that cancels
    * its own load on the signal can miss every call rather than only the first.
    *
@@ -2053,7 +2056,8 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
    * window) is how long a block stands before the judge is asked again; a
    * `match` after it is held for the owner. `rationaleInRefusal` (default false)
    * puts the judge's assessment, confidence and words back in the refusal
-   * string; the receipt always has them, its `reason` redacted per `redact`, so
+   * string. The receipt always has the assessment and confidence, and the words
+   * in its `reason` unless the sink redacts an argument, so
    * a host that wants them kept from the agent must not hand it the receipt
    * (ADR 0010).
    */
@@ -2684,7 +2688,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
       )
     }
 
-    // Judgment wall — probabilistic, self-aware. Every path out of this block
+    // Judgment wall — probabilistic, and able to abstain. Every path out of this block
     // either returns or runs on a confident match: that is I4, and the only way
     // a judged enforce sink reaches execute.
     if (judge !== undefined && snapshot !== undefined && violations.length === undeclared) {
