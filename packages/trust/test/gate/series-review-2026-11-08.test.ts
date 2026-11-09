@@ -28,6 +28,14 @@ describe("a payment amount has one spelling", () => {
     expect(state).toEqual({ calls: 0, paid: [] })
   })
 
+  it("a bigint and its decimal string are one action", async () => {
+    const { sink, state } = judged(["mismatch", "match"])
+    expect((await call(sink, "100")).ok).toBe(false)
+    const again = await sink({ to: Sourced.fromLLM("ACME", "agent", []), amount: Sourced.fromLLM(100n, "agent", []) })
+    expect(again.ok).toBe(false)
+    expect(state).toEqual({ calls: 1, paid: [] })
+  })
+
   it("CONTROL: 0 and 100 are still payable", async () => {
     for (const amount of ["0", "100"]) {
       const { sink, state } = judged(["match"])
@@ -52,10 +60,12 @@ describe("the agent cannot tell a block from a hold", () => {
 })
 
 describe("a hold under another idempotency key", () => {
-  it("says so, rather than handing back a digest this key cannot resume", async () => {
+  it("tells the host on the receipt and on held, and tells the agent nothing new", async () => {
     const { sink } = judged(["unsure", "unsure"])
-    expect((await call(sink, "100", { idempotencyKey: "A" })).ok).toBe(false)
+    const first = await call(sink, "100", { idempotencyKey: "A" })
     const second = await call(sink, "100", { idempotencyKey: "B" })
-    expect(second.refusal).toContain("another idempotency key")
+    expect(second.receipt.reason).toContain("different idempotency key")
+    expect(second.held.underAnotherKey).toBe(true)
+    expect(second.refusal).toBe(`${first.refusal}: this action already has this answer and was not judged again`)
   })
 })

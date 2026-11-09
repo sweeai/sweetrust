@@ -1047,6 +1047,8 @@ export interface Approval {
 
 /** What a held result hands back: the three digests an owner's approval must name. */
 export interface HeldAction {
+  /** Set when this hold was made under a different idempotency key; resume under that key. */
+  readonly underAnotherKey?: true
   readonly verdictDigest: string
   readonly actionDigest: string
   readonly grantHash: string
@@ -1715,6 +1717,7 @@ function snapshotAction(
   checked: Readonly<Record<string, Sourced<unknown>>>,
   violations: string[],
   idempotencyKey: string | undefined,
+  amountArg: string | undefined,
 ): ActionSnapshot | undefined {
   const values: Record<string, unknown> = Object.create(null)
   const sourced: Record<string, Sourced<unknown>> = Object.create(null)
@@ -1735,15 +1738,20 @@ function snapshotAction(
   }
   if (violations.length > before) return undefined
   try {
-    // Over the snapshot, not the original: this digest names what runs.
-    const unkeyed = actionDigest({ sink, args: values })
+    // Over the snapshot, not the original: this digest names what runs. A bigint
+    // amount digests as its decimal string, so 100n and "100" are one action and
+    // a type change cannot escape a block or a dedupe (the 2026-11-08 review).
+    const args = amountArg !== undefined && typeof values[amountArg] === "bigint"
+      ? Object.assign(Object.create(null) as Record<string, unknown>, values, { [amountArg]: String(values[amountArg]) })
+      : values
+    const unkeyed = actionDigest({ sink, args })
     return {
       values: Object.freeze(values),
       sourced: Object.freeze(sourced),
       trust: Object.freeze(trust),
       unkeyed,
       keyed: idempotencyKey !== undefined,
-      digest: idempotencyKey === undefined ? unkeyed : actionDigest({ sink, args: values, idempotencyKey }),
+      digest: idempotencyKey === undefined ? unkeyed : actionDigest({ sink, args, idempotencyKey }),
     }
   } catch {
     violations.push("the action cannot be digested and judged")
@@ -2477,7 +2485,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
       // new action, which goes through the judge by calling the sink again. Only
       // branded values can name it: `checked` also holds what failed the brand
       // check, and those are violations, not tiers to re-wrap.
-      const resumed = Object.values(checked).every((arg) => Sourced.is(arg)) ? snapshotAction(cfg.name, checked, [], idempotencyKey) : undefined
+      const resumed = Object.values(checked).every((arg) => Sourced.is(arg)) ? snapshotAction(cfg.name, checked, [], idempotencyKey, judge?.purpose.payment?.amountArg) : undefined
       if (resumed === undefined || resumed.digest !== approval.actionDigest || approval.actionDigest !== heldVerdict.actionDigest) {
         return refuse("approval-mismatch", "the resumed arguments are not the action that was held")
       }
@@ -2520,7 +2528,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
     let snapshot: ActionSnapshot | undefined
     let paymentDigestOfCall: string | null = null
     if (judge !== undefined && violations.length === undeclared) {
-      snapshot = snapshotAction(cfg.name, checked, violations, idempotencyKey)
+      snapshot = snapshotAction(cfg.name, checked, violations, idempotencyKey, judge.purpose.payment?.amountArg)
       if (snapshot !== undefined) paymentDigestOfCall = checkPurpose(judge.purpose, cfg.name, snapshot.values, violations)
     }
 
@@ -2540,12 +2548,13 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
           // and learns nothing. The receipt's reason names the verdict; the
           // refusal, which goes to the agent, does so only on the host's opt-in.
           const detail = ` (${verdict.provider}, ${verdict.assessment}, conf ${verdict.confidence})`
-          // A hold's approval resumes only under the key it was made with, so a
-          // caller on another key is told, rather than handed a digest it cannot use.
-          const answered = label === "judgment-held" && verdict.actionDigest !== action.digest
-            ? ": this action is held under another idempotency key; approve and resume under that key"
-            : ": this action already has this answer and was not judged again"
-          const reason = `⚖ ${cfg.name} ${label}${detail}${answered}`
+          // A hold's approval resumes only under the key it was made with. The host
+          // learns that from the receipt and from `held`; the refusal goes to the
+          // agent, and saying it there would tell a hold from a block.
+          const underAnotherKey = label === "judgment-held" && verdict.actionDigest !== action.digest
+          const answered = ": this action already has this answer and was not judged again"
+          const anotherKeyNote = underAnotherKey ? "; the hold was made under a different idempotency key, so approve and resume under that key" : ""
+          const reason = `⚖ ${cfg.name} ${label}${detail}${answered}${anotherKeyNote}`
           const refusal = `⚖ ${cfg.name} ${bound.rationaleInRefusal ? label : STOPPED_BY_JUDGMENT}${bound.rationaleInRefusal ? detail : ""}${answered}`
           const receipt = cfg.log.append({ at: now(), sink: cfg.name, decision: label, args: rendered, reason, verdict })
           if (label === "judgment-blocked") return { ok: false, refusal, receipt }
@@ -2553,7 +2562,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
             ok: false,
             refusal,
             receipt,
-            held: Object.freeze({ verdictDigest: verdictDigest(verdict), actionDigest: verdict.actionDigest, grantHash: verdict.grantHash }),
+            held: Object.freeze({ verdictDigest: verdictDigest(verdict), actionDigest: verdict.actionDigest, grantHash: verdict.grantHash, ...(underAnotherKey ? { underAnotherKey: true as const } : {}) }),
           }
         }
       }
