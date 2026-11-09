@@ -164,7 +164,8 @@ Stickiness holds one exact action. An argument that changes, even by one base un
 one word of a free-text field, is a new action and gets a new judge call, and this design does not
 prevent that. A block does not cover the action next to it. The sink withholds the assessment,
 confidence and rationale from the refusal by default so an agent has nothing to climb on, and that
-is undone if you hand the agent the receipt, which holds all three. What bounds an agent that keeps
+is undone if you hand the agent the receipt, which holds the assessment and confidence and, unless
+the sink redacts an argument, the rationale. What bounds an agent that keeps
 trying is the purpose's deterministic fields and the chain's own limits.
 
 ### A payee or asset is compared as written
@@ -232,6 +233,26 @@ an abort listener.
 JavaScript is blocking the event loop. A provider that spins in `assess`, or does synchronous work
 longer than `timeoutMs`, outlasts the deadline and stalls the whole process. Do blocking work off the
 main thread. Both limits apply to any code the host puts in the provider (ADR 0007).
+
+### A provider's error text reaches the receipt
+
+When a provider throws or rejects, the sink has no verdict, so it records why: `provider <name> gave
+no verdict: <the error up to its first newline, at any length>`. A receipt cannot be redacted after it is written, and an
+error message can echo the arguments the provider was handed. An HTTP client that puts the request
+in its message is enough.
+
+A provider that returns something other than a verdict reaches the receipt the same way, and not
+cut to one line: the sink quotes any string it could not accept, whether that is a field of the
+verdict or the whole return, so raw model output that echoes an argument is recorded.
+
+If the sink redacts any argument, it withholds that text and a provider's rationale from the reason
+and leaves a short hash in their place. The receipt still carries the text's full `rationaleHash`.
+Neither hash is salted, so anyone holding the receipt who can guess the text can confirm the guess. A
+sink that redacts nothing records the text as written. And a host that opts in with
+`judgment.rationaleInRefusal`, off by default, returns the same text to the agent on a fresh hold or
+block, whether or not the sink redacts.
+So keep raw values out of everything a provider throws or returns, and catch and rewrite the errors
+of any library it calls.
 
 ### A sink cannot check that `granted` belongs together
 
