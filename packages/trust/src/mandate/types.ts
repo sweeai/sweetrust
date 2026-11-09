@@ -38,9 +38,11 @@ export interface Capability<Id extends string = string> {
  *
  * The limit is recorded in the GRANT EVENT, so it is immutable and, under a
  * signed store, unforgeable; the spend is summed from the INVOKE EVENTS of the
- * same log at every use. No counter lives in memory, so the verdict is the
- * same after a restart as before one, and nothing the holder can edit changes
- * it.
+ * same log at every use. No counter lives in memory, so a restart alone
+ * changes nothing. A log whose tail was cut is a valid shorter log and does
+ * refund what it lost (SECURITY.md). Every capability key is resolved before
+ * the log is read, so no holder's object can run between the check and the
+ * record (the 2026-11-08 audit, K1).
  *
  * Three honest limits. (1) A cap binds a LEAF: a holder of a capped scope that
  * can still delegate may mint children each capped at the same amount, so cap
