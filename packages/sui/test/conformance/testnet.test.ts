@@ -123,7 +123,7 @@ describe.skipIf(!KEYS)("testnet conformance: Sui refuses every limit labeled `ch
   it("expiry: a spend after the expiry aborts with EExpired", async () => {
     const a = await open({ lifetimeCap: 1_000n, expiry: new Date(Date.now() + 25_000) }, "sweetrust-sui conformance: expiry")
     // Wait on the CHAIN's clock, not this machine's: remaining() reads 0x6.
-    for (let i = 0; i < 40 && (await sui.remaining({ allowance: a })).active; i++) await new Promise((r) => setTimeout(r, 3_000))
+    for (let i = 0; i < 40 && (await sui.remaining({ allowance: a })).active !== false; i++) await new Promise((r) => setTimeout(r, 3_000))
     const no = await sui.spend({ signer: agent, allowance: a, amount: 100n, recipient: merchant })
     await expectChainRefusal("expiry", "EExpired", no, a.allowanceId)
     expect((await sui.revoke({ signer: principal, allowance: a })).verdict).toBe("executed")

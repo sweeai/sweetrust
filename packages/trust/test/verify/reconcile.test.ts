@@ -166,8 +166,12 @@ describe("a chain failure is a refusal", () => {
     expect(run([], [], [failed("F1")])).toEqual({ ok: true, orphans: [] })
   })
 
-  test("with a receipt that claimed it executed", () => {
-    expect(run([], [suiOf("F1")], [failed("F1")])).toEqual({ ok: true, orphans: [] })
+  test("a receipt that claimed it executed contradicts the chain", () => {
+    expect(pairs(run([gateOf()], [suiOf("F1")], [failed("F1")]))).toEqual([["F1", "payment-mismatch"]])
+  })
+
+  test("an errored receipt the chain settled as failed stays a refusal", () => {
+    expect(run([gateOf()], [suiOf("F1", { verdict: "errored" })], [failed("F1")])).toEqual({ ok: true, orphans: [] })
   })
 })
 

@@ -102,3 +102,26 @@ on mainnet; this package has spent only on testnet). Tested against `@mysten/sui
   whose effects cannot be read is `errored`, with its digest, instead of throwing.
 - A chain-held limit that the handle passed to `spend()` claims but the allowance on chain does not
   hold is shown as `unchecked` ("none on chain"), never as a zero limit Sui checked.
+
+### Fixed
+
+- **A read of nothing is never read as "revoked" or "nothing moved"** (audit 2026-11-08, R2, R4).
+  A signed transaction whose outcome is unknown is `errored` with its digest, even when the
+  allowance is gone, since the spend may have landed before whatever removed it. Only an explicit
+  deleted or not-found `ObjectError`, three reads in a row, counts as absence, and a receipt or
+  status words it as "not found". A `not-found` limit line is `unchecked`; `revoked` now appears
+  only on an executed revoke's receipt. The `allowance-gone` code is renamed `allowance-not-found`
+  and means no transaction was signed; a revoke that returns it did NOT run, so it never reads as done.
+- **`remaining()` answers "could not be determined" instead of guessing.** `exists`, `active` and
+  `spendableNow` are `null` when the read cannot say, and `at` is `null` when the chain's clock
+  cannot be read (R9). It no longer borrows this machine's clock or throws on a failed read of the
+  allowance. `rate.spentInWindow` and `rate.remainingInWindow` are `null` without a clock.
+- **The receipt digest is the digest of the signed bytes** (R8). A node that answers with another
+  digest has not answered about this transaction: the adapter asks for the signed digest instead,
+  and reports `errored` when the chain cannot confirm it.
+- **`""` and short addresses are refused, not padded** (R7). `""` used to pass and burn to the zero
+  address, and `0x12` to pay a real address nobody named. `spend` refuses them with a receipt
+  (`invalid-address`); `open` does the same for a spender or a recipient list.
+- **A `Scale` binds to a coin type** (R9). `defineScale({ coinType })` names the asset; the adapter
+  applies a scale only to that coin, shows any other asset in base units, and refuses an unbound
+  scale when the adapter is constructed. The README's example binds `testUSD` to SUI.
