@@ -428,16 +428,39 @@ export type DeclassifyResult<T> =
 /**
  * Registry membership → Verified. An authority act: the value matches an
  * entry in a registry THIS deployment governs.
+ *
+ * The key is `Sourced` because it steers the ascent: it picks which record the
+ * candidate is compared against, so a key the attacker wrote can pick the
+ * attacker's own record. It must be `verified`, not merely corroborated:
+ * accumulation never raises a value past `corroborated` (Rule 3a), and a
+ * corroborated key that yielded a `verified` value would launder past that.
  */
 export function allowlisted<T>(
   candidate: Sourced<T>,
   registry: ReadonlyMap<string, Sourced<T>>,
-  key: string,
+  key: Sourced<string>,
   registryName: string,
 ): DeclassifyResult<T> {
-  const entry = registry.get(key)
+  // The brand comes first. Parsed JSON can say `tier: "verified"`, and a Proxy
+  // could answer differently on a second read; neither carries the brand.
+  if (!Sourced.is(key)) {
+    throw new TypeError("allowlisted: key must be a Sourced<string> so the gate knows where it came from. Take it from a record your host holds, never from the message: wrapping a message-derived key in Sourced.fromAuthority defeats this check (SECURITY.md)")
+  }
+  // The key is read here and nowhere after. Its rendering is quoted because an
+  // origin is a host-chosen string that can carry message text, and the evidence
+  // is what an auditor reads.
+  const { value: keyValue, tier: keyTier } = key
+  const keyShown = show(key.describe())
+  // Neither refusal echoes the key or its origin: either may be the attacker's text.
+  if (!meetsTier(keyTier, "verified")) {
+    return { ok: false, reason: `the key for ${registryName} is ${keyTier}; a key picks the record to compare against, so it must be verified` }
+  }
+  if (typeof keyValue !== "string") {
+    return { ok: false, reason: `the key for ${registryName} is not a string` }
+  }
+  const entry = registry.get(keyValue)
   if (entry === undefined) {
-    return { ok: false, reason: `'${key}' not in ${registryName}; candidate is ${candidate.describe()}` }
+    return { ok: false, reason: `'${keyValue}' not in ${registryName}; candidate is ${candidate.describe()}` }
   }
   // Each Sourced is read once, here (AGENTS.md, "Intake"). The comparison
   // below and the ascent at the bottom both use these locals.
@@ -462,7 +485,7 @@ export function allowlisted<T>(
   } catch (err) {
     return {
       ok: false,
-      reason: `'${key}' IS in ${registryName} but the ${registryName} record could not be serialized for comparison (${firstLine(err)}) — refusing rather than guessing; candidate is ${candidate.describe()}`,
+      reason: `'${keyValue}' IS in ${registryName} but the ${registryName} record could not be serialized for comparison (${firstLine(err)}) — refusing rather than guessing; candidate is ${candidate.describe()}`,
     }
   }
   let candidateJSON: string | undefined
@@ -471,13 +494,13 @@ export function allowlisted<T>(
   } catch (err) {
     return {
       ok: false,
-      reason: `'${key}' IS in ${registryName} but the candidate could not be serialized for comparison (${firstLine(err)}) — refusing rather than guessing`,
+      reason: `'${keyValue}' IS in ${registryName} but the candidate could not be serialized for comparison (${firstLine(err)}) — refusing rather than guessing`,
     }
   }
   if (entryJSON !== candidateJSON) {
     return {
       ok: false,
-      reason: `'${key}' IS in ${registryName} but the ${registryName} record does NOT match — candidate is ${candidate.describe()}`,
+      reason: `'${keyValue}' IS in ${registryName} but the ${registryName} record does NOT match — candidate is ${candidate.describe()}`,
     }
   }
 
@@ -509,7 +532,7 @@ export function allowlisted<T>(
       declassifier: "allowlisted",
       from: entryTier,
       to: "verified",
-      evidence: `matched ${registryName}[${key}] — candidate presented was ${candidate.describe()}`,
+      evidence: `matched ${registryName}[${show(keyValue)}] by key ${keyShown} — candidate presented was ${candidate.describe()}`,
       at: now(),
     }),
   }

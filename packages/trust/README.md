@@ -61,7 +61,7 @@ import type { Sourced as S } from "sweetrust/gate"
 declare const raw: string
 declare const extracted: { account: string }
 declare const PAYEE_REGISTRY: ReadonlyMap<string, S<string>>
-declare const vendor: string
+declare const po: { vendorId: string }
 declare const amount: S<number>
 declare const settle: (to: string, amount: number) => string
 -->
@@ -79,6 +79,7 @@ const pay = makeSink<{ to: Sourced<string>; amount: Sourced<number> }, string>({
 
 const email   = Sourced.fromChannel(raw, "email-inbound")
 const account = Sourced.fromLLM(extracted.account, "ExtractInvoice", [email]) // untrusted, always
+const vendor  = Sourced.fromAuthority(po.vendorId, "purchase-orders") // the key is your own record, never the email's
 const payee   = allowlisted(account, PAYEE_REGISTRY, vendor, "payee-registry") // → verified | refusal
 
 // A declassifier can REFUSE, and the refusal is the interesting branch — it is

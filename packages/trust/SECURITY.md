@@ -308,6 +308,15 @@ reference. So that nothing holding the result can rewrite the registry through i
 becomes an authority value. Nested objects, Maps and Sets inside it are not frozen; typed arrays are
 left alone. If you keep editing a record after wrapping it, wrap a copy.
 
+### `allowlisted` needs a key your host holds
+
+The key picks which record a candidate is compared against, so a key read from the message can pick
+the attacker's own record. `allowlisted` takes the key as a `Sourced<string>`, refuses one below
+`verified` without reading the registry, and records the key's tier and origin on the ascent.
+`Sourced.fromAuthority` is your claim, not a check: wrapping a value the message supplied passes
+this test and defeats it. A key a person confirmed also passes, and they vouched for that string,
+which can still have come from the message. A key that is not a `Sourced` at all is a `TypeError`.
+
 ### The ladder is three tiers
 
 `untrusted → corroborated → verified`. The spec's fourth rung, `asserted`, was never produced by any

@@ -55,7 +55,7 @@ console.log(attempt.ok ? attempt.result : attempt.refusal)
 
 // A declassifier is the only way to raise an existing value's trust. This one checks a registry you control.
 const vendors = new Map([["acme", Sourced.fromAuthority("ACCT-123", "vendor-db")]])
-const payee = allowlisted(account, vendors, "acme", "vendor-db")
+const payee = allowlisted(account, vendors, Sourced.fromAuthority("acme", "purchase-orders"), "vendor-db")
 console.log(payee.ok) // false: the email's account is not the one on file
 
 // A value the registry minted goes through.
