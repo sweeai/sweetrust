@@ -21,6 +21,19 @@ later, which is where recipients and a per-payment cap can move on chain); reser
 spends (Sui settles each spend, so `spend` is one step); and mainnet spends (the module is present
 on mainnet; this package has spent only on testnet). Tested against `@mysten/sui` 2.35.0 only.
 
+### Security
+
+- **`chainSpends` now finds a spend from what moved, not from the command list.** It lists a
+  transaction when an input withdraws from this allowance (`FUNDS_WITHDRAWAL`, `source:
+  SENDER_ALLOWANCE`), so a spend through your own Move module no longer reads clean, and the asset
+  comes from that input. A transaction that merely passes the allowance as a shared object is no
+  longer a spend, so a stranger cannot plant a false orphan for gas. `app_balance_spend` counts too.
+- **A listed spend whose credit does not equal its debit is unreadable** (`amount` and `recipient`
+  null), so a skim no longer reports the debit as the amount received. A spend of more than one
+  withdrawal in a transaction is unreadable the same way.
+- **A custom indexer that shows neither a spend nor the allowance's creation now throws**, so it
+  cannot read as "no spends". `chainSpends` trusts its indexer; see `SECURITY.md`.
+
 ### Added
 
 - **Each spend can name the verdict that approved it.** `spend` takes an optional

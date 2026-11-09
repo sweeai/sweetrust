@@ -10,7 +10,7 @@ verified_by: "git ls-files '*.move' | wc -l prints 0 (this repository ships no M
 # ADR 0008: no on-chain verdict check, so an unjudged spend is made findable instead
 
 **Status:** Accepted, 2026-11-07, when Danny approved the intent-layer spec. The rule it applies is Danny's, from 2026-10-14.
-**Implementation:** upheld. This repository contains no Move program. The reconciliation described below is not started and ships in 0.6.0.
+**Implementation:** upheld. This repository contains no Move program. The reconciliation described below is built: `chainSpends` in `packages/sui`, `reconcile` in `sweetrust/verify`.
 **Force:** principle. The absence of Move source can be checked mechanically, but the condition for revisiting this decision is a judgment about what Sui has shipped.
 **Date:** 2026-11-08 · **Extends:** ADR 0003 (adapters wrap audited on-chain programs and never ship their own)
 
@@ -82,7 +82,9 @@ such a check would read, so filling it later does not break the format.
 - The repository stays free of Move, and the kernel keeps zero runtime dependencies and makes no
   chain call. `reconcile` receives its chain data from the adapter as an argument.
 - Reading the guarantee correctly takes care. The in-process judge narrows what an honest host does.
-  The chain bounds what a dishonest host can lose. The log proves what a dishonest host skipped.
+  The chain bounds what a dishonest host can lose. `reconcile`, joining the log to the chain's
+  transaction history, proves what a dishonest host skipped, as far as the indexer it reads is honest
+  and complete (`SECURITY.md`).
   Documentation must keep those three claims apart.
 - `sweetrust-sui` gains a read path against the chain's transaction history, and that path depends
   on how much history an indexer retains.

@@ -4,6 +4,7 @@
  * indexer can stay silent without that reading as "no spends".
  */
 import { afterEach, describe, expect, it, vi } from "vitest"
+import { reconcile } from "sweetrust/verify"
 import { chainSpends } from "../src/index.ts"
 
 const ALLOWANCE = `0x${"a1".repeat(32)}`
@@ -27,13 +28,18 @@ interface TxOpts {
   status?: string | null
   changes?: unknown
   commands?: unknown
+  inputs?: unknown
   transactionJson?: unknown
   /** Who paid gas, when it is not the sender (a sponsored transaction). */
   gasOwner?: string
 }
 
-/** One node exactly as the real indexer returns it (recorded from testnet 2026-11-07). */
-function tx({ digest = "D1", sender = SENDER, status = "SUCCESS", changes = [], commands, transactionJson, gasOwner }: TxOpts) {
+/**
+ * One node in the shape the real indexer returns (recorded from testnet 2026-11-07),
+ * except that `inputs` is empty unless a test names them. Those bodies reach the
+ * no-inputs path; `a spend is what moved` below uses the real input list.
+ */
+function tx({ digest = "D1", sender = SENDER, status = "SUCCESS", changes = [], commands, inputs, transactionJson, gasOwner }: TxOpts) {
   return {
     digest,
     sender: sender === null ? null : { address: sender },
@@ -41,7 +47,7 @@ function tx({ digest = "D1", sender = SENDER, status = "SUCCESS", changes = [], 
     transactionJson: transactionJson !== undefined ? transactionJson : {
       sender,
       gasPayment: { owner: gasOwner ?? sender },
-      kind: { kind: "PROGRAMMABLE_TRANSACTION", programmableTransaction: { inputs: [], commands: commands ?? [call("balance_spend")] } },
+      kind: { kind: "PROGRAMMABLE_TRANSACTION", programmableTransaction: { inputs: inputs ?? [], commands: commands ?? [call("balance_spend")] } },
     },
   }
 }
@@ -118,6 +124,165 @@ describe("which transactions are spends", () => {
   })
 })
 
+describe("a spend is what moved, not which command ran", () => {
+  const PACKAGE = `0x${"ab".repeat(32)}`
+  const STRANGER = `0x${"cc".repeat(32)}`
+  const OTHER_ALLOWANCE = `0x${"dd".repeat(32)}`
+  const CLOCK = { kind: "SHARED", objectId: `0x${"0".repeat(63)}6`, version: "1", mutable: false, mutability: "IMMUTABLE" }
+  const shared = (objectId: string) => ({ kind: "SHARED", objectId, version: "1", mutable: true, mutability: "MUTABLE" })
+  const withdrawal = (allowance = ALLOWANCE, coinType = SUI, source = "SENDER_ALLOWANCE") => ({
+    kind: "FUNDS_WITHDRAWAL",
+    fundsWithdrawal: { amount: "500", coinType, source, funder: FUNDER, allowance },
+  })
+  const paid = [change(RECIPIENT, "500"), change(FUNDER, "-500"), change(SENDER, "-1988429")]
+  /** The input list a real spend carries: recorded from testnet 8yqHCsi6Ns9pKUE2sHr6iu4s5eLB4MndtVTWub2ZC6gV. */
+  const realInputs = [shared(ALLOWANCE), CLOCK, { kind: "PURE", pure: "NwSW7xgu" }, withdrawal()]
+  const noRecords = { gate: [], sui: [] }
+
+  it("lists a library-built spend exactly as before", async () => {
+    stub({ nodes: [tx({ digest: "HONEST", inputs: realInputs, changes: paid })] })
+    expect(await chainSpends(args)).toEqual([
+      { digest: "HONEST", status: "success", sender: SENDER, network: "sui:testnet", asset: SUI, recipient: RECIPIENT, amount: "500" },
+    ])
+  })
+
+  it("lists a spend through the spender's own module, and reconcile calls it no-receipt", async () => {
+    stub({ nodes: [tx({ digest: "WRAPPED", inputs: [shared(ALLOWANCE), CLOCK, withdrawal()], commands: [call("forward", "drain", PACKAGE)], changes: paid })] })
+    const chain = await chainSpends(args)
+    expect(chain).toEqual([
+      { digest: "WRAPPED", status: "success", sender: SENDER, network: "sui:testnet", asset: SUI, recipient: RECIPIENT, amount: "500" },
+    ])
+    const report = reconcile({ ...noRecords, chain })
+    expect(report.ok).toBe(false)
+    expect(report.orphans).toEqual([{ digest: "WRAPPED", reason: "no-receipt" }])
+  })
+
+  it("takes the asset from the input, because a wrapper's type arguments say nothing", async () => {
+    const s = await read(tx({
+      inputs: [withdrawal(ALLOWANCE, USDC)],
+      commands: [call("forward", "drain", PACKAGE, [SUI])],
+      changes: [change(FUNDER, "-100", USDC), change(RECIPIENT, "100", USDC), change(SENDER, "-777")],
+    }))
+    expect(s).toMatchObject({ asset: USDC, amount: "100", recipient: RECIPIENT })
+  })
+
+  it("a stranger touching the allowance plants no orphan, even while spending its own", async () => {
+    stub({
+      nodes: [
+        tx({ digest: "OPEN", sender: FUNDER, commands: [call("new")] }),
+        tx({ digest: "TOUCH", sender: STRANGER, inputs: [shared(ALLOWANCE)], commands: [call("touch", "drain", PACKAGE)], changes: [change(STRANGER, "-1988429")] }),
+        tx({
+          digest: "GRIEF",
+          sender: STRANGER,
+          inputs: [shared(OTHER_ALLOWANCE), shared(ALLOWANCE), withdrawal(OTHER_ALLOWANCE)],
+          commands: [call("balance_spend"), call("touch", "drain", PACKAGE)],
+          changes: [change(STRANGER, "-1988429")],
+        }),
+      ],
+    })
+    const chain = await chainSpends(args)
+    expect(chain).toEqual([])
+    expect(reconcile({ ...noRecords, chain }).ok).toBe(true)
+  })
+
+  it("a withdrawal from someone's own balance is not an allowance spend", async () => {
+    stub({ nodes: [
+      tx({ commands: [call("new")] }),
+      tx({ digest: "SELF", inputs: [shared(ALLOWANCE), withdrawal(ALLOWANCE, SUI, "SENDER")] }),
+      tx({ digest: "GAS", inputs: [shared(ALLOWANCE), withdrawal(ALLOWANCE, SUI, "SPONSOR")] }),
+    ] })
+    expect(await chainSpends(args)).toEqual([])
+  })
+
+  it("matches the allowance however its id is written", async () => {
+    const upper = `0x${"A1".repeat(32)}`
+    stub({ nodes: [tx({ digest: "CASED", inputs: [withdrawal(upper)], commands: [call("forward", "drain", PACKAGE)], changes: paid })] })
+    expect(await chainSpends({ ...args, allowanceId: upper })).toHaveLength(1)
+    const short = `0x${"0".repeat(61)}abc`
+    stub({ nodes: [tx({ digest: "SHORT", inputs: [withdrawal("0xabc")], commands: [call("forward", "drain", PACKAGE)], changes: paid })] })
+    expect((await chainSpends({ ...args, allowanceId: short })).map((c) => c.digest)).toEqual(["SHORT"])
+  })
+
+  it("lists an app_balance_spend, with an input and in a body that has none", async () => {
+    const appCall = call("app_balance_spend", "allowance", TWO, [SUI, `${PACKAGE}::a::A`])
+    const withInput = await read(tx({ inputs: realInputs, commands: [appCall], changes: paid }))
+    expect(withInput).toMatchObject({ amount: "500", recipient: RECIPIENT })
+    const bare = await read(tx({ inputs: [], commands: [appCall], changes: paid }))
+    expect(bare).toMatchObject({ asset: SUI, amount: "500", recipient: RECIPIENT })
+  })
+
+  it("counts withdrawals, not calls: two inside one wrapper call are unreadable", async () => {
+    const s = await read(tx({ inputs: [withdrawal(), withdrawal()], commands: [call("forward", "drain", PACKAGE)], changes: paid }))
+    expect(s).toMatchObject({ status: "success", amount: null, recipient: null })
+  })
+
+  it("a second allowance's withdrawal mixes the changes, so the payment is unreadable", async () => {
+    const s = await read(tx({ inputs: [withdrawal(), withdrawal(OTHER_ALLOWANCE)], commands: [call("forward", "drain", PACKAGE)], changes: paid }))
+    expect(s).toMatchObject({ status: "success", amount: null, recipient: null })
+  })
+
+  it("a refused wrapper spend is listed as a failure, and reconcile calls it a refusal", async () => {
+    stub({ nodes: [tx({ digest: "REFUSED", status: "FAILURE", inputs: [withdrawal()], commands: [call("forward", "drain", PACKAGE)], changes: [change(SENDER, "-1000")] })] })
+    const chain = await chainSpends(args)
+    expect(chain).toMatchObject([{ digest: "REFUSED", status: "failure", asset: SUI, amount: null, recipient: null }])
+    expect(reconcile({ ...noRecords, chain }).ok).toBe(true)
+  })
+
+  it("over-reports a withdrawal the spender named and dropped, and that fails closed", async () => {
+    stub({ nodes: [tx({ digest: "DROPPED", inputs: [shared(ALLOWANCE), withdrawal()], commands: [call("touch", "drain", PACKAGE)], changes: [change(SENDER, "-1988429")] })] })
+    const chain = await chainSpends(args)
+    expect(chain).toMatchObject([{ digest: "DROPPED", status: "success", amount: null, recipient: null }])
+    expect(reconcile({ ...noRecords, chain }).orphans).toEqual([{ digest: "DROPPED", reason: "no-receipt" }])
+  })
+
+  it("a withdrawal named and dropped beside a payment from the sender's own coin is unreadable", async () => {
+    const s = await read(tx({
+      inputs: [shared(ALLOWANCE), withdrawal(ALLOWANCE, USDC)],
+      commands: [call("touch", "drain", PACKAGE)],
+      changes: [change(SENDER, "-500", USDC), change(RECIPIENT, "500", USDC), change(SENDER, "-777")],
+    }))
+    expect(s).toMatchObject({ status: "success", amount: null, recipient: null })
+  })
+
+  it("a debit from anyone but the declared funder is unreadable", async () => {
+    const s = await read(tx({
+      inputs: [withdrawal(ALLOWANCE, USDC)],
+      commands: [call("forward", "drain", PACKAGE)],
+      changes: [change(OTHER, "-100", USDC), change(RECIPIENT, "100", USDC), change(SENDER, "-777")],
+    }))
+    expect(s).toMatchObject({ status: "success", amount: null, recipient: null })
+  })
+
+  it("throws on an input it cannot read, rather than ruling a spend out", async () => {
+    const bad = [
+      null,
+      "x",
+      {},
+      { kind: "FUNDS_WITHDRAWAL" },
+      { kind: "FUNDS_WITHDRAWAL", fundsWithdrawal: {} },
+      { kind: "FUNDS_WITHDRAWAL", fundsWithdrawal: { source: "SENDER_ALLOWANCE" } },
+      { kind: "FUNDS_WITHDRAWAL", fundsWithdrawal: { source: "SENDER_ALLOWANCE", allowance: "nope" } },
+      { kind: "FUNDS_WITHDRAWAL", fundsWithdrawal: { source: "SENDER_ALLOWANCE", allowance: ALLOWANCE, coinType: SUI } },
+      { kind: "FUNDS_WITHDRAWAL", fundsWithdrawal: { source: "SPONSOR_ALLOWANCE", allowance: ALLOWANCE, coinType: SUI } },
+    ]
+    for (const input of bad) {
+      stub({ nodes: [tx({ inputs: [input] })] })
+      await expect(chainSpends(args)).rejects.toThrow(/ruled out/)
+    }
+  })
+
+  it("throws when a transaction comes back without its inputs", async () => {
+    stub({ nodes: [tx({ transactionJson: { kind: { kind: "PROGRAMMABLE_TRANSACTION", programmableTransaction: { commands: [] } } } })] })
+    await expect(chainSpends(args)).rejects.toThrow(/inputs/)
+  })
+
+  it("throws when a withdrawal does not say which coin it spent", async () => {
+    const noCoin = { kind: "FUNDS_WITHDRAWAL", fundsWithdrawal: { source: "SENDER_ALLOWANCE", allowance: ALLOWANCE, funder: FUNDER } }
+    stub({ nodes: [tx({ inputs: [noCoin], changes: paid })] })
+    await expect(chainSpends(args)).rejects.toThrow(/which coin/)
+  })
+})
+
 describe("amount and recipient, from balance changes", () => {
   const usdc = [call("balance_spend", "allowance", TWO, [USDC])]
 
@@ -136,19 +301,19 @@ describe("amount and recipient, from balance changes", () => {
     expect(s).toMatchObject({ amount: "100", recipient: RECIPIENT })
   })
 
-  it("names the sender as recipient when the sender's net change is positive", async () => {
+  it("a SUI credit to the gas-paying sender is unreadable: that line is the credit minus the gas", async () => {
     const s = await read(tx({ changes: [change(FUNDER, "-5000000"), change(SENDER, "3000000")] }))
-    expect(s).toMatchObject({ amount: "5000000", recipient: SENDER })
+    expect(s).toMatchObject({ status: "success", amount: null, recipient: null })
   })
 
-  it("names the sender as recipient when gas outweighs what it received (SUI)", async () => {
+  it("a SUI debit with no credit is unreadable: gas alone cannot show the sender received it", async () => {
     const s = await read(tx({ changes: [change(FUNDER, "-600"), change(SENDER, "-1987840")] }))
-    expect(s).toMatchObject({ amount: "600", recipient: SENDER })
+    expect(s).toMatchObject({ status: "success", amount: null, recipient: null })
   })
 
-  it("a non-SUI debit nobody received has no recipient: gas cannot hide a credit there", async () => {
+  it("a non-SUI debit nobody received is unreadable: gas cannot hide a credit there", async () => {
     const s = await read(tx({ commands: usdc, changes: [change(FUNDER, "-100", USDC), change(SENDER, "-777")] }))
-    expect(s).toMatchObject({ amount: "100", recipient: null })
+    expect(s).toMatchObject({ status: "success", amount: null, recipient: null })
   })
 
   it("a sender who is the funder, non-SUI: the sender's debit is the amount", async () => {
@@ -186,9 +351,34 @@ describe("amount and recipient, from balance changes", () => {
     expect(s).toMatchObject({ amount: "600", recipient: RECIPIENT })
   })
 
-  it("a sponsored SUI spend with no credit: the sender paid no gas, so nothing hides one", async () => {
+  it("a sponsored SUI spend with no credit is unreadable: the sender paid no gas, so nothing hides one", async () => {
     const s = await read(tx({ gasOwner: SPONSOR, changes: [change(FUNDER, "-600"), change(SPONSOR, "-1092112")] }))
-    expect(s).toMatchObject({ amount: "600", recipient: null })
+    expect(s).toMatchObject({ status: "success", amount: null, recipient: null })
+  })
+
+  it("a skim is unreadable: the funder lost more than the one recipient gained", async () => {
+    const s = await read(tx({ commands: usdc, changes: [change(FUNDER, "-1000", USDC), change(RECIPIENT, "600", USDC), change(SENDER, "-777")] }))
+    expect(s).toMatchObject({ status: "success", amount: null, recipient: null })
+  })
+
+  it("a skim on SUI is unreadable: the difference can hide in the sender's gas line", async () => {
+    const s = await read(tx({ changes: [change(FUNDER, "-1000"), change(RECIPIENT, "600"), change(SENDER, "-1988029")] }))
+    expect(s).toMatchObject({ amount: null, recipient: null })
+  })
+
+  it("a skim the sender keeps beside another credit is unreadable", async () => {
+    const s = await read(tx({ changes: [change(FUNDER, "-1000"), change(RECIPIENT, "600"), change(SENDER, "300")] }))
+    expect(s).toMatchObject({ amount: null, recipient: null })
+  })
+
+  it("a recipient paid more than the funder lost is unreadable", async () => {
+    const s = await read(tx({ commands: usdc, changes: [change(FUNDER, "-5", USDC), change(SENDER, "-3", USDC), change(RECIPIENT, "8", USDC)] }))
+    expect(s).toMatchObject({ amount: null, recipient: null })
+  })
+
+  it("a sender who funds a non-SUI spend and credits less than it lost is unreadable", async () => {
+    const s = await read(tx({ commands: usdc, changes: [change(SENDER, "-1000", USDC), change(RECIPIENT, "600", USDC)] }))
+    expect(s).toMatchObject({ amount: null, recipient: null })
   })
 
   it("a sponsor who also funds a non-SUI spend is still the funder", async () => {
@@ -294,6 +484,37 @@ describe("silence never reads as no spends", () => {
     await expect(chainSpends(args)).rejects.toThrow(/status/i)
     stub({ nodes: [tx({ sender: null })] })
     await expect(chainSpends(args)).rejects.toThrow(/sender/i)
+  })
+})
+
+describe("a custom indexer that may keep only part of the history", () => {
+  const custom = { ...args, graphqlUrl: "http://127.0.0.1:9125/graphql" }
+  const touch = tx({ digest: "TOUCH", inputs: [{ kind: "SHARED", objectId: ALLOWANCE, mutable: true }], commands: [{ moveCall: { package: `0x${"ab".repeat(32)}`, module: "drain", function: "touch", typeArguments: [], arguments: [] } }] })
+
+  it("throws when it shows neither a spend nor the allowance's creation", async () => {
+    stub({ nodes: [touch] })
+    await expect(chainSpends(custom)).rejects.toThrow(/part of the history/)
+  })
+  it("reads as no spends once the creation is in view", async () => {
+    stub({ nodes: [tx({ digest: "OPEN", commands: [call("new")] }), touch] })
+    expect(await chainSpends(custom)).toEqual([])
+  })
+  it("a stranger's own allowance::new beside the target does not count as its creation", async () => {
+    stub({ nodes: [tx({ digest: "FAKE-OPEN", inputs: [{ kind: "SHARED", objectId: ALLOWANCE, mutable: true }], commands: [call("new")] })] })
+    await expect(chainSpends(custom)).rejects.toThrow(/part of the history/)
+  })
+  it("recognizes a creation with no allowance command, as an app-bound open has", async () => {
+    stub({ nodes: [tx({ digest: "APP-OPEN", commands: [{ moveCall: { package: `0x${"ab".repeat(32)}`, module: "app", function: "issue_it", typeArguments: [], arguments: [] } }] })] })
+    expect(await chainSpends(custom)).toEqual([])
+  })
+  it("returns a partial answer that does contain spends as it stands", async () => {
+    const withdrawal = { kind: "FUNDS_WITHDRAWAL", fundsWithdrawal: { amount: "1", coinType: SUI, source: "SENDER_ALLOWANCE", funder: FUNDER, allowance: ALLOWANCE } }
+    stub({ nodes: [tx({ digest: "SPEND", inputs: [withdrawal], changes: [change(FUNDER, "-1"), change(RECIPIENT, "1")] })] })
+    expect((await chainSpends(custom)).map((s) => s.digest)).toEqual(["SPEND"])
+  })
+  it("the public endpoint is not held to it", async () => {
+    stub({ nodes: [touch] })
+    expect(await chainSpends(args)).toEqual([])
   })
 })
 

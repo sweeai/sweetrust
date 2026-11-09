@@ -111,6 +111,8 @@ unchanged. Only a judged sink's receipts change shape (ADR 0009).
   finds it afterward, by comparing the chain with your records.
 - **`reconcile` catches bypass and omission, not forgery by the log key's holder.** It also does
   not surface a verdict that executed at the gate with no payment leaving: that is not a payment.
+- **`reconcile` is only as true as its chain list**, and `sweetrust-sui`'s `chainSpends` reads an
+  unauthenticated indexer. `SECURITY.md` now says what that means.
 - **The first end-to-end run used the stand-in judge.** It proves the records join, not that any
   model judges well.
 
