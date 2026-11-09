@@ -8,7 +8,7 @@ It wraps Sui's native allowance (`0x2::allowance`) behind SweeTrust's chain-agno
 npm i sweetrust-sui @mysten/sui sweetrust
 ```
 
-`@mysten/sui` (≥ 2.35.0) and `sweetrust` (0.6.x) are peer dependencies. Node ≥ 22, because `@mysten/sui` needs it.
+`@mysten/sui` (≥ 2.35.0) and `sweetrust` (0.7.x) are peer dependencies. Node ≥ 22, because `@mysten/sui` needs it.
 
 ---
 

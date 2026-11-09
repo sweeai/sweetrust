@@ -192,6 +192,8 @@ const normAddr = (a: string): string => normalizeSuiAddress(a)
 /** Far above a real coin type: an address, two 128-character identifiers, and room for a few type arguments. */
 const MAX_COIN_TYPE_CHARS = 1024
 const MAX_COIN_TYPE_GENERICS = 16
+/** `0x` and 64 hex digits, the longest a canonical address can be. */
+const SUI_ADDRESS_CHARS = 66
 /**
  * Sui's canonical spelling of a payee and a coin type, for a judged sink's
  * `judgment.spelling`. A sink holding its payment to this refuses a respelled
@@ -204,6 +206,8 @@ const MAX_COIN_TYPE_GENERICS = 16
  */
 export const suiPaymentSpelling = Object.freeze({
   payee: (address: string): string => {
+    // Before lowercasing: an agent string past V8's maximum once lowercased ends the process, uncatchably.
+    if (address.length > SUI_ADDRESS_CHARS) throw new TypeError("not a Sui address")
     const canonical = normAddr(address)
     if (!validAddr(canonical)) throw new TypeError("not a Sui address")
     return canonical

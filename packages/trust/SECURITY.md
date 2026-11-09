@@ -176,8 +176,9 @@ it was given. `judgment.spelling` takes your rail's canonical form of a payee an
 other spelling is refused before a judge runs; on Sui, pass `suiPaymentSpelling` from `sweetrust-sui`.
 `payees` and `asset` in the purpose refuse a variant too, because a variant is not on the list. The
 functions in `spelling` run on agent-supplied strings inside the sink, so they must be pure and fast.
-A hold or block recorded under another spelling before you set this does not carry over to the
-canonical one. This closes respelling only. Any other argument that changes, such as a memo, is
+In `observe` and `warn` a respelling is a recorded violation and is not judged, like any other
+purpose violation, so a trial in those modes has no verdict for that call. A hold or block recorded
+under another spelling before you set this does not carry over to the canonical one. This closes respelling only. Any other argument that changes, such as a memo, is
 still a new action (see *A changed argument is a new action*).
 
 ### A judge outage holds the call and leaves nothing behind

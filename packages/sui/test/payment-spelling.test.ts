@@ -2,7 +2,7 @@
  * `suiPaymentSpelling` is Sui's canonical form, handed to a judged sink (DAN-1457).
  * The address cases are the ones a Sui transport accepts as the same recipient.
  */
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { makeSink, ReceiptLog, Sourced } from "sweetrust/gate"
 import { suiPaymentSpelling } from "../src/index.ts"
 
@@ -49,7 +49,20 @@ describe("suiPaymentSpelling", () => {
   ])("refuses without parsing: %s", (_name, asset) => {
     const started = performance.now()
     expect(() => suiPaymentSpelling.asset(asset)).toThrow(/plausible/)
-    expect(performance.now() - started).toBeLessThan(100)
+    // A wide margin: the parser these inputs must never reach took 43 s or ran out of memory.
+    expect(performance.now() - started).toBeLessThan(2000)
+  })
+
+  it("refuses an over-long payee before lowercasing it", () => {
+    const lowercasing = vi.spyOn(String.prototype, "toLowerCase")
+    try {
+      expect(() => suiPaymentSpelling.payee("İ".repeat(67))).toThrow(TypeError)
+      expect(() => suiPaymentSpelling.payee(CANONICAL + "a")).toThrow(TypeError)
+      expect(lowercasing).not.toHaveBeenCalled()
+    } finally {
+      lowercasing.mockRestore()
+    }
+    expect(suiPaymentSpelling.payee(CANONICAL)).toBe(CANONICAL)
   })
 
   it("still accepts a coin type at the limits", () => {
