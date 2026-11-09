@@ -317,6 +317,9 @@ the attacker's own record. `allowlisted` takes the key as a `Sourced<string>`, r
 this test and defeats it. A key a person confirmed also passes, and they vouched for that string,
 which can still have come from the message. A key that is not a `Sourced` at all is a `TypeError`.
 
+The row it promotes must be `verified` and the gate's own, and so must the candidate be the gate's
+own value: a row built with `Sourced.fromChannel`, or parsed from JSON that claims a tier, is refused.
+
 ### The ladder is three tiers
 
 `untrusted → corroborated → verified`. The spec's fourth rung, `asserted`, was never produced by any
