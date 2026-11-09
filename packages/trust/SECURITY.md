@@ -266,6 +266,14 @@ log line that says less. It does not catch paraphrase
 framing untrusted text clearly and constraining what the model may output. Do not rely on forcing
 a tool call for that: some current models reject forced `tool_choice`.
 
+### A settle lowers the count on the host's word
+
+`settleCapability` records what a held call really cost, and the limit counts that figure from then on
+(ADR 0011). `actual` is the host's declaration, the same as `amount`: a host that reports too little
+makes the cap count too little. The kernel holds what it can: a hold settles down and at most once, and
+a `settle` line that names no earlier invoke, is out of range, or shares its hold id with another is
+ignored. Whoever holds the client can settle, so hand an agent its scope, never the client.
+
 ### Amounts are JavaScript numbers
 
 A cap is summed in double precision, so past 2^53 an addition stops changing the total: a cap of

@@ -452,6 +452,40 @@ describe("mandate: every exported function reads its args bag, and each capabili
     )
   })
 
+  test("settleCapability — success (the settle is recorded once), and a refusal", () => {
+    const HOLD = "a".repeat(32)
+    const held = () => {
+      const { audit, agent } = chain()
+      const trust = createTrust({ store: audit })
+      trust.useCapability({ mandate: agent, capability: Read, amount: 10, holdId: HOLD, triggerSource: "code" })
+      return { audit, agent, trust }
+    }
+    sameVerdict(
+      "settleCapability",
+      () => {
+        const { audit, agent, trust } = held()
+        trust.settleCapability({ mandate: agent, capability: Read, holdId: HOLD, actual: 1, triggerSource: "code" })
+        return audit.query(agent.id).filter((e) => e.type === "settle").length
+      },
+      () => {
+        const { audit, agent, trust } = held()
+        trust.settleCapability(poison({ mandate: agent, capability: poison(Read), holdId: HOLD, actual: 1, triggerSource: "code" as const }))
+        return audit.query(agent.id).filter((e) => e.type === "settle").length
+      },
+    )
+    sameVerdict(
+      "settleCapability (refused)",
+      () => {
+        const { agent, trust } = held()
+        return trust.settleCapability({ mandate: agent, capability: Read, holdId: HOLD, actual: 11 })
+      },
+      () => {
+        const { agent, trust } = held()
+        return trust.settleCapability(poison({ mandate: agent, capability: poison(Read), holdId: HOLD, actual: 11 }))
+      },
+    )
+  })
+
   test("useCapability — success (the invoke is recorded once), and the out-of-scope refusal", () => {
     sameVerdict(
       "useCapability",

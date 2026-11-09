@@ -59,6 +59,9 @@ const formatSigned = (e: SignedMandateAuditEvent): string => {
     case "resume":
       body = `RESUME    ${e.payload.mandateId}  by ${e.payload.resumedBy}`
       break
+    case "settle":
+      body = `SETTLE    ${e.payload.mandateId}  cap=${e.payload.capability}  actual=${e.payload.actual}`
+      break
   }
   return `${triggerSrc} sig=${sigPrefix}.. prev=${prevPrefix}.. ${body}`
 }

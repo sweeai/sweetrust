@@ -31,7 +31,8 @@ export interface Capability<Id extends string = string> {
  * CapabilityLimit — how much of one capability a grant allows (DAN-1319).
  *
  * `amount` caps the SUM of `amount`s passed to `useCapability` for the
- * capability; `count` caps the number of uses; `windowMs` makes both rolling
+ * capability, where an invoke with a valid settle counts at its `actual` instead
+ * (ADR 0011); `count` caps the number of uses; `windowMs` makes both rolling
  * (only uses inside the last `windowMs` count), and absent means for the life
  * of the mandate. `unit` is a label the kernel compares for equality at
  * delegation and never interprets: "USD", "SUI", "emails" are all fine.
@@ -235,6 +236,47 @@ export type MandateError =
       readonly received: unknown
     }
   | {
+      // Raised by `settleCapability` when no invoke on this mandate and
+      // capability carries the hold id. A settle cannot name someone else's
+      // hold (ADR 0011). Each `MandateSettle*` refusal writes nothing.
+      readonly _tag: "MandateSettleUnknownHold"
+      readonly mandateId: MandateId
+      readonly capability: string
+      readonly holdId: string
+    }
+  | {
+      // The held invoke declared no finite amount, so there is nothing to
+      // settle down from.
+      readonly _tag: "MandateSettleNoAmount"
+      readonly mandateId: MandateId
+      readonly capability: string
+      readonly holdId: string
+    }
+  | {
+      // `actual` is above the held amount. A settle only ever goes down.
+      readonly _tag: "MandateSettleAboveAmount"
+      readonly mandateId: MandateId
+      readonly capability: string
+      readonly holdId: string
+      readonly amount: number
+      readonly actual: number
+    }
+  | {
+      // A settle for this hold id is already in the log, whether or not the
+      // counter honors it. A hold settles at most once.
+      readonly _tag: "MandateSettleDuplicate"
+      readonly mandateId: MandateId
+      readonly capability: string
+      readonly holdId: string
+    }
+  | {
+      // Two invokes on this mandate carry the hold id. An ambiguous hold never settles.
+      readonly _tag: "MandateSettleAmbiguousHold"
+      readonly mandateId: MandateId
+      readonly capability: string
+      readonly holdId: string
+    }
+  | {
       // Raised at delegation when the child's limit on a capability is looser
       // than the grantor's RECORDED limit, or absent where the grantor has
       // one: a larger `amount` or `count`, a
@@ -320,7 +362,7 @@ export type MandateError =
  * code path do this directly?" must be answerable from the log alone. Both are
  * legitimate; both are audited; the distinction is for forensics.
  *
- * Every entry point (the three issuers, `useCapability`, `revokeMandate`)
+ * Every entry point (the three issuers, `useCapability`, `settleCapability`, `revokeMandate`)
  * defaults to `"code"`. A host that drives them from an external system passes
  * `"external"` explicitly.
  */
@@ -357,6 +399,27 @@ export interface MandateInvocationEvent {
   readonly amount?: number
   /** The digest of the verdict that approved this use, as the host states it: 64 lowercase hex (DAN-1385). Signed with the event, never recomputed or checked against a verdict here. Absent when the host named none, so an unjudged invoke's bytes do not move. */
   readonly verdictDigest?: string
+  /** The caller's name for this hold, 32 lowercase hex, so a later `settle` event can point at it (ADR 0011). Absent when the caller named none, so an invoke with no hold keeps its bytes. */
+  readonly holdId?: string
+}
+
+/**
+ * MandateSettleEvent — what a held invoke really cost (ADR 0011). The log is
+ * append-only, so the real cost is a new record and the invoke is never edited.
+ * `actual` is the host's declaration, as `amount` is. A settle that fails the
+ * counter's rule (no matching earlier invoke, out of range, or one of two for a
+ * hold) is ignored, and its invoke counts at `amount`.
+ */
+export interface MandateSettleEvent {
+  readonly type: "settle"
+  readonly mandateId: MandateId
+  readonly capability: string
+  /** The `holdId` of the invoke this settles. */
+  readonly holdId: string
+  /** Finite, non-negative, at most the invoke's `amount`, in the cap's unit. */
+  readonly actual: number
+  readonly timestamp: ISO8601
+  readonly triggerSource: TriggerSource
 }
 
 /**
@@ -422,6 +485,7 @@ export interface MandateResumeEvent {
 export type MandateAuditEvent =
   | MandateGrantEvent
   | MandateInvocationEvent
+  | MandateSettleEvent
   | MandateRevokeEvent
   | MandateHumanContextEvent
   | MandateResumeEvent

@@ -22,6 +22,7 @@ export type {
   MandateResumeEvent,
   MandateRevokeEvent,
   MandateScope,
+  MandateSettleEvent,
   MandateTier,
   ResumedScope,
   Signed,

@@ -147,6 +147,14 @@ unchanged. Only a judged sink's receipts change shape (ADR 0009).
 
 ### Added
 
+- **A hold can settle to its real cost (ADR 0011, amending ADR 0005).** `useCapability` takes an
+  optional `holdId`, and `trust.settleCapability({ mandate, capability, holdId, actual })` records what
+  the call really cost as a new `settle` event. The limit then counts `actual` in place of the invoke's
+  `amount`, at the invoke's own time and still as one call. A settle only goes down and lands at most
+  once, and it works on a revoked mandate. Anything the rule would not honor is refused and writes
+  nothing, and a bad `settle` line already in a log is ignored, so its invoke counts at `amount`. An
+  invoke with no `holdId` keeps its signed bytes. **Breaking** for a consumer that switches exhaustively
+  on `MandateAuditEvent` (a new `settle` member) or `MandateError` (five new `MandateSettle*` tags).
 - **`ReceiptLog.fromReceipts` and `SignedReceiptLog.fromSigned`** seed a new log from prior receipts,
   checking the chain and, for the signed log, every signature under the signer's key. A judged
   sink's blocks, holds and attempts last only as long as its log, so this is what lets them survive

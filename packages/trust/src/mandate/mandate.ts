@@ -22,7 +22,9 @@ import type {
   MandateError,
   MandateGrantEvent,
   MandateId,
+  MandateInvocationEvent,
   MandateScope,
+  MandateSettleEvent,
   MandateTier,
   ResumedScope,
   TriggerSource,
@@ -413,8 +415,9 @@ const resolveCapabilityIds = (caps: ReadonlyArray<Capability>): ReadonlyArray<st
 // A grant may cap a capability by amount, count and rolling window. The cap is
 // written into the grant event, which is the only record enforcement reads;
 // the spend is summed from the invoke events of the same log. No counter is
-// kept in memory, so a restart changes nothing and nothing the holder can
-// reach can lower what was spent. The scope carries a frozen mirror of the
+// kept in memory, so a restart changes nothing and nothing the holder of a scope
+// can reach can lower what was spent. A client holder can, by settling a hold
+// down to its real cost, on its own word (ADR 0011). The scope carries a frozen mirror of the
 // limits for the host's convenience; it is not consulted for the verdict.
 //
 // A bad limit at ISSUE is a programmer error (a `TypeError`, as `createTrust`
@@ -718,6 +721,63 @@ const assertPurposeWithinGrantor = (
   assertPurposeNarrows(grantorMandateId, parentPurpose, childPurpose)
 }
 
+/** One hold id's records in a mandate's log, each with its position, so "follows" is a log order and never a clock. */
+interface HoldRecords {
+  readonly invokes: Array<{ readonly event: MandateInvocationEvent; readonly index: number }>
+  readonly settles: Array<{ readonly event: MandateSettleEvent; readonly index: number }>
+}
+
+/**
+ * Every hold id in `events`, with its invokes and settles across ALL of the
+ * mandate's capabilities: a hold id names one call on the mandate, so a twin on
+ * another capability is what makes it ambiguous. A `Map`, so a hold id off an
+ * unsigned line cannot reach a prototype; non-string ids are left out, and no
+ * issuer can have written one.
+ */
+const collectHolds = (events: ReadonlyArray<MandateAuditEvent>): ReadonlyMap<string, HoldRecords> => {
+  const holds = new Map<string, HoldRecords>()
+  const entry = (holdId: string): HoldRecords => {
+    let found = holds.get(holdId)
+    if (found === undefined) {
+      found = { invokes: [], settles: [] }
+      holds.set(holdId, found)
+    }
+    return found
+  }
+  events.forEach((event, index) => {
+    if (event.type === "invoke" && typeof event.holdId === "string") {
+      entry(event.holdId).invokes.push({ event, index })
+    } else if (event.type === "settle" && typeof event.holdId === "string") {
+      entry(event.holdId).settles.push({ event, index })
+    }
+  })
+  return holds
+}
+
+/**
+ * The one counting rule (ADR 0011): the real cost of each validly settled hold,
+ * by hold id. Valid means exactly one invoke and exactly one settle carry the
+ * id, the settle follows the invoke in the log and names its capability, and
+ * `actual` is finite and within 0…`amount`. A settle that is anything else is
+ * ignored, so its invoke counts at `amount`: a bad line can never lower the
+ * count. `settleCapability` refuses to write what this would ignore.
+ */
+const settledActuals = (events: ReadonlyArray<MandateAuditEvent>): ReadonlyMap<string, number> => {
+  const actuals = new Map<string, number>()
+  for (const [holdId, { invokes, settles }] of collectHolds(events)) {
+    if (invokes.length !== 1 || settles.length !== 1) continue
+    const invoke = invokes[0]!
+    const settle = settles[0]!
+    const { amount } = invoke.event
+    const { actual } = settle.event
+    if (settle.index < invoke.index) continue
+    if (settle.event.capability !== invoke.event.capability) continue
+    if (!isFiniteNonNegative(amount) || !isFiniteNonNegative(actual) || actual > amount) continue
+    actuals.set(holdId, actual)
+  }
+  return actuals
+}
+
 /**
  * The limit verdict at use. `events` is the one snapshot of the mandate's log
  * this call already took; `amountRaw` is the caller's `amount`, read once.
@@ -742,13 +802,16 @@ const assertWithinLimit = (
     failMandate({ _tag: "MandateAmountRequired", mandateId, capability: capId })
   }
   const since = limit.windowMs === undefined ? Number.NEGATIVE_INFINITY : now - limit.windowMs
+  const actuals = settledActuals(events)
   let usedAmount = 0
   let usedCount = 0
   for (const e of events) {
+    // The invoke's own timestamp decides the window, and it counts as one call
+    // whatever it settled to, so settling never moves spend into another window.
     if (e.type !== "invoke" || e.capability !== capId) continue
     if (Date.parse(e.timestamp) < since) continue
     usedCount += 1
-    usedAmount += e.amount ?? 0
+    usedAmount += (e.holdId === undefined ? undefined : actuals.get(e.holdId)) ?? e.amount ?? 0
   }
   const requested = amount ?? 0
   const overCount = limit.count !== undefined && usedCount + 1 > limit.count
@@ -923,6 +986,25 @@ const captureVerdictDigest = (args: object): string | undefined => {
   return raw
 }
 
+const HOLD_ID = /^[0-9a-f]{32}$/
+
+/**
+ * The caller's `holdId`: own key only, read once, undefined when absent (ADR
+ * 0011). The `typeof` comes first because a regex test would coerce an array or
+ * a `String` object into a pass, and only a primitive may reach the signed bytes
+ * (the 2026-11-08 audit, K2). A malformed id is a programmer error, a
+ * `TypeError`, before any authority decision.
+ */
+const captureHoldId = (args: object, where: "useCapability" | "settleCapability"): string | undefined => {
+  if (!Object.hasOwn(args, "holdId")) return undefined
+  const raw: unknown = (args as { readonly holdId?: unknown }).holdId
+  if (raw === undefined) return undefined
+  if (typeof raw !== "string" || !HOLD_ID.test(raw)) {
+    throw new TypeError(`${where}: holdId must be 32 lowercase hex characters`)
+  }
+  return raw
+}
+
 /**
  * useCapability — invoke a capability under a mandate.
  *
@@ -949,6 +1031,8 @@ export const useCapability = <
   readonly amount?: number
   /** The digest of the verdict that approved this use: 64 lowercase hex, else a TypeError (DAN-1385). */
   readonly verdictDigest?: string
+  /** The caller's name for this hold, for a later `settleCapability`: 32 lowercase hex, else a TypeError (ADR 0011). */
+  readonly holdId?: string
 }, audit: MandateAuditService): void => {
   // Every caller-supplied field is read exactly once, here, and only these
   // locals are used below (the 2026-10-13 mandate audit; the note above
@@ -960,6 +1044,7 @@ export const useCapability = <
   // A malformed digest is a programmer error, so it fails here, before any
   // authority decision, as a malformed purpose does at issue.
   const verdictDigest = captureVerdictDigest(args)
+  const holdId = captureHoldId(args, "useCapability")
   const rawMandateId: unknown = mandate.id
   if (typeof rawMandateId !== "string") {
     return failMandate({ _tag: "MandateNotIssued", mandateId: "<non-string id>" as MandateId })
@@ -1040,6 +1125,86 @@ export const useCapability = <
     triggerSource,
     ...(amount === undefined ? {} : { amount }),
     ...(verdictDigest === undefined ? {} : { verdictDigest }),
+    ...(holdId === undefined ? {} : { holdId }),
+  }))
+}
+
+/**
+ * settleCapability — record what a held invoke really cost (ADR 0011).
+ *
+ * A metered caller holds the most a call could cost on `useCapability`, under a
+ * `holdId` it chose, and comes back here with the real figure. The log is
+ * append-only, so this writes a new `settle` event; `settledActuals` is what
+ * gives it effect, and what it refuses here is exactly what that rule would
+ * ignore. A refused settle writes nothing.
+ *
+ * It takes no `walkChain`, on purpose: the walk throws on a revoked mandate, and
+ * a settle records a call made before the revoke and can only lower the count.
+ * So it runs possession and binding alone, and a revoked ancestor changes nothing.
+ *
+ * Who may call this: whoever holds the client, because `actual` is the host's
+ * declaration just as `amount` is. Hand an agent its scope, never the client.
+ */
+export const settleCapability = <
+  Caps extends ReadonlyArray<Capability>,
+  Cap extends Caps[number],
+  Tier extends MandateTier = "organization",
+  ParentScope extends MandateScope<any, any, any> | null = null,
+>(args: {
+  readonly mandate: MandateScope<Caps, Tier, ParentScope>
+  readonly capability: Cap
+  readonly holdId: string
+  readonly actual: number
+  readonly triggerSource?: TriggerSource
+}, audit: MandateAuditService): void => {
+  // Every field is read once, here, and reduced to a primitive before the first
+  // log read (the intake rule; the 2026-11-08 audit, K1 and K2).
+  const { mandate, capability } = args
+  const triggerSource = captureTriggerSource(args.triggerSource)
+  const actual: unknown = args.actual
+  const holdId = captureHoldId(args, "settleCapability")
+  if (holdId === undefined) {
+    throw new TypeError("settleCapability: holdId must be 32 lowercase hex characters")
+  }
+  const presented = presentedKey(capability)
+  const capId = presented ?? UNRESOLVED_KEY
+
+  // Possession and binding are the whole authority check. After `assertIssued`
+  // the id and the key list are frozen fact.
+  const scope: unknown = mandate
+  const mandateId = (scope as { readonly id?: unknown } | null | undefined)?.id as MandateId
+  assertIssued(scope, mandateId, capId)
+  assertBoundTo(audit, scope as object, mandateId)
+  if (presented === null || !claimedCapabilityIds(scope).includes(capId)) {
+    failMandate({ _tag: "CapabilityNotInGrantorScope", capability: capId })
+  }
+
+  if (!isFiniteNonNegative(actual)) {
+    return failMandate({ _tag: "MandateAmountInvalid", mandateId, capability: capId, received: actual })
+  }
+
+  const hold = collectHolds(audit.query(mandateId)).get(holdId)
+  const refuse = (_tag: "MandateSettleUnknownHold" | "MandateSettleNoAmount" | "MandateSettleDuplicate" | "MandateSettleAmbiguousHold"): never =>
+    failMandate({ _tag, mandateId, capability: capId, holdId })
+  if (hold === undefined || hold.invokes.length === 0) return refuse("MandateSettleUnknownHold")
+  if (hold.invokes.length > 1) return refuse("MandateSettleAmbiguousHold")
+  const invoke = hold.invokes[0]!.event
+  if (invoke.capability !== capId) return refuse("MandateSettleUnknownHold")
+  const { amount } = invoke
+  if (!isFiniteNonNegative(amount)) return refuse("MandateSettleNoAmount")
+  if (hold.settles.length > 0) return refuse("MandateSettleDuplicate")
+  if (actual > amount) {
+    return failMandate({ _tag: "MandateSettleAboveAmount", mandateId, capability: capId, holdId, amount, actual })
+  }
+
+  audit.record(Object.freeze({
+    type: "settle",
+    mandateId,
+    capability: capId,
+    holdId,
+    actual,
+    timestamp: nowISO(),
+    triggerSource,
   }))
 }
 
