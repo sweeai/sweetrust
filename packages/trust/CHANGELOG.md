@@ -24,6 +24,9 @@ release that makes it. A patch version changes none of these.
   `allowlisted(candidate, registry, Sourced.fromAuthority(po.vendorId, "purchase-orders"), name)`.
   A plain string is a `TypeError`. The key's tier and origin are now in the ascent's `evidence`
   (DAN-1444).
+- **`allowlisted` refuses a registry row below `verified`, and a row or candidate the gate did not
+  mint.** A row from parsed JSON, or built with `Sourced.fromChannel`, used to come back as a real
+  `verified` value. Build registry rows with `Sourced.fromAuthority` (DAN-1448).
 
 ### Security
 
