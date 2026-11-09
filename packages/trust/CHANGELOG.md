@@ -26,10 +26,10 @@ rationale can quote untrusted text.
 ### Security
 
 - **A capability object cannot overrun a spending cap from inside the check.** An object with a
-  `key` getter could run between the limit check and its record, re-enter `useCapability`, and spend
-  150 against a cap of 30 on a signed chain that still verified. Every caller value is now read
-  before the first log read.
-- **A revoke always lands.** A rationale that quoted an injection pattern made `revokeMandate`
+  `key` getter could run between the log read and the limit check, re-enter `useCapability`, and spend
+  150 against a cap of 30 on a signed chain that still verified. In `useCapability`, every caller value is now
+  read before the first log read.
+- **A quoted injection no longer blocks a revoke.** A rationale that quoted an injection pattern made `revokeMandate`
   throw and left the mandate live. The record now carries the matched pattern and a hash in place
   of the text.
 - **Reading the log cannot un-revoke a mandate.** `listAllSigned` returned the live array, so a

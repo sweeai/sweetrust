@@ -57,7 +57,7 @@ never the client (ADR 0006).
 A receipt records a value when it is rendered, and `execute()` runs the same object. A value with a
 `toJSON`, a getter or a `Proxy` runs code in between, so the receipt can differ from what ran, and
 the chain still verifies. Code that can poison a global such as `Object.prototype.toJSON` is outside
-what this library can defend against. Pass plain JSON values into a sink.
+what this library can defend against. Keep the `.value` inside each `Sourced` you pass a sink plain JSON.
 
 ### A mandate scope is a capability: whoever holds the object holds the authority
 
@@ -118,7 +118,7 @@ interior hash alone was over insertion-order JSON, and an honest re-sorted file 
 
 ### One writer per store file
 
-The JSONL stores do not lock across processes. Two processes appending to one file can both link
+The JSONL stores do not lock across processes. On the signed store, two processes appending to one file can both link
 to the same predecessor. That forks the chain, and every later read then fails closed as corrupt.
 Give each store file exactly one writing process.
 
@@ -259,8 +259,9 @@ artifact rather than the source, and the findings are recorded rather than quiet
   and spend 150 against a cap of 30 on a signed chain that verified. Also closed: a `triggerSource`
   carrying a `toJSON` that bricked every owner operation on the store; `listAllSigned` handing out
   the live array, so a `.pop()` un-revoked a mandate; a revoke refused because its rationale quoted
-  the injection; the in-memory signer's `verify` ignoring the record's key. Every caller value is
-  now a primitive before the first log read, and each regression was watched red on `v0.5.0`.
+  the injection; the in-memory signer's `verify` ignoring the record's key. In `useCapability`,
+  every caller value except the scope, checked by identity, is a primitive before the first log
+  read, and each regression was watched red on `v0.5.0`.
 
 🔑 **The lesson we keep relearning, offered because it will apply to your code too:** a check and
 the decision it authorizes must name the same binding. If you compare A and act on B, you have not
