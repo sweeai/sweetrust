@@ -212,9 +212,11 @@ purpose when the cap is meant for one asset.
 `assess` receives `action.args` as raw values, and an argument can hold text an agent wrote: a memo,
 an invoice description, a payee name. The agent's own rationale never reaches a judge, but those
 values do. The provider also receives `trust`, each argument's tier and provenance, so it can read
-an `untrusted` argument as data rather than as instructions. The gate delivers that information; it
-cannot make a model use it, and a judge that follows instructions in an argument can still be
-talked into a `match`. Provenance is built from the channel and authority names your host passed,
+an `untrusted` argument as data rather than as instructions. On a sink that names `purposeArgs` it
+also receives `payment`, the payee, amount, asset and network the sink resolved and the verdict's
+`paymentDigest` binds, so a provider need not work them out again from the arguments. The gate
+delivers that information; it cannot make a model use it, and a judge that follows instructions in
+an argument can still be talked into a `match`. Provenance is built from the channel and authority names your host passed,
 so a host that names a channel after agent text has handed the agent that string too.
 
 ### A provider can do two things the sink cannot catch

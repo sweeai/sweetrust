@@ -1411,8 +1411,9 @@ export interface JudgmentVerdict {
  * A judge. Asynchronous since 0.6.0 (ADR 0007): a judge is a model behind a
  * network call or an inference step, and its answer arrives later.
  *
- * `input` has three keys: the owner's purpose, the action as raw values, and
- * `trust`, each argument's tier and provenance. The agent's own rationale never
+ * `input` holds the owner's purpose, the action as raw values, `trust`, each
+ * argument's tier and provenance, and on a sink that names `purposeArgs`,
+ * `payment`, the payment that sink resolved. The agent's own rationale never
  * reaches a judge, but an argument can hold text an agent wrote, so a judge
  * must read `action.args` as data and weigh each one by its `trust` entry. The
  * signal fires at the sink's deadline, and an answer that arrives after it is
@@ -1433,11 +1434,28 @@ export interface ArgumentTrust {
   readonly provenance: string
 }
 
-/** A judge's whole view of a call. `trust` has one entry per key of `action.args`. */
+/**
+ * The payment a sink resolved from its `purposeArgs`: the same four values the
+ * verdict's `paymentDigest` is computed over, so what the judge was shown and
+ * what the verdict binds cannot disagree. `amount` is the decimal string that
+ * digest hashes, whichever of bigint or string the argument was.
+ */
+export interface JudgmentPayment {
+  readonly payee: string
+  readonly amount: string
+  readonly asset: string
+  readonly network: string
+}
+
+/**
+ * A judge's whole view of a call. `trust` has one entry per key of
+ * `action.args`. `payment` is present only on a sink that names `purposeArgs`.
+ */
 export interface JudgmentInput {
   readonly purpose: Purpose
   readonly action: Action
   readonly trust: Readonly<Record<string, ArgumentTrust>>
+  readonly payment?: JudgmentPayment
 }
 
 /**
@@ -1675,13 +1693,14 @@ function bindPurpose(
 /**
  * Step 2 of the judged path (spec § 3.1): the deterministic purpose fields,
  * over the frozen snapshot, pushing into `violations` so a failure takes the
- * tier wall's path and no judge runs. Returns the payment's digest, or null
- * when the sink names no payment or the payment is one of the violations.
+ * tier wall's path and no judge runs. Returns the resolved payment, the one
+ * source of both the verdict's digest and the judge's view, or null when the
+ * sink names no payment or the payment is one of the violations.
  *
  * Strings here name arguments and fields, never values: these land in `reason`
  * on a receipt that may redact the very arg being refused.
  */
-function checkPurpose(bound: BoundPurpose, sink: string, values: Readonly<Record<string, unknown>>, violations: string[]): string | null {
+function checkPurpose(bound: BoundPurpose, sink: string, values: Readonly<Record<string, unknown>>, violations: string[]): JudgmentPayment | null {
   if (bound.actions !== undefined && !bound.actions.includes(sink)) {
     violations.push(`${sink} is not an action this purpose covers`)
   }
@@ -1715,7 +1734,14 @@ function checkPurpose(bound: BoundPurpose, sink: string, values: Readonly<Record
   if (typeof asset !== "string") violations.push(`the payment's asset must be a string`)
   else if (bound.asset !== undefined && asset !== bound.asset) violations.push(`the payment's asset is not the asset this purpose names`)
   if (violations.length > before) return null
-  return paymentDigest({ network: payment.network, asset: asset as string, recipient: recipient as string, amount: amount as bigint | string })
+  return Object.freeze({ payee: recipient as string, amount: String(amount), asset: asset as string, network: payment.network })
+}
+
+/** The `paymentDigest` a verdict carries for what `checkPurpose` resolved, null when it resolved none. */
+function digestOfResolved(resolved: JudgmentPayment | null): string | null {
+  if (resolved === null) return null
+  const { payee, amount, asset, network } = resolved
+  return paymentDigest({ network, asset, recipient: payee, amount })
 }
 
 /** What the judge saw and what will run: the same frozen values, under one digest. */
@@ -2552,7 +2578,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
       // digests the same. This refusal spends nothing; the claim comes after it.
       const paymentOfResume = violations.length === 0 ? checkPurpose(judge.purpose, cfg.name, resumed.values, violations) : null
       if (violations.length > 0) return refuseViolations()
-      if (paymentOfResume !== heldVerdict.paymentDigest) {
+      if (digestOfResolved(paymentOfResume) !== heldVerdict.paymentDigest) {
         return refuse("approval-mismatch", "this sink's payment is not the payment that was held")
       }
 
@@ -2575,10 +2601,12 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
     // enforce: an undeclared argument never reaches execute or the judge, so it
     // no longer switches the judge off and erases the verdict (ADR 0010).
     let snapshot: ActionSnapshot | undefined
+    let paymentOfCall: JudgmentPayment | null = null
     let paymentDigestOfCall: string | null = null
     if (judge !== undefined && violations.length === undeclared) {
       snapshot = snapshotAction(cfg.name, checked, violations, idempotencyKey, judge.purpose.payment?.amountArg)
-      if (snapshot !== undefined) paymentDigestOfCall = checkPurpose(judge.purpose, cfg.name, snapshot.values, violations)
+      if (snapshot !== undefined) paymentOfCall = checkPurpose(judge.purpose, cfg.name, snapshot.values, violations)
+      paymentDigestOfCall = digestOfResolved(paymentOfCall)
     }
 
     // Tier wall — hard structural gate (Rule 4). A purpose-field or snapshot
@@ -2667,6 +2695,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
         purpose: judge.granted.purpose,
         action: Object.freeze({ sink: cfg.name, args: action.values }),
         trust: action.trust,
+        ...(paymentOfCall === null ? {} : { payment: paymentOfCall }),
       })
       const providerName = judge.name
 
