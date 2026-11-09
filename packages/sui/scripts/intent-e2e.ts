@@ -117,7 +117,7 @@ try {
   }
 
   const { orphans } = reconcile({ gate: [judged.receipt], sui: [spend], chain })
-  const record = { network: NETWORK, digest, verdictDigest: gateReceiptVerdictDigest, invokeVerdictDigest, gateReceiptVerdictDigest, suiAuthorizedByVerdictDigest, orphans }
+  const record = { network: NETWORK, judge: "mockJudgmentProvider", digest, verdictDigest: gateReceiptVerdictDigest, invokeVerdictDigest, gateReceiptVerdictDigest, suiAuthorizedByVerdictDigest, orphans }
   must(invokeVerdictDigest === gateReceiptVerdictDigest && suiAuthorizedByVerdictDigest === gateReceiptVerdictDigest, `the three records disagree: ${JSON.stringify(record)}`)
   must(orphans.length === 0, `reconcile reported orphans: ${JSON.stringify(orphans)}`)
 
