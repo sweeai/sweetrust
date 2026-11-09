@@ -1246,7 +1246,11 @@ export function encodeAction(action: Action): Action {
   return { sink, args: encoded, idempotencyKey }
 }
 
-/** sha256Hex(canonicalJSON(encodeAction(action))). */
+/**
+ * sha256Hex(canonicalJSON(encodeAction(action))). A sink that names `purposeArgs`
+ * digests a bigint amount as its decimal string first, so this over a bigint amount
+ * differs from that sink's digest.
+ */
 export function actionDigest(action: Action): string {
   return digestOf(encodeAction(action))
 }
@@ -2489,6 +2493,17 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
       if (resumed === undefined || resumed.digest !== approval.actionDigest || approval.actionDigest !== heldVerdict.actionDigest) {
         return refuse("approval-mismatch", "the resumed arguments are not the action that was held")
       }
+      // The digest treats 100n and "100" as one action, but execute() must get the
+      // type the judge saw. A redacted amount matches neither test and is not compared.
+      const heldAmountArg = judge.purpose.payment?.amountArg
+      if (heldAmountArg !== undefined) {
+        const heldAmount: unknown = heldReceipt.args[heldAmountArg]?.value
+        const heldBigint = typeof heldAmount === "object" && heldAmount !== null && Object.hasOwn(heldAmount, "$bigint")
+        const heldString = typeof heldAmount === "string" && CANONICAL_DECIMAL.test(heldAmount)
+        if (typeof resumed.values[heldAmountArg] === "bigint" ? heldString : heldBigint) {
+          return refuse("approval-mismatch", "the resumed amount is not the type that was held")
+        }
+      }
 
       // 5. Replay: claimed in this process, or an attempt already on the log,
       // under this verdict (step 2) or under another one for the same action. A
@@ -2555,7 +2570,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
           const answered = ": this action already has this answer and was not judged again"
           const anotherKeyNote = underAnotherKey ? "; the hold was made under a different idempotency key, so approve and resume under that key" : ""
           const reason = `⚖ ${cfg.name} ${label}${detail}${answered}${anotherKeyNote}`
-          const refusal = `⚖ ${cfg.name} ${bound.rationaleInRefusal ? label : STOPPED_BY_JUDGMENT}${bound.rationaleInRefusal ? detail : ""}${answered}`
+          const refusal = bound.rationaleInRefusal ? `⚖ ${cfg.name} ${label}${detail}${answered}` : `⚖ ${cfg.name} ${STOPPED_BY_JUDGMENT}`
           const receipt = cfg.log.append({ at: now(), sink: cfg.name, decision: label, args: rendered, reason, verdict })
           if (label === "judgment-blocked") return { ok: false, refusal, receipt }
           return {

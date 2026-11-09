@@ -1,6 +1,15 @@
 /** Regressions from the independent review of the 2026-11-08 fix series. */
+import { generateKeyPairSync, sign } from "node:crypto"
 import { describe, expect, it } from "vitest"
+import { canonicalJSON } from "../../src/canon.ts"
 import { makeSink, ReceiptLog, Sourced } from "../../src/gate/index.ts"
+
+const owner = generateKeyPairSync("ed25519")
+const approvalKey = owner.publicKey.export({ format: "der", type: "spki" }).toString("hex")
+const approve = (held: any) => {
+  const fields = { verdictDigest: held.verdictDigest, actionDigest: held.actionDigest, grantHash: held.grantHash, expiresAt: new Date(Date.now() + 60_000).toISOString() }
+  return { ...fields, signature: sign(null, Buffer.from(canonicalJSON({ domain: "sweetrust/approval@1", ...fields })), owner.privateKey).toString("hex") }
+}
 
 const judged = (answers: string[], rationaleInRefusal = false) => {
   const state = { calls: 0, paid: [] as string[] }
@@ -8,7 +17,7 @@ const judged = (answers: string[], rationaleInRefusal = false) => {
     name: "pay", requires: { to: "untrusted", amount: "untrusted" }, mode: "enforce", log: new ReceiptLog(),
     execute: (a: any) => { state.paid.push(String(a.amount.value)); return "sent" },
     judgment: {
-      floor: 0.5, rationaleInRefusal,
+      floor: 0.5, rationaleInRefusal, approvalKey,
       granted: { purpose: { statement: "pay rent", fields: { payees: ["ACME"], maxPerAction: "100" } }, grantHash: "a".repeat(64) },
       purposeArgs: { payee: "to", amount: "amount" }, network: "sui:testnet", asset: "0x2::sui::SUI",
       provider: { name: "j", model: "j@1", assess: async () => ({ assessment: answers[state.calls++], confidence: 0.9, rationale: "r" }) as never },
@@ -45,6 +54,21 @@ describe("a payment amount has one spelling", () => {
   })
 })
 
+describe("a resume keeps the amount's type", () => {
+  const pay = (amount: unknown) => ({ to: Sourced.fromLLM("ACME", "agent", []), amount: Sourced.fromLLM(amount, "agent", []) })
+
+  it.each([["100", 100n], [100n, "100"]])("held %s, resumed as the other type, is refused and the approval survives", async (first, other) => {
+    const { sink, state } = judged(["unsure"])
+    const held: any = await sink(pay(first))
+    const approval = approve(held.held)
+    const crossed: any = await sink.resume(pay(other), approval)
+    expect(crossed.ok).toBe(false)
+    expect(crossed.refusal).toContain("approval-mismatch")
+    expect(state.paid).toEqual([])
+    expect((await sink.resume(pay(first), approval)).ok).toBe(true)
+  })
+})
+
 describe("the agent cannot tell a block from a hold", () => {
   it("both answer with the same words", async () => {
     const blocked = await call(judged(["mismatch"]).sink, "100")
@@ -66,6 +90,6 @@ describe("a hold under another idempotency key", () => {
     const second = await call(sink, "100", { idempotencyKey: "B" })
     expect(second.receipt.reason).toContain("different idempotency key")
     expect(second.held.underAnotherKey).toBe(true)
-    expect(second.refusal).toBe(`${first.refusal}: this action already has this answer and was not judged again`)
+    expect(second.refusal).toBe(first.refusal)
   })
 })

@@ -160,6 +160,12 @@ confidence and rationale from the refusal by default so an agent has nothing to 
 is undone if you hand the agent the receipt, which holds all three. What bounds an agent that keeps
 trying is the purpose's deterministic fields and the chain's own limits.
 
+### A payee or asset is compared as written
+
+The kernel does not normalize an address or coin type. On a rail that does not normalize them
+either, a respelled payee is a new action that a block does not cover. Set `payees` and `asset` in
+the purpose, and a variant is then refused.
+
 ### A judge outage holds the call and leaves nothing behind
 
 A judge that times out, throws or answers with something that is not a verdict holds the call, and

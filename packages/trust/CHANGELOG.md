@@ -48,7 +48,8 @@ unchanged. Only a judged sink's receipts change shape (ADR 0009).
 
 - **A payment amount has one spelling at a sink that names `purposeArgs`.** `"0100"` and `100n` were
   new actions, so they escaped a block on `"100"` and paid again. A string amount with leading zeros
-  is now refused before the judge runs, and a bigint digests as its decimal string.
+  is refused in `enforce` before the judge runs, and `warn` and `observe` run it with the violation on
+  the receipt. A bigint digests as its decimal string.
 - **Every sink argument is read before any is rendered.** A getter on a later argument could edit an
   earlier one after its receipt entry was written, so the receipt said one thing and `execute()` ran
   another.
