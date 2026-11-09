@@ -42,6 +42,7 @@ import {
 import {
   type AuthorizedBy,
   paymentDigest,
+  purposeHash,
   type Receipt,
   ReceiptLog,
   receiptBody,
@@ -552,7 +553,7 @@ export function parseAnchorMemo(
 // any other payment. This join finds it. The chain's list comes in as data from
 // an adapter (sweetrust-sui's chainSpends): the kernel makes no chain calls.
 
-export type OrphanReason = "no-receipt" | "no-verdict" | "payment-mismatch" | "double-spend"
+export type OrphanReason = "no-receipt" | "no-verdict" | "payment-mismatch" | "double-spend" | "duplicate-action" | "purpose-mismatch"
 
 export interface Orphan {
   /**
@@ -595,6 +596,41 @@ export interface ReconcileArgs {
   readonly sui: ReadonlyArray<ReconcileSuiReceipt>
   /** Every spend, in chain order, of every allowance the `sui` receipts name. */
   readonly chain: ReadonlyArray<ReconcileChainSpend>
+  /**
+   * The grant events each verdict was judged under, as the mandate log records
+   * them. When given, each spend's verdict must name one of them, by `grantHash`,
+   * and its `purposeHash` must be that grant's purpose: `purpose-mismatch` otherwise.
+   */
+  readonly grants?: ReadonlyArray<unknown>
+}
+
+/** What `verifyVerdictPurpose` found. */
+export type VerdictPurposeResult =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly reason: "grant-mismatch" | "purpose-mismatch" | "malformed" }
+
+/**
+ * Check a verdict against the grant it names (ADR 0010): the grant event must
+ * hash to the verdict's `grantHash`, and the purpose that grant signs must hash
+ * to its `purposeHash`. A sink holds `{ purpose, grantHash }` and cannot check
+ * the pair itself, so this is where a real hash paired with a different purpose
+ * is caught, after the fact. `grant` is the event from the mandate log, whole.
+ *
+ * Each input shape returns a result, never a throw: this runs over records from
+ * an untrusted party.
+ */
+export function verifyVerdictPurpose(args: { readonly verdict: Verdict; readonly grant: unknown }): VerdictPurposeResult {
+  try {
+    if (!isRecord(args)) return { ok: false, reason: "malformed" }
+    const verdict = copyVerdict(ownField(args, "verdict"))
+    const grant = copyVerdict(ownField(args, "grant"))
+    if (sha256Hex(canonicalJSON(grant)) !== verdict.grantHash) return { ok: false, reason: "grant-mismatch" }
+    const purpose = grant.purpose
+    if (purpose === undefined || purposeHash(purpose as Parameters<typeof purposeHash>[0]) !== verdict.purposeHash) return { ok: false, reason: "purpose-mismatch" }
+    return { ok: true }
+  } catch {
+    return { ok: false, reason: "malformed" }
+  }
 }
 
 const SUI_RECEIPT_SCHEMA = "sweetrust-sui/receipt@2"
@@ -677,9 +713,15 @@ function chainPayment(event: ChainEvent): string | null {
  *   receipt holds, or several receipts for this transaction name different ones.
  * - `double-spend`: a spend after the first under one verdict, first meaning
  *   first in chain order. It counts even if the payment also differs.
+ * - `duplicate-action`: a spend after the first for one action, under a
+ *   different verdict. The sink refuses this now (ADR 0010); this finds it in a
+ *   log written around the sink, or by a sink that does not enforce. Two
+ *   payments with different idempotency keys are different actions.
  * - `payment-mismatch`: the chain's payment is not the one judged, is unreadable
  *   (null amount or recipient), or the verdict has a null `paymentDigest`, which
  *   cannot be proven to be this payment.
+ * - `purpose-mismatch`: `grants` was given, and the verdict names none of them
+ *   or its `purposeHash` is not its grant's purpose.
  *
  * A chain `failure` moved nothing and is a refusal, never an orphan, unless a
  * receipt@2 claimed that transaction `executed`: then the record contradicts
@@ -707,11 +749,14 @@ export function reconcile(args: ReconcileArgs): ReconcileReport {
   const gateRows = readList(ownField(args, "gate"), "gate")
   const suiRows = readList(ownField(args, "sui"), "sui")
   const chainRows = readList(ownField(args, "chain"), "chain")
+  const grantsGiven = ownField(args, "grants")
+  const grantRows = grantsGiven === undefined ? undefined : readList(grantsGiven, "grants")
 
   const unreadable: Orphan[] = []
 
-  // Recomputed verdict digest → the payment that verdict judged, if it named one.
-  const judged = new Map<string, string | null>()
+  // Recomputed verdict digest → the payment that verdict judged, if it named
+  // one, the action it decided, and the verdict itself for the purpose check.
+  const judged = new Map<string, { readonly payment: string | null; readonly action: string | null; readonly verdict: Verdict }>()
   gateRows.forEach((row, i) => {
     try {
       if (!isRecord(row)) throw new TypeError("not a receipt")
@@ -722,7 +767,12 @@ export function reconcile(args: ReconcileArgs): ReconcileReport {
       if (raw === undefined) return // an unjudged sink
       const verdict = copyVerdict(raw)
       const judgedPayment = verdict.paymentDigest
-      judged.set(verdictDigest(verdict as unknown as Verdict), typeof judgedPayment === "string" ? judgedPayment : null)
+      const judgedAction = verdict.actionDigest
+      judged.set(verdictDigest(verdict as unknown as Verdict), {
+        payment: typeof judgedPayment === "string" ? judgedPayment : null,
+        action: typeof judgedAction === "string" ? judgedAction : null,
+        verdict: verdict as unknown as Verdict,
+      })
     } catch {
       unreadable.push({ digest: `gate[${i}]`, reason: "no-verdict" })
     }
@@ -776,6 +826,7 @@ export function reconcile(args: ReconcileArgs): ReconcileReport {
     orphans.push({ digest, reason })
   }
   const spent = new Set<string>()
+  const actions = new Set<string>()
   for (const [digest, { event, conflict }] of events) {
     if (!conflict && event.status === "failure") {
       if (claimedExecuted.has(digest)) report(digest, "payment-mismatch")
@@ -799,8 +850,22 @@ export function reconcile(args: ReconcileArgs): ReconcileReport {
       continue
     }
     spent.add(claim.verdictDigest)
+    const ofVerdict = judged.get(claim.verdictDigest)!
+    if (ofVerdict.action !== null) {
+      if (actions.has(ofVerdict.action)) {
+        report(digest, "duplicate-action")
+        continue
+      }
+      actions.add(ofVerdict.action)
+    }
     const moved = chainPayment(event)
-    if (moved === null || moved !== judged.get(claim.verdictDigest) || moved !== claim.paymentDigest) report(digest, "payment-mismatch")
+    if (moved === null || moved !== ofVerdict.payment || moved !== claim.paymentDigest) {
+      report(digest, "payment-mismatch")
+      continue
+    }
+    if (grantRows !== undefined && !grantRows.some((grant) => verifyVerdictPurpose({ verdict: ofVerdict.verdict, grant }).ok)) {
+      report(digest, "purpose-mismatch")
+    }
   }
 
   for (const digest of claimedExecuted) {

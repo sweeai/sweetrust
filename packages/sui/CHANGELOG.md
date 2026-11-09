@@ -36,12 +36,16 @@ on mainnet; this package has spent only on testnet). Tested against `@mysten/sui
 
 ### Added
 
-- **Each spend can name the verdict that approved it.** `spend` takes an optional
-  `authorizedBy: { verdictDigest, paymentDigest }`, and every receipt@2 repeats it, `null` when
-  none was given. With `suiAllowances({ requireAuthorization: true })`, the adapter recomputes the
-  payment digest from what it would actually send and refuses, as `not-authorized`, a spend with no
-  `authorizedBy` or a different digest. That check runs first, so a refused payment signs nothing.
-  Like the recipient list, it binds only spends routed through this library.
+- **Each spend is authorized by a one-shot token (ADR 0010, DAN-1406).** `spend` takes
+  `authorization`, the `SpendAuthorization` a sink hands its `execute`, and every receipt@2 repeats
+  its `authorizedBy`, `null` when there was none. With `suiAllowances({ requireAuthorization: true })`,
+  the adapter recomputes the payment digest from what it would actually send and refuses, as
+  `not-authorized`, a spend with no live token, a token for a different payment, a reused token,
+  or a digest typed by a caller, which is not a token. That check runs first, so a refused payment
+  signs nothing, and it binds only spends routed through this library. `authorizedBy` stays as an
+  optional unchecked annotation without `requireAuthorization`. The recorded
+  `test/conformance/intent-e2e.json` predates the new verdict shape and is marked stale, and
+  `scripts/intent-e2e.ts` needs a testnet re-run to regenerate it.
 - **`chainSpends({ allowanceId, network, graphqlUrl? })`** lists an allowance's real
   `balance_spend` transactions from the chain's indexer, owing nothing to any receipt of ours. An
   unreachable indexer, or one that does not know the allowance, throws, so silence never reads as

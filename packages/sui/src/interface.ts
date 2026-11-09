@@ -11,6 +11,8 @@
  * Times are `Date`s; receipts render them as ISO strings.
  */
 
+import type { SpendAuthorization } from "sweetrust/gate"
+
 /** A CAIP-2 chain id, e.g. `sui:testnet`, `sui:mainnet`. */
 export type Caip2 = `${string}:${string}`
 
@@ -267,7 +269,7 @@ export interface AllowanceAdapter<S, H> {
   /** Who holds each limit on this chain. */
   readonly enforces: Enforcement
   open(args: { signer: S; allowance: DelegatedAllowance; name?: string }): Promise<{ receipt: AllowanceReceipt; allowance: H | null }>
-  spend(args: { signer: S; allowance: H; amount: bigint; recipient: string; authorizedBy?: AuthorizedBy }): Promise<AllowanceReceipt>
+  spend(args: { signer: S; allowance: H; amount: bigint; recipient: string; authorizedBy?: AuthorizedBy; authorization?: SpendAuthorization }): Promise<AllowanceReceipt>
   revoke(args: { signer: S; allowance: H }): Promise<AllowanceReceipt>
   remaining(args: { allowance: H }): Promise<Remaining>
 }

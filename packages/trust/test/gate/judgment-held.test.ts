@@ -11,6 +11,7 @@
 import { describe, expect, it } from "vitest"
 import { sha256Hex } from "../../src/canon.ts"
 import {
+  SpendAuthorization,
   actionDigest,
   encodeAction,
   makeSink,
@@ -158,7 +159,8 @@ describe("I4: in enforce, every doubt case is judgment-held and execute never ru
     const { sink, runs, log } = judged(provider, { timeoutMs: 5 })
     const r = await sink(pay())
     expect(r.receipt.decision).toBe("judgment-held")
-    expect(r.ok ? undefined : r.refusal).toContain("no verdict within 5ms")
+    expect(r.ok ? undefined : r.refusal).toContain("no verdict")
+    expect(r.receipt.reason).toContain("no verdict within 5ms")
     expect(signal.aborted).toBe(true)
     await later(null, 50)
     expect(runs).toHaveLength(0)
@@ -190,14 +192,14 @@ describe("I4: in enforce, every doubt case is judgment-held and execute never ru
     expect(runs).toHaveLength(0)
   })
 
-  it("two holds of one action are two verdicts", async () => {
+  it("a second identical call while the hold is open answers from it, on a new receipt, with the same verdict", async () => {
     const { sink, log } = judged(answering(UNSURE).provider)
     await sink(pay())
     await later(null, 2)
     await sink(pay())
     const [a, b] = log.all()
-    expect(a!.verdict!.actionDigest).toBe(b!.verdict!.actionDigest)
-    expect(a!.verdict!.judgedAt).not.toBe(b!.verdict!.judgedAt)
+    expect(a!.verdict).toEqual(b!.verdict)
+    expect(a!.hash).not.toBe(b!.hash)
   })
 })
 
@@ -237,9 +239,8 @@ describe("the rest of § 3.3", () => {
   it("execute receives { authorizedBy } naming exactly the receipt's verdict", async () => {
     const { sink, runs } = judged(answering(MATCH).provider, { judgmentExtra: PURPOSE_ARGS })
     const r = await sink(pay())
-    expect(runs[0]!.ctx).toEqual({
-      authorizedBy: { verdictDigest: verdictDigest(r.receipt.verdict!), paymentDigest: r.receipt.verdict!.paymentDigest },
-    })
+    expect(runs[0]!.ctx.authorizedBy).toEqual({ verdictDigest: verdictDigest(r.receipt.verdict!), paymentDigest: r.receipt.verdict!.paymentDigest })
+    expect(SpendAuthorization.is(runs[0]!.ctx.authorization)).toBe(true)
   })
 
   it("with no purposeArgs, paymentDigest is null on the verdict and on authorizedBy", async () => {
@@ -263,7 +264,8 @@ describe("the rest of § 3.3", () => {
     const boom = new Error("no signer")
     const { sink, log } = judged(answering(MATCH).provider, { execute: () => { throw boom } })
     await expect(sink(pay())).rejects.toBe(boom)
-    const [errored] = log.all()
+    const [attempted, errored] = log.all()
+    expect(attempted!.decision).toBe("attempted")
     expect(errored!.decision).toBe("errored")
     expect(errored!.verdict?.assessment).toBe("match")
     expect(log.verifyChain()).toBe(true)
@@ -273,9 +275,10 @@ describe("the rest of § 3.3", () => {
     const boom = new Error("rpc down")
     const { sink, log } = judged(answering(MATCH).provider, { execute: async () => { throw boom } })
     await expect(sink(pay())).rejects.toBe(boom)
-    expect(log.all().map((x) => x.decision)).toEqual(["executed", "errored"])
+    expect(log.all().map((x) => x.decision)).toEqual(["attempted", "executed", "errored"])
     expect(log.all()[0]!.verdict).toEqual(log.all()[1]!.verdict)
-    expect(log.all()[1]!.verdict?.assessment).toBe("match")
+    expect(log.all()[1]!.verdict).toEqual(log.all()[2]!.verdict)
+    expect(log.all()[2]!.verdict?.assessment).toBe("match")
   })
 
   describe.each(["observe", "warn"] as const)("%s", (mode) => {
@@ -293,7 +296,8 @@ describe("the rest of § 3.3", () => {
       expect(runs).toHaveLength(1)
       expect(r.receipt.decision).toBe("judgment-flagged")
       expect(r.receipt.verdict).toBeDefined()
-      expect(runs[0]!.ctx.authorizedBy.verdictDigest).toBe(verdictDigest(r.receipt.verdict!))
+      // Doubt is not authority: a flagged action names no verdict and carries no token (ADR 0010).
+      expect(runs[0]!.ctx).toBeUndefined()
       expect(log.verifyChain()).toBe(true)
     })
 
@@ -627,12 +631,16 @@ describe("redaction: the provider's words never reach the receipt of a redacting
   // Strings that survive JSON.stringify escaping only count if the secret is literal; this also walks the verdict.
   const canonicalLeak = (receipt: Receipt) => Object.values(receipt.verdict ?? {}).some((v) => typeof v === "string" && v.includes(SECRET))
 
-  it("the caller still reads the real rationale; only the durable receipt is redacted", async () => {
-    const { sink } = judged(spy(echo("unsure", 0.5)).provider, { redact: { to: "hash" }, requires: { to: "verified" } })
-    const r = await sink({ to: auth(SECRET) })
-    if (r.ok) throw new Error("expected held")
-    expect(r.refusal).toContain(SECRET)
-    expect(r.receipt.reason).not.toContain(SECRET)
+  it("the refusal never quotes the judge by default; a host opts in, and only the durable receipt stays redacted", async () => {
+    const plain = judged(spy(echo("unsure", 0.5)).provider, { redact: { to: "hash" }, requires: { to: "verified" } })
+    const silent = await plain.sink({ to: auth(SECRET) })
+    if (silent.ok) throw new Error("expected held")
+    expect(silent.refusal).not.toContain(SECRET)
+    const opted = judged(spy(echo("unsure", 0.5)).provider, { redact: { to: "hash" }, requires: { to: "verified" }, judgmentExtra: { rationaleInRefusal: true } })
+    const told = await opted.sink({ to: auth(SECRET) })
+    if (told.ok) throw new Error("expected held")
+    expect(told.refusal).toContain(SECRET)
+    expect(told.receipt.reason).not.toContain(SECRET)
   })
 
   it("rationaleHash is the hash of the provider's text, whether or not the sink redacts", async () => {

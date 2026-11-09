@@ -11,7 +11,7 @@ import { ObjectError } from "@mysten/sui/client"
 import { Transaction } from "@mysten/sui/transactions"
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519"
 import { normalizeStructTag, normalizeSuiAddress } from "@mysten/sui/utils"
-import { paymentDigest } from "sweetrust/gate"
+import { ReceiptLog, Sourced, SpendAuthorization, makeSink, paymentDigest } from "sweetrust/gate"
 import { SignedReceiptLog, generateSigningKeypair, makeEd25519ReceiptSigner, verifySignedChain } from "sweetrust/verify"
 import { defineScale, enforces, suiAllowances, type AllowanceReceipt, type SuiAllowance } from "../src/index.ts"
 import { ALLOWANCE_ID, CAP_ID, DIGEST, MAINNET_GENESIS, TESTNET_GENESIS, allowanceState, mockChain, signedDigest, targetsOf, type MockChain } from "./helpers/mock-chain.ts"
@@ -894,13 +894,36 @@ describe("spend(): authorizedBy binds a payment to the verdict that approved it"
     paymentDigest({ network: "sui:testnet", asset: ASSET, recipient: MERCHANT, amount: AMOUNT, ...over })
   const proof = (over: Partial<Parameters<typeof digestOf>[0]> = {}) => ({ verdictDigest: VERDICT, paymentDigest: digestOf(over) })
 
+  /** A real sink's one-shot token for one payment, the only way to get one. */
+  const tokenFor = async (over: { recipient?: string; asset?: string; network?: string; amount?: bigint; verdict?: unknown; noPayment?: boolean } = {}): Promise<SpendAuthorization> => {
+    let token: SpendAuthorization | undefined
+    const sink = makeSink<any, unknown>({
+      name: "pay",
+      requires: { to: "verified", amount: "verified" },
+      mode: "enforce",
+      log: new ReceiptLog(),
+      judgment: {
+        provider: { name: "j", model: "j@1", assess: async () => ({ assessment: "match", confidence: 0.95, rationale: "ok" }) },
+        floor: 0.7,
+        granted: { purpose: { statement: "pay" }, grantHash: "a".repeat(64) },
+        ...(over.noPayment ? {} : { purposeArgs: { payee: "to", amount: "amount" }, network: over.network ?? "sui:testnet", asset: over.asset ?? ASSET }),
+      } as never,
+      execute: (_args: unknown, ctx: { authorization: SpendAuthorization } | undefined) => {
+        token = ctx?.authorization
+        return "issued"
+      },
+    })
+    await sink({ to: Sourced.fromAuthority(over.recipient ?? MERCHANT, "t"), amount: Sourced.fromAuthority(String(over.amount ?? AMOUNT), "t") })
+    if (token === undefined) throw new Error("the sink issued no token")
+    return token
+  }
   const judged = (chain: MockChain, requireAuthorization = true, log?: SignedReceiptLog) =>
     suiAllowances({ client: chain.client, network: "sui:testnet", scale: testUSD, now: () => LOCAL_NOW, confirmTimeoutMs: 0, requireAuthorization, ...(log ? { log } : {}) })
   const live = (): MockChain => mockChain(allowanceState({ funder: P, spender: A, rate: windowed(0n, null) }), 0n)
   const pay = (chain: MockChain, authorizedBy?: unknown, over: Record<string, unknown> = {}, requireAuthorization = true) =>
     judged(chain, requireAuthorization).spend({
       signer: agent, allowance: handle({ rate: RATE }), amount: AMOUNT, recipient: MERCHANT,
-      ...(authorizedBy === undefined ? {} : { authorizedBy }), ...over,
+      ...(authorizedBy === undefined ? {} : SpendAuthorization.is(authorizedBy) ? { authorization: authorizedBy } : { authorizedBy }), ...over,
     } as never)
 
   /** Every read and write the adapter could make on the chain, counted. */
@@ -928,13 +951,13 @@ describe("spend(): authorizedBy binds a payment to the verdict that approved it"
     expect(lineOf(r, "rate")).toMatchObject({ verdict: "unchecked" })
   })
 
-  it("a digest for $3 used on a $30 spend refuses, and the receipt quotes both digests and keeps what was supplied", async () => {
+  it("a token for $3 used on a $30 spend refuses, and the receipt quotes both digests and names the token's verdict", async () => {
     const chain = live()
-    const wrong = proof({ amount: testUSD.of(3) })
+    const wrong = await tokenFor({ amount: testUSD.of(3) })
     const r = await pay(chain, wrong)
     expectRefused(r, chain)
-    expect(r.authorizedBy).toEqual(wrong)
-    expect(r.refusal?.why).toContain(wrong.paymentDigest)
+    expect(r.authorizedBy).toEqual(wrong.authorizedBy)
+    expect(r.refusal?.why).toContain(wrong.authorizedBy.paymentDigest)
     expect(r.refusal?.why).toContain(digestOf())
     expect(r.refusal?.why).toContain("30.00 testUSD")
     expect(r.refusal?.why).toContain(MERCHANT)
@@ -944,40 +967,80 @@ describe("spend(): authorizedBy binds a payment to the verdict that approved it"
     ["recipient", { recipient: STRANGER }],
     ["asset", { asset: normalizeStructTag("0x2::coin::COIN") }],
     ["network", { network: "sui:mainnet" }],
-  ])("a digest over a different %s refuses", async (_name, over) => {
+  ])("a token over a different %s refuses", async (_name, over) => {
     const chain = live()
-    expectRefused(await pay(chain, proof(over)), chain)
+    expectRefused(await pay(chain, await tokenFor(over)), chain)
   })
 
-  it("a matching digest passes the check, the spend executes, and the receipt carries it", async () => {
+  it("a live token for this payment passes the check, the spend executes, and the receipt carries it", async () => {
     const before = allowanceState({ funder: P, spender: A, rate: windowed(0n, null) })
     const chain = mockChain(before, 0n)
     chain.script.push({ kind: "executed", digest: DIGEST(1), timestampMs: ANCHOR, after: { ...before, currentSpend: AMOUNT, rate: windowed(AMOUNT, ANCHOR) } })
-    const r = await pay(chain, proof())
+    const token = await tokenFor()
+    const r = await pay(chain, token)
     expect(targetsOf(chain.executed[0].bytes)).toEqual(["0x2::allowance::balance_spend", "0x2::coin::from_balance", "TransferObjects"])
-    expect(r).toMatchObject({ schema: "sweetrust-sui/receipt@2", verdict: "executed", digest: signedDigest(chain), refusal: null, authorizedBy: proof() })
+    expect(r).toMatchObject({ schema: "sweetrust-sui/receipt@2", verdict: "executed", digest: signedDigest(chain), refusal: null, authorizedBy: token.authorizedBy })
   })
 
   it("digests its own normalized recipient: a full-length mixed-case payee passes against the canonical digest", async () => {
     const before = allowanceState({ funder: P, spender: A, rate: windowed(0n, null) })
     const chain = mockChain(before, 0n)
     chain.script.push({ kind: "executed", digest: DIGEST(1), timestampMs: ANCHOR, after: before })
-    const r = await pay(chain, proof(), { recipient: `0x${MERCHANT.slice(2).toUpperCase()}` })
+    const r = await pay(chain, await tokenFor(), { recipient: `0x${MERCHANT.slice(2).toUpperCase()}` })
     expect(r).toMatchObject({ verdict: "executed", recipient: MERCHANT })
   })
 
-  it("a short-form payee is refused even when the verdict's digest matches its padded form", async () => {
+  it("a short-form payee is refused even when the token's payment matches its padded form", async () => {
     const chain = mockChain(allowanceState({ funder: P, spender: A, rate: windowed(0n, null) }), 0n)
-    const r = await pay(chain, proof(), { recipient: "0x5E11E5" })
+    const r = await pay(chain, await tokenFor(), { recipient: "0x5E11E5" })
     expect(chain.executed).toHaveLength(0)
     expect(r.refusal?.code).toBe("invalid-address")
   })
 
-  it("a verdict judged over a non-canonical recipient or asset fails closed", async () => {
+  it("a token judged over a non-canonical recipient or asset fails closed", async () => {
     for (const over of [{ recipient: "0x5e11e5" }, { asset: "0x2::sui::SUI" }]) {
       const chain = live()
-      expectRefused(await pay(chain, proof(over)), chain)
+      expectRefused(await pay(chain, await tokenFor(over)), chain)
     }
+  })
+
+  it("a token whose sink named no payment authorizes no payment", async () => {
+    const chain = live()
+    expectRefused(await pay(chain, await tokenFor({ noPayment: true })), chain)
+  })
+
+  it("a forged token is refused: a digest object, the prototype, a Proxy over the class", async () => {
+    for (const authorization of [proof(), Object.create(SpendAuthorization.prototype), new Proxy({}, {})]) {
+      const chain = live()
+      const r = await pay(chain, undefined, { authorization })
+      expectRefused(r, chain)
+      expect(r.refusal?.why).toContain("no sink issued")
+    }
+  })
+
+  it("a reused token is refused at spend: the second spend sends nothing", async () => {
+    const before = allowanceState({ funder: P, spender: A, rate: windowed(0n, null) })
+    const chain = mockChain(before, 0n)
+    chain.script.push({ kind: "executed", digest: DIGEST(1), timestampMs: ANCHOR, after: before })
+    const token = await tokenFor()
+    expect(await pay(chain, token)).toMatchObject({ verdict: "executed", authorizedBy: token.authorizedBy })
+    expect(chain.executed).toHaveLength(1)
+    const again = await pay(chain, token)
+    expect(again).toMatchObject({ verdict: "refused", digest: null, atSource: "local" })
+    expect(again.refusal).toMatchObject({ code: "not-authorized", refusedBy: "library" })
+    expect(again.refusal?.why).toContain("already been spent")
+    expect(chain.executed).toHaveLength(1)
+  })
+
+  it("a token presented without requireAuthorization still spends once, and a forged one is still refused", async () => {
+    const before = allowanceState({ funder: P, spender: A, rate: windowed(0n, null) })
+    const chain = mockChain(before, 0n)
+    chain.script.push({ kind: "executed", digest: DIGEST(1), timestampMs: ANCHOR, after: before })
+    const token = await tokenFor()
+    expect(await pay(chain, token, {}, false)).toMatchObject({ verdict: "executed", authorizedBy: token.authorizedBy })
+    expect((await pay(chain, token, {}, false)).refusal?.code).toBe("not-authorized")
+    expect((await pay(chain, undefined, { authorization: proof() }, false)).refusal?.code).toBe("not-authorized")
+    expect(chain.executed).toHaveLength(1)
   })
 
   it.each([
@@ -987,12 +1050,12 @@ describe("spend(): authorizedBy binds a payment to the verdict that approved it"
     ["trailing newline", `${"d".repeat(64)}\n`],
     ["one char long", "d".repeat(65)],
     ["not hex", "g".repeat(64)],
-  ])("a verdictDigest that is not 64 lowercase hex (%s) refuses, even beside the right payment digest", async (_name, verdictDigest) => {
+  ])("a digest object is not an authorization, whatever its verdictDigest (%s), even beside the right payment digest", async (_name, verdictDigest) => {
     const chain = live()
     const r = await pay(chain, { verdictDigest, paymentDigest: digestOf() })
     expectRefused(r, chain)
     expect(r.authorizedBy).toEqual({ verdictDigest, paymentDigest: digestOf() })
-    expect(r.refusal?.why).toContain("verdictDigest")
+    expect(r.refusal?.why).toContain("presents no authorization")
   })
 
   it("a null paymentDigest (a sink that named no purposeArgs) or an uppercase one never matches", async () => {
@@ -1006,9 +1069,9 @@ describe("spend(): authorizedBy binds a payment to the verdict that approved it"
 
   it("an amount or asset the digest cannot take is a refusal, never a throw", async () => {
     const negative = live()
-    expectRefused(await pay(negative, proof(), { amount: -1n }), negative)
+    expectRefused(await pay(negative, await tokenFor(), { amount: -1n }), negative)
     const badAsset = live()
-    expectRefused(await pay(badAsset, proof(), { allowance: { ...handle({ rate: RATE }), asset: "not a type" } }), badAsset)
+    expectRefused(await pay(badAsset, await tokenFor(), { allowance: { ...handle({ rate: RATE }), asset: "not a type" } }), badAsset)
   })
 
   it("runs before every other check and before any chain read", async () => {
@@ -1019,42 +1082,47 @@ describe("spend(): authorizedBy binds a payment to the verdict that approved it"
     const zero = await pay(chain, undefined, { amount: 0n })
     const badPayee = await pay(chain, undefined, { recipient: "nope" })
     const offList = await pay(chain, undefined, { allowance: handle({ rate: RATE, recipients: [STRANGER] }) })
-    const wrong = await pay(chain, proof({ amount: 1n }))
+    const wrong = await pay(chain, await tokenFor({ amount: 1n }))
     for (const r of [onMainnet, zero, badPayee, offList, wrong]) expect(r.refusal?.code).toBe("not-authorized")
     expect(calls()).toBe(0)
   })
 
   it("passing the check leaves the other refusals in place", async () => {
     const chain = live()
-    const r = await pay(chain, proof({ recipient: STRANGER }), { recipient: STRANGER, allowance: handle({ rate: RATE, recipients: [MERCHANT] }) })
+    const token = await tokenFor({ recipient: STRANGER })
+    const r = await pay(chain, token, { recipient: STRANGER, allowance: handle({ rate: RATE, recipients: [MERCHANT] }) })
     expect(r.refusal?.code).toBe("recipient-not-allowed")
-    expect(r.authorizedBy).toEqual(proof({ recipient: STRANGER }))
+    expect(r.authorizedBy).toEqual(token.authorizedBy)
   })
 
   it("every spend receipt carries authorizedBy: chain refusal, build failure, gone, errored", async () => {
     const abort = live()
     abort.script.push({ kind: "abort", digest: DIGEST(2), timestampMs: ANCHOR, abortName: "EExceedsRateLimit", errorCode: 4 })
-    const refused = await pay(abort, proof())
-    expect(refused).toMatchObject({ verdict: "refused", digest: signedDigest(abort), authorizedBy: proof() })
+    const one = await tokenFor()
+    const refused = await pay(abort, one)
+    expect(refused).toMatchObject({ verdict: "refused", digest: signedDigest(abort), authorizedBy: one.authorizedBy })
     expect(refused.refusal).toMatchObject({ code: "rate-exceeded", refusedBy: "chain" })
 
     const broken = live()
     broken.breakBuild = true
-    const notSubmitted = await pay(broken, proof())
+    const two = await tokenFor()
+    const notSubmitted = await pay(broken, two)
     expect(notSubmitted.refusal?.code).toBe("not-submitted")
-    expect(notSubmitted.authorizedBy).toEqual(proof())
+    expect(notSubmitted.authorizedBy).toEqual(two.authorizedBy)
 
     const gone = mockChain(null, 0n)
     gone.breakBuild = true
-    const goneReceipt = await pay(gone, proof())
+    const three = await tokenFor()
+    const goneReceipt = await pay(gone, three)
     expect(goneReceipt.refusal?.code).toBe("allowance-not-found")
-    expect(goneReceipt.authorizedBy).toEqual(proof())
+    expect(goneReceipt.authorizedBy).toEqual(three.authorizedBy)
 
     const lost = live()
     lost.script.push({ kind: "throw", message: "fetch failed: ETIMEDOUT" })
-    const errored = await pay(lost, proof())
+    const four = await tokenFor()
+    const errored = await pay(lost, four)
     expect(errored.verdict).toBe("errored")
-    expect(errored.authorizedBy).toEqual(proof())
+    expect(errored.authorizedBy).toEqual(four.authorizedBy)
   })
 
   it("without requireAuthorization nothing is checked: none is fine, and one supplied is repeated as given", async () => {
@@ -1084,9 +1152,23 @@ describe("spend(): authorizedBy binds a payment to the verdict that approved it"
       signer: agent, allowance: handle({ rate: RATE }), amount: AMOUNT, recipient: MERCHANT,
       get authorizedBy() { argReads += 1; return shifty },
     }
-    const r = await judged(chain).spend(args as never)
+    const r = await judged(chain, false).spend(args as never)
     expect([argReads, verdictReads, paymentReads]).toEqual([1, 1, 1])
     expect(r).toMatchObject({ verdict: "executed", authorizedBy: proof() })
+  })
+
+  it("reads the authorization once: a getter cannot show the check one token and the spend another", async () => {
+    const before = allowanceState({ funder: P, spender: A, rate: windowed(0n, null) })
+    const chain = mockChain(before, 0n)
+    chain.script.push({ kind: "executed", digest: DIGEST(1), timestampMs: ANCHOR, after: before })
+    const token = await tokenFor()
+    let reads = 0
+    const args = {
+      signer: agent, allowance: handle({ rate: RATE }), amount: AMOUNT, recipient: MERCHANT,
+      get authorization() { reads += 1; return token },
+    }
+    expect(await judged(chain).spend(args as never)).toMatchObject({ verdict: "executed", authorizedBy: token.authorizedBy })
+    expect(reads).toBe(1)
   })
 
   it("the receipt holds its own frozen copy of exactly the two digests; extra keys do not reach it", async () => {

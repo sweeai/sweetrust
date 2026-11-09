@@ -28,6 +28,7 @@ export {
   verifySignedChain,
   // the chain's payments against the records (spec I8)
   reconcile,
+  verifyVerdictPurpose,
   // the anchor-memo convention
   RECEIPT_MEMO_PREFIX,
   ANCHOR_MEMO_PREFIX,
@@ -44,4 +45,5 @@ export {
   type ReconcileReport,
   type ReconcileSuiReceipt,
   type ReconcileChainSpend,
+  type VerdictPurposeResult,
 } from "./verify.ts"

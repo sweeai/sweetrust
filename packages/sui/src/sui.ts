@@ -24,7 +24,7 @@ import { Transaction, TransactionDataBuilder } from "@mysten/sui/transactions"
 import type { Signer } from "@mysten/sui/cryptography"
 import type { ClientWithCoreApi, SuiClientTypes } from "@mysten/sui/client"
 import { isValidSuiAddress, normalizeStructTag, normalizeSuiAddress } from "@mysten/sui/utils"
-import { paymentDigest, type ReceiptLog } from "sweetrust/gate"
+import { paymentDigest, SpendAuthorization, type ReceiptLog } from "sweetrust/gate"
 import {
   ABORTS, ALLOWANCE_MODULE, CLOCK_OBJECT_ID, decodeClockMs, MAX_NAME_BYTES, U256_MAX, U64_MAX,
   abortNameOf, currentWindow, decodeAllowance, type AllowanceState,
@@ -118,11 +118,13 @@ export interface SuiAllowancesOptions {
   /** This machine's clock, for receipts of refusals that never reached the chain. Default `Date.now`. */
   readonly now?: () => number
   /**
-   * Refuse every spend that does not name the verdict that approved it: no
-   * `authorizedBy`, or one whose `paymentDigest` differs from the digest of this
-   * payment. The check is the first thing `spend` does, before any chain read,
-   * and its refusal is `not-authorized`. It binds only spends routed through this
-   * library. Default false: `authorizedBy` is optional and repeated unchecked.
+   * Refuse every spend without a live `authorization`: the one-shot token a
+   * SweeTrust sink hands its `execute`. A verdict digest typed by a caller is
+   * not one, and neither is a token already spent or one for another payment.
+   * The check is the first thing `spend` does, before any chain read, and its
+   * refusal is `not-authorized`. It binds only spends routed through this
+   * library. Default false: a token still spends once when given, and
+   * `authorizedBy` is optional and repeated unchecked.
    */
   readonly requireAuthorization?: boolean
 }
@@ -140,8 +142,6 @@ const SCHEMA = "sweetrust-sui/receipt@2" as const
 const ABSENT_READS = 3
 const READ_ATTEMPTS = 8
 const READ_BACKOFF_MS = 400
-/** The shape of a SweeTrust gate digest. */
-const GATE_DIGEST = /^[0-9a-f]{64}$/
 /** What a `not-authorized` receipt says about who held the rule: this check is the library's, not Sui's. */
 const AUTHORIZATION_HELD = "Held by the library, in-process: this check binds only spends routed through this library, and the spender's key can still pay through another Sui client, up to the limits Sui holds."
 
@@ -824,7 +824,10 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
     const h = snapshotHandle("spend", args.allowance)
     const amount = args.amount
     const recipientRaw = args.recipient
-    const authorizedBy = snapshotAuthorizedBy("spend", args.authorizedBy)
+    const supplied = snapshotAuthorizedBy("spend", args.authorizedBy)
+    const authorization: unknown = args.authorization
+    // A genuine token's digests are data we issued; anything else is judged below.
+    const authorizedBy = SpendAuthorization.is(authorization) ? authorization.authorizedBy : supplied
     if (typeof signer !== "object" || signer === null || typeof signer.toSuiAddress !== "function") throw typeErr("spend", "signer must be a @mysten/sui Signer (the spender's keypair)")
     if (typeof amount !== "bigint") throw typeErr("spend", "amount must be a bigint (base units)")
     if (typeof recipientRaw !== "string") throw typeErr("spend", "recipient must be an address string")
@@ -865,26 +868,34 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
       }))
 
     /**
-     * Why this payment is not authorized, or null when it is. Recomputed over the
-     * values this adapter would actually send, so a verdict judged over anything
-     * else, a non-canonical address included, fails closed.
+     * Why this payment is not authorized, or null when it is. The token is spent
+     * here against the digest of the values this adapter would actually send, so
+     * a token judged over anything else, a non-canonical address included, fails
+     * closed. Spending it is the attempt: a later refusal does not hand it back.
      */
     const unauthorized = (): string | null => {
       const refused = "Refused in-process; nothing was sent."
       const payment = `${amountText} to ${validAddr(recipientRaw) ? normAddr(recipientRaw) : JSON.stringify(recipientRaw)} on ${network}`
-      if (authorizedBy === null) return `${refused} This adapter requires every spend to name the verdict that approved it (requireAuthorization), and this spend of ${payment} named none.`
-      if (!GATE_DIGEST.test(authorizedBy.verdictDigest)) return `${refused} This spend of ${payment} names the verdict ${JSON.stringify(authorizedBy.verdictDigest)}, and a verdictDigest is 64 lowercase hex characters.`
-      if (authorizedBy.paymentDigest === null) return `${refused} This spend of ${payment} names a verdict with no payment digest, so that verdict approved no particular payment, and this adapter requires one that did.`
+      if (authorization === undefined) {
+        return authorizedBy === null
+          ? `${refused} This adapter requires every spend to name the verdict that approved it (requireAuthorization), and this spend of ${payment} named none.`
+          : `${refused} This spend of ${payment} names a verdict by digest and presents no authorization. A digest is not an authorization: this adapter spends the one-shot token a sink hands its execute().`
+      }
       let actual: string
       try {
         actual = paymentDigest({ network, asset: normalizeStructTag(h.asset), recipient: normAddr(recipientRaw), amount })
       } catch (e) {
-        return `${refused} This spend of ${payment} has no payment digest to compare, so no verdict can match it: ${clip(e)}`
+        return `${refused} This spend of ${payment} has no payment digest to compare, so no authorization can match it: ${clip(e)}`
       }
-      if (authorizedBy.paymentDigest !== actual) return `${refused} This spend's verdict approved a different payment: it names payment digest ${JSON.stringify(authorizedBy.paymentDigest)}, and ${payment} digests to ${actual}.`
-      return null
+      const spent = SpendAuthorization.consume(authorization, actual)
+      if (spent.ok) return null
+      if (spent.reason === "already-consumed") return `${refused} This spend of ${payment} presented an authorization that has already been spent, and one authorization pays once.`
+      if (spent.reason === "wrong-payment" && SpendAuthorization.is(authorization)) {
+        return `${refused} This spend's authorization approved a different payment: it names payment digest ${JSON.stringify(authorization.authorizedBy.paymentDigest)}, and ${payment} digests to ${actual}.`
+      }
+      return `${refused} This spend of ${payment} presented an authorization that no sink issued. A verdict digest or a copied object is not an authorization: this adapter spends the one-shot token a sink hands its execute().`
     }
-    if (requireAuthorization === true) {
+    if (requireAuthorization === true || authorization !== undefined) {
       const why = unauthorized()
       if (why !== null) return notSent("not-authorized", `${why} ${AUTHORIZATION_HELD}`)
     }

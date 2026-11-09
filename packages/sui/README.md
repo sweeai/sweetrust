@@ -173,7 +173,7 @@ The second receipt's `why`: *"Refused at open(); nothing was sent to Sui. Sui's 
 
 ## A payment names the verdict that approved it
 
-`spend` takes an optional `authorizedBy: { verdictDigest, paymentDigest }`: the verdict from a SweeTrust gate, and the digest of the payment that verdict judged. An adapter built with `requireAuthorization: true` recomputes the payment digest from what it would actually send (`network`, `normalizeStructTag(asset)`, the normalized recipient, `amount`) and refuses a spend with no `authorizedBy` or a different digest, as `not-authorized`. The check is the first thing `spend` does, before any chain read, so a refused payment signs nothing. This block runs offline:
+`spend` takes an optional `authorization`: the one-shot `SpendAuthorization` a SweeTrust sink hands its `execute` (`context.authorization`) when a confident match or an owner's approval lets a payment through. An adapter built with `requireAuthorization: true` refuses a spend without a live token, as `not-authorized`, before any chain read, so a refused payment signs nothing. It recomputes the payment digest from what it would actually send (`network`, `normalizeStructTag(asset)`, the normalized recipient, `amount`) and spends the token against it. A token that is forged (a digest typed by a caller is not a token), already spent, or issued for a different payment is refused. A held action the owner approved gets a token too. A flagged action in warn or observe does not. This block runs offline:
 
 <!-- readme-check: run - expect refused not-authorized refused not-authorized -->
 ```ts
@@ -199,13 +199,13 @@ const allowance: SuiAllowance = {
 const unnamed = await sui.spend({ signer: agent, allowance, amount: 30n, recipient })
 console.log(unnamed.verdict, unnamed.refusal?.code)
 
-// A verdict for 3 used on a payment of 30.
-const forThree = paymentDigest({ network: "sui:testnet", asset: normalizeStructTag("0x2::sui::SUI"), recipient, amount: 3n })
-const swapped = await sui.spend({ signer: agent, allowance, amount: 30n, recipient, authorizedBy: { verdictDigest: "d".repeat(64), paymentDigest: forThree } })
-console.log(swapped.verdict, swapped.refusal?.code)
+// A verdict digest typed by a caller, even for the right payment, is not an authorization.
+const paymentOfThirty = paymentDigest({ network: "sui:testnet", asset: normalizeStructTag("0x2::sui::SUI"), recipient, amount: 30n })
+const typed = await sui.spend({ signer: agent, allowance, amount: 30n, recipient, authorizedBy: { verdictDigest: "d".repeat(64), paymentDigest: paymentOfThirty } })
+console.log(typed.verdict, typed.refusal?.code)
 ```
 
-Every spend receipt repeats the `authorizedBy` it was given, refusals included (`null` when none was). Without `requireAuthorization` it is optional and repeated unchecked. Like the recipient list, this check binds only spends routed through this library.
+Every spend receipt carries the verdict and payment digests of the token it spent, in `authorizedBy`, refusals included (`null` when there was no token and none supplied). Without `requireAuthorization`, a plain `authorizedBy` is optional and repeated unchecked, and a token given anyway still spends once. Like the recipient list, this check binds only spends routed through this library.
 
 ---
 

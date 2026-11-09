@@ -129,6 +129,33 @@ nothing. This is a known gap, not a design choice. The planned fix writes an int
 the action and the outcome after it. Until then, treat a signer error as "an action may have run
 unrecorded", not as a refusal.
 
+A judged enforce sink no longer has this gap (ADR 0010): an `attempted` receipt lands before
+`execute`, so a failure afterward still leaves the intent on the log, and the approval cannot be
+replayed. Unjudged sinks and observe/warn runs still do.
+
+### An action's lifecycle reads the log you give it
+
+Blocks, holds and attempts are read back from the receipt log, and so is stickiness across a
+restart. A log that does not return what was appended, or that two processes write without sharing,
+loses them: a per-process log forgets the block at restart, and the identical action judges afresh.
+Give a judged enforce sink a log that outlives the process (ADR 0010). The check is in-process and
+keyed per sink name and per action digest; it does not stop a host from calling `execute`'s work
+some other way.
+
+### An idempotency key is host-attested
+
+`{ idempotencyKey }` is how a host says "this is a second, intended payment", so it must come from the
+host, for example a payment's own invoice id, and never from anything an agent wrote. A host that
+forwards an agent's value as the key has handed the agent the decision to repeat a payment. It
+cannot evade a block or a hold, and that is all it cannot do.
+
+### A sink cannot check that `granted` belongs together
+
+`judgment.granted` is `{ purpose, grantHash }`, and the gate cannot recompute a grant's hash without
+the grant event. A host that pairs a real hash with a different purpose is not refused at the call.
+It is caught afterward: `verifyVerdictPurpose`, or `reconcile` given `grants`, compares the verdict's
+`purposeHash` with the purpose the signed grant records.
+
 ### For an async action, the receipt precedes the outcome and an `errored` receipt trails it
 
 A sink's receipt is written when `execute()` returns, and an async `execute()` returns a promise
