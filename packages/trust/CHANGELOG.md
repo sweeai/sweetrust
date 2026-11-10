@@ -44,11 +44,16 @@ release that makes it. A patch version changes none of these.
   asset and network again with a reworded memo, get a fresh judge, and run on a `match` the owner
   never saw. On a sink that names `purposeArgs`, a doubt now stands on the payment (`paymentDigest`):
   a memo variant, under any idempotency key, is held or blocked without a judge call inside the
-  doubt's window, and after it is judged again but held for the owner. A variant sent while the
-  payment is still being judged waits for that answer. The hold a variant gets names the doubted
-  action and sets `underAnotherAction: true` on `held`, and its receipt says so, so an approval
-  releases only the action the owner was shown, once. Once that approved action is attempted, the
-  next memo is judged afresh. A different payee, amount, asset or network is still a different
+  doubt's window. After it, the variant is judged again: a `match` is held for the owner and a
+  confident `mismatch` is blocked. Within one sink object, a variant sent while the payment is still
+  being judged waits for that answer; a second sink over the same log reads the log again once its
+  judge returns. The hold a variant gets names the doubted action and sets
+  `underAnotherAction: true` on `held`, and its receipt says so, so an approval releases only the
+  action the owner was shown, once; show the owner that action, not the variant's receipt args. Once
+  that approved action is attempted (even if `execute` throws), a memo the judge has not doubted is
+  judged afresh. Approving one memo never answers a doubt the judge scored on another: a memo that
+  was itself blocked or held stays held for its owner. An action that already ran is refused as a
+  duplicate before another memo's doubt is consulted. A different payee, amount, asset or network is still a different
   payment, and a judged sink with no `purposeArgs` keeps exact-action stickiness. No digest or
   receipt shape changes (ADR 0010, DAN-1466). A log from before this change in which a memo variant
   ran after a doubt keeps that doubt, so the next variant of that payment is held until the owner

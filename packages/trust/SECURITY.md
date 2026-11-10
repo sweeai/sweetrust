@@ -153,9 +153,10 @@ reached the disk before `execute` ran. Loading proves the chain is consistent, n
 complete: a file cut at its tail loads as a valid shorter chain and its records are forgotten. A log
 that two processes write without sharing loses records the same way (ADR 0010).
 
-The check is in-process and keyed per sink name, grant and purpose, and then per payment, or per
-action digest on a sink that names no payment (see *A changed argument is a new action, unless it is the same payment*); it does not stop
-a host from calling `execute`'s work some other way. Each judged call walks the log twice, so its
+The duplicate check is in-process and keyed per sink name, grant, purpose and action digest, so
+a payment that already ran is refused again only as that exact action (a block or a hold reaches
+further, to the whole payment: see *A changed argument is a new action, unless it is the same
+payment*); it does not stop a host from calling `execute`'s work some other way. Each judged call walks the log twice, so its
 cost grows with the log's length, and a retry loop that appends a receipt per retry makes each later
 call slower.
 
@@ -164,23 +165,34 @@ call slower.
 On a sink that names `purposeArgs`, a block or a hold stands on the payment: the payee, amount,
 asset and network the verdict's `paymentDigest` hashes. Any other argument can change, a memo, a
 note, a reference, an idempotency key, and the call is still the doubted payment. Inside the doubt's
-window it is held or blocked without a judge call, and after the window it is judged again but held
-for the owner, like the exact action (DAN-1466). In-process, a memo variant sent while the payment is
-still being judged waits for that answer.
+window it is held or blocked without a judge call. After the window it is judged again: a `match`
+is held for the owner, like the exact action, and a confident `mismatch` is blocked (DAN-1466).
+Within one sink object, a memo variant sent while the payment is still being judged waits for that
+answer. A second sink object over the same log does not wait; it reads the log again once its own
+judge returns, and answers from a doubt it finds there.
 
-You can rely on three things. A held memo variant's `held` names the doubted action, not the call
+You can rely on four things. A held memo variant's `held` names the doubted action, not the call
 in front of you, and carries `underAnotherAction: true`, and its receipt's reason says so; an
 approval of it releases only that doubted action, once, exactly as the owner was shown it, and
-resuming the variant with it is refused as `approval-mismatch`. Once the owner's approval of the
-doubt has been attempted, the payment's doubt is answered and the next memo goes back to the judge,
-which can doubt it again. Dedupe stays on the exact action.
+resuming the variant with it is refused as `approval-mismatch`. Show the owner the doubted action,
+not the variant: the variant's receipt holds the variant's own args next to the doubted action's
+verdict, so a host that displays `receipt.args` for that hold would get the owner to approve
+something other than what they read. Second, once the owner's approval of the payment's doubt has
+been attempted, the payment's doubt is answered and a memo the judge has not doubted goes back to
+the judge, which can doubt it again. An approved action whose `execute` throws still counts as
+attempted, so its doubt is answered all the same. Third, approving one memo never answers a doubt
+the judge scored on another: if memo A was blocked or held, and after the window the owner approved
+memo B, A itself is still held for its owner, however the judge answers it next. Fourth, an action
+that already ran is refused as `duplicate-action` before any other memo's doubt is consulted, so a
+retry of a paid action never comes back as a hold naming some other memo. Dedupe stays on the exact
+action.
 
 The cost of that breadth falls on repeat payments. A doubt nobody answers holds every later payment
 of the same payee, amount, asset and network, so a recurring bill of the same amount to the same
 payee, under a new memo and a new idempotency key each month, stays held until the owner approves
 one of them, and on a sink with no `judgment.approvalKey` it stays held for the life of the grant.
-After the owner's approval runs, the same payment under another memo goes back to the judge, which
-may let it run: dedupe does not stop a second payment of the same amount under a different memo,
+After the owner's approval runs, the same payment under a memo the judge has not doubted goes back
+to the judge, which may let it run: dedupe does not stop a second payment of the same amount under a different memo,
 and neither do concurrent memo variants that the judge matches. Bound repeat payments with the
 grant's limits and the chain's own.
 

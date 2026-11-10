@@ -2441,9 +2441,29 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
   // stays on the exact action, and so does an approval. With no payment
   // (`payment` null) a doubt stands on the exact action alone: two null digests
   // are never the same payment, or every unpaid judged action would be held.
+  //
+  // Two slots, so that answering the payment never answers an action's own
+  // doubt. `own` is the latest real doubt scored on THIS action (its verdict's
+  // `unkeyedActionDigest` is this action's), exactly the pre-DAN-1466 record,
+  // and only the owner's approval of that verdict clears it. `payment` is the
+  // latest real doubt on any action of the payment, and the owner's approval of
+  // that verdict clears it. With one shared slot, a hold on memo B made after a
+  // block on memo A replaced A's doubt, and approving B let a resampled A run
+  // that nobody approved (the DAN-1466 security review).
   const actionState = (action: ActionSnapshot, bound: BoundJudge, payment: string | null) => {
-    let standing: { readonly verdict: Verdict; readonly label: "judgment-blocked" | "judgment-held" } | undefined
+    type Doubt = { readonly verdict: Verdict; readonly label: "judgment-blocked" | "judgment-held" }
+    let own: Doubt | undefined
+    let onPayment: Doubt | undefined
     let attempted: Verdict | undefined
+    // Whether this receipt carries the owner's approval of `doubt`'s verdict.
+    const approves = (approval: Approval | undefined, doubt: Doubt): boolean => {
+      try {
+        return approval?.verdictDigest === verdictDigest(doubt.verdict)
+      } catch {
+        // A verdict that will not digest cannot be shown to be the one approved.
+        return false
+      }
+    }
     for (const receipt of cfg.log.all()) {
       const { verdict, decision } = receipt
       if (receipt.sink !== cfg.name || verdict === undefined) continue
@@ -2452,23 +2472,24 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
       if (!sameAction && !samePayment) continue
       if (verdict.grantHash !== bound.granted.grantHash || verdict.purposeHash !== bound.purposeHash) continue
       if (decision === "judgment-blocked" || decision === "judgment-held") {
-        if (verdict.scored) standing = { verdict, label: decision }
+        if (verdict.scored) {
+          const doubt = { verdict, label: decision }
+          if (sameAction) own = doubt
+          onPayment = doubt
+        }
       } else if (decision === "attempted" || decision === "executed" || decision === "errored") {
         // Only the owner's approval of this doubt answers it (DAN-1443). Anything
         // else can land after the doubt without the owner having seen it: a late
         // `errored` from an earlier payment, a clean run on a warn sink over the
         // same log, or the release of an outage hold signed before the doubt.
-        if (decision === "attempted" && standing !== undefined) {
-          try {
-            if (receipt.approval?.verdictDigest === verdictDigest(standing.verdict)) standing = undefined
-          } catch {
-            // A verdict that will not digest cannot be shown to be the one approved.
-          }
+        if (decision === "attempted") {
+          if (own !== undefined && approves(receipt.approval, own)) own = undefined
+          if (onPayment !== undefined && approves(receipt.approval, onPayment)) onPayment = undefined
         }
         if (sameAction && (!action.keyed || verdict.actionDigest === action.digest)) attempted = verdict
       }
     }
-    return { standing, attempted }
+    return { own, onPayment, attempted }
   }
 
   // Whether the grant still stands. No check means a hand-built grant, which
@@ -2886,12 +2907,18 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
     if (violations.length > 0 && cfg.mode === "enforce") return refuseViolations()
 
     const standingAnswer = (action: ActionSnapshot, bound: BoundJudge): SinkResult<Awaited<R>> | undefined => {
-      const { standing, attempted } = actionState(action, bound, paymentDigestOfCall)
+      const { own, onPayment, attempted } = actionState(action, bound, paymentDigestOfCall)
+      // `!(now >= until)` so that a verdict whose time does not parse stands.
+      const open = (doubt: typeof own) =>
+        doubt !== undefined && !(Date.now() >= Date.parse(doubt.verdict.judgedAt) + (doubt.label === "judgment-held" ? APPROVAL_WINDOW_MS : bound.blockWindowMs))
+      // This action's own open doubt first, so a hold names this action when it
+      // can. Then an attempt of this exact action, before another action's doubt
+      // on the payment: an action that already ran is a duplicate, and a hold
+      // naming some other memo would only invite the owner to approve that one.
+      const standing = open(own) ? own : attempted === undefined && open(onPayment) ? onPayment : undefined
       if (standing !== undefined) {
         const { verdict, label } = standing
-        const until = Date.parse(verdict.judgedAt) + (label === "judgment-held" ? APPROVAL_WINDOW_MS : bound.blockWindowMs)
-        // `!(now >= until)` so that a verdict whose time does not parse stands.
-        if (!(Date.now() >= until)) {
+        {
           // A new receipt, because every sink decision lands on the log. It
           // carries the same verdict and no judge was called: retrying is free
           // and learns nothing. The receipt's reason names the verdict; the
@@ -3057,7 +3084,8 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
         // but only the owner can turn that doubt into a run. `standingAnswer`
         // above has already answered any doubt still inside its window, and
         // nothing has been awaited since it read the log.
-        const earlier = cfg.mode === "enforce" ? actionState(action, judge, paymentDigestOfCall).standing : undefined
+        const doubts = cfg.mode === "enforce" ? actionState(action, judge, paymentDigestOfCall) : undefined
+        const earlier = doubts === undefined ? undefined : doubts.own ?? doubts.onPayment
         if (!(confident && verdict.assessment === "match") || earlier !== undefined) {
           if (cfg.mode === "enforce") {
             // Only a confident mismatch is a judgment. Everything else is doubt.

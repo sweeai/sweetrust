@@ -56,11 +56,15 @@ executing, executed. It is claimed synchronously before the first await.**
    purpose names a payment (the verdict's `paymentDigest` is not null), a block or a hold answers
    every action with the same `paymentDigest`, so the same payee, amount, asset and network under
    another memo, or any other changed argument, is held or blocked without a judge call while the
-   doubt's window is open, and is held after it, by the rule above. The hold it gets names the doubted
-   action (its `actionDigest` and `verdictDigest`, with `underAnotherAction: true`), so the owner's
-   approval still releases only the exact action the owner was shown. Once that approved action is
-   attempted, the doubt on the payment is answered and the next memo goes back to the judge. The
-   in-process `judging` claim covers the payment too. Dedupe and approvals stay on the exact action.
+   doubt's window is open, and after it is judged again and held on a `match` or blocked on a
+   confident `mismatch`, by the rule above. The hold it gets names the doubted action (its
+   `actionDigest` and `verdictDigest`, with `underAnotherAction: true`), so the owner's approval still
+   releases only the exact action the owner was shown. Once that approved action is attempted, the
+   doubt on the payment is answered and a memo the judge has not doubted goes back to the judge. An
+   action's own doubt is kept apart from the payment's: approving memo B never answers a doubt the
+   judge scored on memo A, so A stays held for its owner. A duplicate of an action that already ran is
+   refused before another memo's doubt is consulted. The in-process `judging` claim covers the
+   payment too, within one sink object. Dedupe and approvals stay on the exact action.
    A sink with no payment keeps exact-action stickiness: two null digests are never one payment.
    Doubt broadly, allow narrowly. Before this, a reworded memo was a new action and a fresh judge
    sample, which the agent could ask for as often as it liked.

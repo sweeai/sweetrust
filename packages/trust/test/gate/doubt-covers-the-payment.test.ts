@@ -218,6 +218,67 @@ describe("after the window, a memo variant of a doubted payment needs its owner"
   })
 })
 
+describe("approving another memo never answers an action's own doubt", () => {
+  // The DAN-1466 security review: with one shared slot, B's fresh hold replaced
+  // A's doubt, approving B cleared it, and a resampled A ran unapproved.
+  const byMemo = (first: unknown) => {
+    let evil = 0
+    const p = {
+      name: "j",
+      model: "j@1",
+      calls: 0,
+      async assess(input: JudgmentInput) {
+        p.calls++
+        if (input.action.args.memo === "EVIL") return (++evil === 1 ? first : MATCH) as never
+        return MATCH as never
+      },
+    }
+    return p
+  }
+
+  it.each([
+    ["a block", MISMATCH, BLOCK_MS],
+    ["a hold", UNSURE, HOLD_MS],
+  ])("after %s on memo A, approving memo B's hold does not let a resampled A run", async (_label, first, windowMs) => {
+    clock()
+    const { sink, runs } = build(byMemo(first))
+    expect((await sink(pay("EVIL"))).ok).toBe(false)
+    wait(windowMs + 1)
+    const b = heldOf(await sink(pay("rent nov")))
+    expect(b.underAnotherAction).toBeUndefined()
+    expect((await sink.resume(pay("rent nov"), approve(b))).ok).toBe(true)
+    const again = await sink(pay("EVIL"))
+    expect(again.ok).toBe(false)
+    expect(again.receipt.decision).toBe("judgment-held")
+    expect(again.receipt.reason).toContain("on this action needs its owner")
+    expect(runs).toEqual(["rent nov"])
+    // Only the owner's approval of A's own doubt releases A.
+    expect((await sink.resume(pay("EVIL"), approve(heldOf(again)))).ok).toBe(true)
+    expect(runs).toEqual(["rent nov", "EVIL"])
+  })
+
+  it("after approving B, a memo the judge never doubted is judged afresh", async () => {
+    clock()
+    const { sink, runs } = build(byMemo(MISMATCH))
+    await sink(pay("EVIL"))
+    wait(BLOCK_MS + 1)
+    await sink.resume(pay("rent nov"), approve(heldOf(await sink(pay("rent nov")))))
+    expect((await sink(pay("rent dec"))).ok).toBe(true)
+    expect(runs).toEqual(["rent nov", "rent dec"])
+  })
+
+  it("an action that already ran is a duplicate, not held under another memo's doubt", async () => {
+    const { sink, runs } = build(scripted(UNSURE, UNSURE))
+    const ap = approve(heldOf(await sink(pay("a"))))
+    expect((await sink.resume(pay("a"), ap)).ok).toBe(true)
+    expect((await sink(pay("b"))).receipt.decision).toBe("judgment-held")
+    const retry = await sink(pay("a"))
+    expect(retry.ok === false && /duplicate-action/.test(retry.refusal)).toBe(true)
+    expect(retry.receipt.decision).toBe("refused")
+    expect(runs).toEqual(["a"])
+  })
+})
+
 describe("an approval stays on the exact action", () => {
   it("approving a memo variant's hold cannot resume the memo variant", async () => {
     const { sink, runs } = build(scripted(UNSURE, MATCH))
