@@ -31,7 +31,7 @@ import {
 } from "./allowance-move.ts"
 import {
   CHAIN_CHECK_ORDER, LIMIT_BY_ABORT, PER_SPEND_UNHELD_WHY, RECIPIENTS_SUCCESSOR,
-  chainLimitValue, chainOutsideWhy, chainWithinWhy, fmtDuration, fmtTime, heldWhy, limitValue, limitWords, line,
+  chainLimitValue, chainOutsideWhy, chainWithinWhy, fmtDuration, fmtTime, heldWhy, limitAmount, limitValue, limitWords, line, pastU256,
   periodPhrase, presentLimits, shortAddress, type SpendFacts,
 } from "./explain.ts"
 import type {
@@ -327,6 +327,12 @@ function snapshotHandle(where: string, h: SuiAllowance): SuiAllowance {
     if ((v as string).length > SUI_ADDRESS_CHARS) throw typeErr(where, `allowance.${k} is too long to be an address`)
   }
   const held = snapshotLimits(where, limits)
+  // open() refuses a limit past u256, so only a hand-built handle can carry one. Writing it into a
+  // receipt line is the cost (2^1073741000 never finishes formatting), so it is a programmer error
+  // here, before any chain read, and the message quotes no digits.
+  for (const [k, v] of [["lifetimeCap", held.lifetimeCap], ["rate.amount", held.rate?.amount], ["perSpendMax", held.perSpendMax]] as const) {
+    if (v !== undefined && pastU256(v)) throw typeErr(where, `allowance.limits.${k} is past u256, the largest integer Sui holds, so it is not written out; open() never returns such a handle`)
+  }
   // open() refuses a bad window as a result (EBadRateLimit), so a handle that
   // carries one was not made by open(). Caught here, before anything is sent,
   // because the receipt's arithmetic on it would otherwise throw after the
@@ -747,7 +753,7 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
     const r = limits.rate
     if (r !== undefined) {
       if (!Number.isSafeInteger(r.windowMs) || r.windowMs <= 0 || r.amount <= 0n) {
-        return pre("EBadRateLimit", "invalid-limit", `a rate needs a positive window and a positive amount; this one is ${scale.format(r.amount)} per ${r.windowMs} ms.`, ["rate"])
+        return pre("EBadRateLimit", "invalid-limit", `a rate needs a positive window and a positive amount; this one is ${limitAmount(r.amount, scale)} per ${r.windowMs} ms.`, ["rate"])
       }
       if (r.amount > U256_MAX || BigInt(r.windowMs) > U64_MAX) return plain("invalid-limit", "Refused at open(); nothing was sent. The rate does not fit Sui's integer types (u256 amount, u64 window).", null, ["rate"])
     }
@@ -761,7 +767,7 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
       return pre("ENameTooLong", "invalid-limit", `the allowance's name is at most ${MAX_NAME_BYTES} bytes; this one is ${new TextEncoder().encode(name).length}.`)
     }
     if (limits.lifetimeCap !== undefined) {
-      if (limits.lifetimeCap <= 0n) return pre("EZeroLifetimeCap", "invalid-limit", `a lifetime cap must be greater than zero; this one is ${scale.format(limits.lifetimeCap)}.`, ["lifetimeCap"])
+      if (limits.lifetimeCap <= 0n) return pre("EZeroLifetimeCap", "invalid-limit", `a lifetime cap must be greater than zero; this one is ${limitAmount(limits.lifetimeCap, scale)}.`, ["lifetimeCap"])
       if (limits.lifetimeCap > U256_MAX) return plain("invalid-limit", "Refused at open(); nothing was sent. The lifetime cap does not fit Sui's u256.", null, ["lifetimeCap"])
     }
     const startMs = limits.start?.getTime()
