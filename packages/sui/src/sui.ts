@@ -196,6 +196,18 @@ const parseCoinType = (coinType: string): string => {
   if (!boundedCoinType(coinType)) throw new TypeError("not a plausible Sui coin type")
   return normalizeStructTag(coinType)
 }
+/**
+ * `parseCoinType`, then valid: the normalizer rewrites without validating, so `0xzz::a::B` and
+ * `0x2::sui::SUI<>` come back as if canonical and would otherwise reach the chain. Intake for a
+ * handle and for `open()` goes through here. An MVR name such as `@org/app::coin::COIN` passes;
+ * only `suiPaymentSpelling` refuses it, and `parseCoinType` itself stays as `boundTo` and that
+ * spelling pin it.
+ */
+const parseValidCoinType = (coinType: string): string => {
+  const canonical = parseCoinType(coinType)
+  if (!isValidStructTag(canonical)) throw new TypeError("not a valid Sui coin type")
+  return canonical
+}
 /** Is `asset` the coin a scale is bound to? A malformed asset is not, and never throws here. */
 const boundTo = (coinType: string | null, asset: string): boolean => {
   try {
@@ -316,9 +328,9 @@ function snapshotHandle(where: string, h: SuiAllowance): SuiAllowance {
     if (typeof v !== "string") throw typeErr(where, `allowance.${k} must be a string`)
   }
   if (!boundedCoinType(asset as string)) throw typeErr(where, "allowance.asset is too long or too nested to be a coin type")
-  // open() always normalizes, so only a hand-built handle can carry one; caught here, before any chain read, not by `Transaction.coin`'s parser.
+  // open() always normalizes and validates, so only a hand-built handle can carry one; caught here, before any chain read, not by `Transaction.coin`'s parser.
   try {
-    parseCoinType(asset as string)
+    parseValidCoinType(asset as string)
   } catch {
     throw typeErr(where, "allowance.asset is not a coin type")
   }
@@ -702,7 +714,7 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
     if (typeof name !== "string") throw typeErr("open", "name must be a string")
     let assetType: string
     try {
-      assetType = parseCoinType(asset)
+      assetType = parseValidCoinType(asset)
     } catch {
       throw typeErr("open", `allowance.asset ${quotedShort(asset)} is not a Move type`)
     }
