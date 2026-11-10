@@ -303,8 +303,11 @@ describe("concurrent memo variants of a payment being judged", () => {
   })
 
   it("on a sink with no payment, concurrent different actions are judged separately", async () => {
-    // A null payment digest must not become one shared claim: the fast call
-    // would otherwise wait on, and be held by, an unrelated doubt.
+    // A null payment digest must not become one shared claim. The fast call
+    // would still be judged on its own, but only after waiting behind every
+    // unrelated judged call on the sink, so its judge must be asked while the
+    // slow one is still out, and it must finish first.
+    const order: string[] = []
     const p = {
       name: "j",
       model: "j@1",
@@ -319,10 +322,14 @@ describe("concurrent memo variants of a payment being judged", () => {
       },
     }
     const { sink, runs } = build(p, new ReceiptLog(), { payment: false })
-    const [slow, fast] = await Promise.all([sink(pay("slow")), sink(pay("fast"))])
+    const [slow, fast] = await Promise.all([
+      sink(pay("slow")).then((r) => { order.push("slow"); return r }),
+      sink(pay("fast")).then((r) => { order.push("fast"); return r }),
+    ])
     expect(slow.receipt.decision).toBe("judgment-held")
     expect(fast.ok).toBe(true)
     expect(runs).toEqual(["fast"])
+    expect(order).toEqual(["fast", "slow"])
   })
 })
 
