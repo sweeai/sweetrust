@@ -144,6 +144,8 @@ const READ_ATTEMPTS = 8
 const READ_BACKOFF_MS = 400
 /** What a `not-authorized` receipt says about who held the rule: this check is the library's, not Sui's. */
 const AUTHORIZATION_HELD = "Held by the library, in-process: this check binds only spends routed through this library, and the spender's key can still pay through another Sui client, up to the limits Sui holds."
+/** How a receipt names an amount past u256 without writing it out. One fixed phrase, whatever the amount. */
+const OVERSIZED_AMOUNT_WORDS = "an amount past u256, the largest integer Sui holds"
 
 /**
  * The genesis checkpoint digest of each Sui network whose genesis never changes,
@@ -314,6 +316,12 @@ function snapshotHandle(where: string, h: SuiAllowance): SuiAllowance {
     if (typeof v !== "string") throw typeErr(where, `allowance.${k} must be a string`)
   }
   if (!boundedCoinType(asset as string)) throw typeErr(where, "allowance.asset is too long or too nested to be a coin type")
+  // open() always normalizes, so only a hand-built handle can carry one; caught here, before any chain read, not by `Transaction.coin`'s parser.
+  try {
+    parseCoinType(asset as string)
+  } catch {
+    throw typeErr(where, "allowance.asset is not a coin type")
+  }
   // `Transaction.coin` lowercases these. A string past V8's maximum once lowercased ends the process, uncatchably.
   for (const [k, v] of [["allowanceId", allowanceId], ["capId", capId], ["funder", funder], ["spender", spender]] as const) {
     if ((v as string).length > SUI_ADDRESS_CHARS) throw typeErr(where, `allowance.${k} is too long to be an address`)
@@ -883,13 +891,17 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
     if (typeof recipientRaw !== "string") throw typeErr("spend", "recipient must be an address string")
     const scale = scaleFor(h.asset)
     const present = presentLimits(h.limits)
-    const amountText = scale.format(amount)
+    // An amount past u256 fits no Sui integer, and writing it out is the cost: 2^1073741000 never
+    // finishes stringifying. Such an amount is never formatted, stringified or digested, so the
+    // check is two comparisons and the receipt carries null where the amount would go.
+    const oversized = amount > U256_MAX || amount < -U256_MAX
+    const amountText = oversized ? null : scale.format(amount)
     // The receipt's spender is who actually signed, not what the handle claims.
     const signerAddr = normAddr(signer.toSuiAddress())
 
     const base = {
       verb: "spend" as Verb, asset: h.asset, allowanceId: h.allowanceId, funder: h.funder, spender: signerAddr,
-      amount: amount.toString(), amountText, recipient: recipientRaw, authorizedBy,
+      amount: oversized ? null : amount.toString(), amountText, recipient: recipientRaw, authorizedBy,
     }
     // A chain-held limit's value comes from the chain object, never the handle; a
     // disagreement is flagged on the receipt, not hidden.
@@ -927,12 +939,19 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
      */
     const unauthorized = (): string | null => {
       const refused = "Refused in-process; nothing was sent."
-      const payment = `${amountText} to ${validAddr(recipientRaw) ? normAddr(recipientRaw) : quotedShort(recipientRaw)} on ${network}`
+      const payment = `${amountText ?? OVERSIZED_AMOUNT_WORDS} to ${validAddr(recipientRaw) ? normAddr(recipientRaw) : quotedShort(recipientRaw)} on ${network}`
       const noSinkIssued = `${refused} This spend of ${payment} presented an authorization that no sink issued. A verdict digest or a copied object is not an authorization: this adapter spends the one-shot token a sink hands its execute().`
       if (authorization === undefined) {
         return authorizedBy === null
           ? `${refused} This adapter requires every spend to name the verdict that approved it (requireAuthorization), and this spend of ${payment} named none.`
           : `${refused} This spend of ${payment} names a verdict by digest and presents no authorization. A digest is not an authorization: this adapter spends the one-shot token a sink hands its execute().`
+      }
+      // An amount past u256 has no payment digest, and digesting it would write it out. Refused
+      // before any token is consumed, whatever the recipient; a forgery is still named a forgery.
+      if (oversized) {
+        return SpendAuthorization.is(authorization)
+          ? `${refused} This spend's amount is ${OVERSIZED_AMOUNT_WORDS}, so it has no payment digest and no authorization can match it. The authorization presented was not consumed.`
+          : noSinkIssued
       }
       // A forgery is refused as a forgery whatever the recipient. A genuine token is not spent on a
       // recipient refused below as `invalid-address`, the one refusal that needs nothing but the argument.
@@ -958,6 +977,7 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
     }
 
     if (h.network !== network) return notSent("wrong-network", `Refused in-process; nothing was sent. The allowance is on ${h.network}, and this adapter is connected to ${network}.`)
+    if (oversized) return notSent("invalid-amount", `Refused in-process; nothing was sent. A spend must be a whole number of base units from 1 to ${U64_MAX}; this one is ${OVERSIZED_AMOUNT_WORDS}, so it is not written out here.`)
     if (amount <= 0n || amount > U64_MAX) return notSent("invalid-amount", `Refused in-process; nothing was sent. A spend must be a whole number of base units from 1 to ${U64_MAX}; this one is ${amount}.`)
     if (!validAddr(recipientRaw)) return notSent("invalid-address", `Refused in-process; nothing was sent. The recipient ${quotedShort(recipientRaw)} is not a Sui address.`)
     const recipient = normAddr(recipientRaw)
