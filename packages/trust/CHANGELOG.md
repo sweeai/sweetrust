@@ -39,6 +39,21 @@ release that makes it. A patch version changes none of these.
 
 ### Security
 
+- **A doubt on a payment covers the same payment under another memo.** A block or a hold was keyed on
+  the whole action, so an agent whose payment was held or blocked could send the same payee, amount,
+  asset and network again with a reworded memo, get a fresh judge, and run on a `match` the owner
+  never saw. On a sink that names `purposeArgs`, a doubt now stands on the payment (`paymentDigest`):
+  a memo variant, under any idempotency key, is held or blocked without a judge call inside the
+  doubt's window, and after it is judged again but held for the owner. A variant sent while the
+  payment is still being judged waits for that answer. The hold a variant gets names the doubted
+  action and sets `underAnotherAction: true` on `held`, and its receipt says so, so an approval
+  releases only the action the owner was shown, once. Once that approved action is attempted, the
+  next memo is judged afresh. A different payee, amount, asset or network is still a different
+  payment, and a judged sink with no `purposeArgs` keeps exact-action stickiness. No digest or
+  receipt shape changes (ADR 0010, DAN-1466). A log from before this change in which a memo variant
+  ran after a doubt keeps that doubt, so the next variant of that payment is held until the owner
+  approves it.
+
 - **`JudgmentVerdict.confidence` no longer claims to be calibrated.** It is whatever the provider
   reports, and `floor` is only a line drawn on that number, so re-examine a floor when the provider or
   its pinned model changes. `SECURITY.md` now also describes how a provider's text reaches the

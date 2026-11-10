@@ -1197,6 +1197,12 @@ export interface Approval {
 export interface HeldAction {
   /** Set when this hold was made under a different idempotency key; resume under that key. */
   readonly underAnotherKey?: true
+  /**
+   * Set when this call was held by a doubt on another action of the same payment,
+   * for example the same payee and amount under another memo (DAN-1466). The
+   * digests name that doubted action: an approval of them resumes it, never this call.
+   */
+  readonly underAnotherAction?: true
   readonly verdictDigest: string
   readonly actionDigest: string
   readonly grantHash: string
@@ -2410,7 +2416,8 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
   // intent record lands and is never removed, a failed execute included: the
   // action may have taken effect, and one approval is one attempt.
   const claimed = new Set<string>()
-  // Actions a judge is deciding right now, by unkeyed digest: the one state that
+  // Actions a judge is deciding right now, by payment digest when the sink names
+  // a payment and by unkeyed action digest when it does not: the one state that
   // cannot be on the log yet, because no receipt exists before the answer. The
   // claim is taken before the first await and released once the decision's
   // receipt is on the log, so concurrent identical calls wait and answer from it.
@@ -2426,12 +2433,23 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
   // Stickiness ignores the idempotency key (`unkeyed`), so no key can escape a
   // block or a hold. Dedupe keys on it: with a key, only this key's attempt is
   // a duplicate; with none, any attempt of this action is.
-  const actionState = (action: ActionSnapshot, bound: BoundJudge) => {
+  //
+  // Doubt broadly, allow narrowly (DAN-1466). On a sink whose purpose names a
+  // payment, a doubt stands on the payment (`paymentDigest`): the same payee,
+  // amount, asset and network under another memo or any other changed argument
+  // is the doubted payment, so rewording a retry cannot buy a fresh judge. Dedupe
+  // stays on the exact action, and so does an approval. With no payment
+  // (`payment` null) a doubt stands on the exact action alone: two null digests
+  // are never the same payment, or every unpaid judged action would be held.
+  const actionState = (action: ActionSnapshot, bound: BoundJudge, payment: string | null) => {
     let standing: { readonly verdict: Verdict; readonly label: "judgment-blocked" | "judgment-held" } | undefined
     let attempted: Verdict | undefined
     for (const receipt of cfg.log.all()) {
       const { verdict, decision } = receipt
-      if (receipt.sink !== cfg.name || verdict === undefined || verdict.unkeyedActionDigest !== action.unkeyed) continue
+      if (receipt.sink !== cfg.name || verdict === undefined) continue
+      const sameAction = verdict.unkeyedActionDigest === action.unkeyed
+      const samePayment = payment !== null && typeof verdict.paymentDigest === "string" && verdict.paymentDigest === payment
+      if (!sameAction && !samePayment) continue
       if (verdict.grantHash !== bound.granted.grantHash || verdict.purposeHash !== bound.purposeHash) continue
       if (decision === "judgment-blocked" || decision === "judgment-held") {
         if (verdict.scored) standing = { verdict, label: decision }
@@ -2447,7 +2465,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
             // A verdict that will not digest cannot be shown to be the one approved.
           }
         }
-        if (!action.keyed || verdict.actionDigest === action.digest) attempted = verdict
+        if (sameAction && (!action.keyed || verdict.actionDigest === action.digest)) attempted = verdict
       }
     }
     return { standing, attempted }
@@ -2820,7 +2838,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
       // under this verdict (step 2) or under another one for the same action. A
       // judge failure leaves no standing hold, so a later call can run the action
       // while the failed hold's approval is still valid; that must not pay twice.
-      if (claimed.has(approval.verdictDigest) || attempted || actionState(resumed, judge).attempted !== undefined) {
+      if (claimed.has(approval.verdictDigest) || attempted || actionState(resumed, judge, null).attempted !== undefined) {
         return refuse("approval-replayed", "this approval has already released its one execution")
       }
 
@@ -2864,7 +2882,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
     if (violations.length > 0 && cfg.mode === "enforce") return refuseViolations()
 
     const standingAnswer = (action: ActionSnapshot, bound: BoundJudge): SinkResult<Awaited<R>> | undefined => {
-      const { standing, attempted } = actionState(action, bound)
+      const { standing, attempted } = actionState(action, bound, paymentDigestOfCall)
       if (standing !== undefined) {
         const { verdict, label } = standing
         const until = Date.parse(verdict.judgedAt) + (label === "judgment-held" ? APPROVAL_WINDOW_MS : bound.blockWindowMs)
@@ -2878,10 +2896,23 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
           // A hold's approval resumes only under the key it was made with. The host
           // learns that from the receipt and from `held`; the refusal goes to the
           // agent, and saying it there would tell a hold from a block.
-          const underAnotherKey = label === "judgment-held" && verdict.actionDigest !== action.digest
-          const answered = ": this action already has this answer and was not judged again"
-          const anotherKeyNote = underAnotherKey ? "; the hold was made under a different idempotency key, so approve and resume under that key" : ""
-          const reason = `⚖ ${cfg.name} ${label}${detail}${answered}${anotherKeyNote}`
+          //
+          // A doubt on the payment answers another action of it, such as the same
+          // payment under another memo (DAN-1466). The hold still names the doubted
+          // action, so an approval of it can only resume what the owner was shown.
+          const underAnotherAction = verdict.unkeyedActionDigest !== action.unkeyed
+          const underAnotherKey = !underAnotherAction && label === "judgment-held" && verdict.actionDigest !== action.digest
+          const answered = underAnotherAction
+            ? ": this payment already has this answer, on another action of it, and was not judged again"
+            : ": this action already has this answer and was not judged again"
+          const anotherNote = underAnotherAction
+            ? label === "judgment-held"
+              ? "; the hold names the doubted action, so an approval of it resumes that action and not this one"
+              : ""
+            : underAnotherKey
+              ? "; the hold was made under a different idempotency key, so approve and resume under that key"
+              : ""
+          const reason = `⚖ ${cfg.name} ${label}${detail}${answered}${anotherNote}`
           const refusal = bound.rationaleInRefusal ? `⚖ ${cfg.name} ${label}${detail}${answered}` : `⚖ ${cfg.name} ${STOPPED_BY_JUDGMENT}`
           const receipt = cfg.log.append({ at: now(), sink: cfg.name, decision: label, args: rendered, reason, verdict })
           if (label === "judgment-blocked") return { ok: false, refusal, receipt }
@@ -2889,7 +2920,13 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
             ok: false,
             refusal,
             receipt,
-            held: Object.freeze({ verdictDigest: verdictDigest(verdict), actionDigest: verdict.actionDigest, grantHash: verdict.grantHash, ...(underAnotherKey ? { underAnotherKey: true as const } : {}) }),
+            held: Object.freeze({
+              verdictDigest: verdictDigest(verdict),
+              actionDigest: verdict.actionDigest,
+              grantHash: verdict.grantHash,
+              ...(underAnotherAction ? { underAnotherAction: true as const } : {}),
+              ...(underAnotherKey ? { underAnotherKey: true as const } : {}),
+            }),
           }
         }
       }
@@ -2930,13 +2967,18 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
       // identical calls cannot both be the one deciding.
       let settled = (): void => {}
       if (cfg.mode === "enforce") {
-        for (let wait = judging.get(action.unkeyed); wait !== undefined; wait = judging.get(action.unkeyed)) await wait
+        // The claim covers the payment, so a memo variant sent while a doubt on
+        // it is being judged waits for that answer instead of racing past it
+        // (DAN-1466). With no payment it covers the exact action. The prefixes
+        // keep a payment digest and an action digest from ever naming one claim.
+        const claim = paymentDigestOfCall !== null ? `payment:${paymentDigestOfCall}` : `action:${action.unkeyed}`
+        for (let wait = judging.get(claim); wait !== undefined; wait = judging.get(claim)) await wait
         const answer = standingAnswer(action, judge)
         if (answer !== undefined) return answer
         let release!: () => void
-        judging.set(action.unkeyed, new Promise<void>((resolve) => { release = resolve }))
+        judging.set(claim, new Promise<void>((resolve) => { release = resolve }))
         settled = () => {
-          judging.delete(action.unkeyed)
+          judging.delete(claim)
           release()
         }
       }
@@ -3010,19 +3052,21 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
         // but only the owner can turn that doubt into a run. `standingAnswer`
         // above has already answered any doubt still inside its window, and
         // nothing has been awaited since it read the log.
-        const earlier = cfg.mode === "enforce" ? actionState(action, judge).standing : undefined
+        const earlier = cfg.mode === "enforce" ? actionState(action, judge, paymentDigestOfCall).standing : undefined
         if (!(confident && verdict.assessment === "match") || earlier !== undefined) {
           if (cfg.mode === "enforce") {
             // Only a confident mismatch is a judgment. Everything else is doubt.
             const label = confident && verdict.assessment === "mismatch" ? "judgment-blocked" : "judgment-held"
             // The new sample alone would read as a clean match, so the receipt also
             // names the doubt the owner is being asked to answer.
-            const earlierNote = earlier === undefined ? "" : `; an earlier ${earlier.label} (${earlier.verdict.provider}, ${earlier.verdict.assessment}, conf ${earlier.verdict.confidence}) on this action needs its owner`
+            // A doubt on another action of this payment says so (DAN-1466).
+            const doubtedOn = earlier === undefined || earlier.verdict.unkeyedActionDigest === action.unkeyed ? "this action" : "another action of this payment"
+            const earlierNote = earlier === undefined ? "" : `; an earlier ${earlier.label} (${earlier.verdict.provider}, ${earlier.verdict.assessment}, conf ${earlier.verdict.confidence}) on ${doubtedOn} needs its owner`
             const receipt = cfg.log.append({ ...evidence, decision: label, reason: `⚖ ${cfg.name} ${label} (${providerName}, ${verdict.assessment}, ${confText}): ${rationale}${earlierNote}` })
             // The refusal goes to the agent. The judge's words, its assessment
             // and its confidence would each teach it what to change, so they come
             // back only when the host opts in (ADR 0010).
-            const refusal = `⚖ ${cfg.name} ${judge.rationaleInRefusal ? label : STOPPED_BY_JUDGMENT}${judge.rationaleInRefusal ? ` (${providerName}, ${verdict.assessment}, ${confText}): ${rationaleText}${earlier === undefined ? "" : "; an earlier doubt on this action needs its owner"}` : ""}`
+            const refusal = `⚖ ${cfg.name} ${judge.rationaleInRefusal ? label : STOPPED_BY_JUDGMENT}${judge.rationaleInRefusal ? ` (${providerName}, ${verdict.assessment}, ${confText}): ${rationaleText}${earlier === undefined ? "" : `; an earlier doubt on ${doubtedOn} needs its owner`}` : ""}`
             if (label === "judgment-blocked") return { ok: false, refusal, receipt }
             return {
               ok: false,

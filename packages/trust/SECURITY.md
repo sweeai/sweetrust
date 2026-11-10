@@ -153,20 +153,37 @@ reached the disk before `execute` ran. Loading proves the chain is consistent, n
 complete: a file cut at its tail loads as a valid shorter chain and its records are forgotten. A log
 that two processes write without sharing loses records the same way (ADR 0010).
 
-The check is in-process and keyed per sink name, grant, purpose and action digest; it does not stop
+The check is in-process and keyed per sink name, grant and purpose, and then per payment, or per
+action digest on a sink that names no payment (see *A changed argument is a new action, unless it is the same payment*); it does not stop
 a host from calling `execute`'s work some other way. Each judged call walks the log twice, so its
 cost grows with the log's length, and a retry loop that appends a receipt per retry makes each later
 call slower.
 
-### A changed argument is a new action
+### A changed argument is a new action, unless it is the same payment
 
-Stickiness holds one exact action. An argument that changes, even by one base unit of an amount or
-one word of a free-text field, is a new action and gets a new judge call, and this design does not
-prevent that. A block does not cover the action next to it. The sink withholds the assessment,
-confidence and rationale from the refusal by default so an agent has nothing to climb on, and that
-is undone if you hand the agent the receipt, which holds the assessment and confidence and, unless
-the sink redacts an argument, the rationale. What bounds an agent that keeps
-trying is the purpose's deterministic fields and the chain's own limits.
+On a sink that names `purposeArgs`, a block or a hold stands on the payment: the payee, amount,
+asset and network the verdict's `paymentDigest` hashes. Any other argument can change, a memo, a
+note, a reference, an idempotency key, and the call is still the doubted payment. Inside the doubt's
+window it is held or blocked without a judge call, and after the window it is judged again but held
+for the owner, like the exact action (DAN-1466). In-process, a memo variant sent while the payment is
+still being judged waits for that answer.
+
+You can rely on three things. A held memo variant's `held` names the doubted action, not the call
+in front of you, and carries `underAnotherAction: true`, and its receipt's reason says so; an
+approval of it releases only that doubted action, once, exactly as the owner was shown it, and
+resuming the variant with it is refused as `approval-mismatch`. Once the owner's approval of the
+doubt has been attempted, the payment's doubt is answered and the next memo goes back to the judge,
+which can doubt it again. Dedupe stays on the exact action.
+
+What is still a new action: a different payee, amount, asset or network is a different payment and
+gets a new judge call, so changing an amount by one base unit asks again, and so does a respelled
+payee unless you set `judgment.spelling` (see the next section). On a judged sink with no
+`purposeArgs` there is no payment to stand on, so stickiness holds one exact action and any changed
+argument is a new action; two such actions are never treated as one payment. The sink withholds the
+assessment, confidence and rationale from the refusal by default so an agent has nothing to climb
+on, and that is undone if you hand the agent the receipt, which holds the assessment and confidence
+and, unless the sink redacts an argument, the rationale. What bounds an agent that keeps trying is
+the purpose's deterministic fields and the chain's own limits.
 
 ### A payee or asset is compared as written
 
@@ -178,16 +195,16 @@ other spelling is refused before a judge runs; on Sui, pass `suiPaymentSpelling`
 functions in `spelling` run on agent-supplied strings inside the sink, so they must be pure and fast.
 In `observe` and `warn` a respelling is a recorded violation and is not judged, like any other
 purpose violation, so a trial in those modes has no verdict for that call. A hold or block recorded
-under another spelling before you set this does not carry over to the canonical one. This closes respelling only. Any other argument that changes, such as a memo, is
-still a new action (see *A changed argument is a new action*).
+under another spelling before you set this does not carry over to the canonical one. This closes respelling only. A memo or other argument outside the payment is covered by the
+payment's doubt (see *A changed argument is a new action, unless it is the same payment*).
 
 ### A judge outage holds the call and leaves nothing behind
 
 A judge that times out, throws or answers with something that is not a verdict holds the call, and
 the next identical call asks the judge again. Only a real assessment sticks: once a judge has really
 doubted an action, a later `match` on it is held for the owner, however long the agent waits. Set
-`judgment.approvalKey`, or that exact action stays held, under any idempotency key, for the life of
-the grant.
+`judgment.approvalKey`, or that action stays held, under any idempotency key, for the life of the
+grant; on a sink that names a payment, so does every action of that payment, under any memo.
 
 ### An idempotency key is host-attested
 
