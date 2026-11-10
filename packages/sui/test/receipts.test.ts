@@ -777,10 +777,15 @@ describe("intake: each argument field is read once", () => {
     const r = await a.spend({ signer: agent, allowance: { ...handle({ rate: RATE }), asset: "0x2::sui::SUI" }, amount: 1n, recipient: MERCHANT })
     expect(r.refusal).toBeNull()
     expect(chain.executed).toHaveLength(1)
-    const mvr = await a.remaining({ allowance: { ...handle({ rate: RATE }), asset: "@org/app::coin::COIN" } }).then(() => null, (e: unknown) => e)
-    expect(String((mvr as Error | null)?.message ?? "")).not.toContain("is not a coin type")
-    const opened = await adapter(mockChain(null, 0n)).open({ signer: principal, allowance: { network: "sui:testnet", asset: "@org/app::coin::COIN", spender: A, limits: { rate: RATE } } }).then(() => null, (e: unknown) => e)
-    expect(String((opened as Error | null)?.message ?? "")).not.toContain("is not a Move type")
+    // An MVR name passes intake: remaining goes on to read the chain and answers, and open() answers
+    // with a receipt (the mock cannot resolve the name, so the build fails) instead of throwing.
+    const core = chain.client.core as unknown as Record<string, (...a: Array<unknown>) => unknown>
+    const spies = Object.keys(core).map((k) => vi.spyOn(core, k))
+    const status = await a.remaining({ allowance: { ...handle({ rate: RATE }), asset: "@org/app::coin::COIN" } })
+    expect(status.exists).toBe(true)
+    expect(spies.reduce((n, s) => n + s.mock.calls.length, 0)).toBeGreaterThan(0)
+    const { receipt } = await adapter(mockChain(null, 0n)).open({ signer: principal, allowance: { network: "sui:testnet", asset: "@org/app::coin::COIN", spender: A, limits: { rate: RATE } } })
+    expect(receipt.refusal?.why ?? "").not.toContain("is not a Move type")
   })
 })
 
