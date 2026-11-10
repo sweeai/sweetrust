@@ -334,6 +334,27 @@ describe("spend(): rejected before execution", () => {
     expect(r.refusal?.why).toContain(`Allowance ${ALLOWANCE_ID} was not found on sui:testnet`)
     expect(`${r.summary} ${r.limits.map((l) => l.why).join(" ")}`).not.toMatch(/revoked/i)
   })
+
+  it("an amount past u256 is `invalid-amount` in one fixed sentence, and its digits appear nowhere on the receipt", async () => {
+    const U256 = (1n << 256n) - 1n
+    const whys = new Set<string | undefined>()
+    // The last one never finishes stringifying, so this test answering at all is the proof it is never written out.
+    for (const amount of [U256 + 1n, -(U256 + 1n), 1n << 1_073_741_000n]) {
+      const chain = mockChain(null, 0n)
+      const r = await adapter(chain).spend({ signer: agent, allowance: handle({ rate: RATE }), amount, recipient: MERCHANT })
+      expect(chain.executed).toHaveLength(0)
+      expect(r).toMatchObject({ verdict: "refused", amount: null, amountText: null, refusal: { code: "invalid-amount", refusedBy: "library" } })
+      const json = JSON.stringify(r)
+      expect(json.length).toBeLessThan(20_000)
+      if (amount < 1n << 300n) expect(json).not.toContain((amount < 0n ? -amount : amount).toString())
+      whys.add(r.refusal?.why)
+    }
+    expect([...whys]).toEqual(["Refused in-process; nothing was sent. A spend must be a whole number of base units from 1 to 18446744073709551615; this one is an amount past u256, the largest integer Sui holds, so it is not written out here."])
+    // At u256 itself the amount is still stated, as before.
+    const atMax = await adapter(mockChain(null, 0n)).spend({ signer: agent, allowance: handle({ rate: RATE }), amount: U256, recipient: MERCHANT })
+    expect(atMax).toMatchObject({ amount: String(U256), amountText: testUSD.format(U256), refusal: { code: "invalid-amount" } })
+    expect(atMax.refusal?.why).toContain(`this one is ${U256}.`)
+  })
 })
 
 // ── revoke() ─────────────────────────────────────────────────────────────────
@@ -694,6 +715,25 @@ describe("intake: each argument field is read once", () => {
     expect(reads).toBe(1)
     expect(receipt.verdict).toBe("executed")
     expect(lineOf(receipt, "lifetimeCap").value).toBe("30.00 testUSD in total")
+  })
+
+  it.each(["junk", "vector<u8>"])("a hand-built handle whose asset %s is not a coin type is rejected by spend, revoke and remaining before any chain read", async (asset) => {
+    const chain = mockChain(allowanceState({ funder: P, spender: A, rate: windowed(0n, null) }), 0n)
+    const core = chain.client.core as unknown as Record<string, (...a: Array<unknown>) => unknown>
+    const spies = Object.keys(core).map((k) => vi.spyOn(core, k))
+    const bad = { ...handle({ rate: RATE }), asset }
+    const a = adapter(chain)
+    for (const call of [
+      () => a.spend({ signer: agent, allowance: bad, amount: 1n, recipient: MERCHANT }),
+      () => a.revoke({ signer: principal, allowance: bad }),
+      () => a.remaining({ allowance: bad }),
+    ]) {
+      const err = await call().then(() => null, (e: unknown) => e)
+      expect(err).toBeInstanceOf(TypeError)
+      expect((err as TypeError).message).toContain("allowance.asset is not a coin type")
+    }
+    expect(spies.reduce((n, s) => n + s.mock.calls.length, 0)).toBe(0)
+    expect(chain.executed).toHaveLength(0)
   })
 })
 
@@ -1079,11 +1119,38 @@ describe("spend(): authorizedBy binds a payment to the verdict that approved it"
     }
   })
 
-  it("an amount or asset the digest cannot take is a refusal, never a throw", async () => {
+  it("an amount the digest cannot take is a refusal, and an asset that is not a coin type is rejected at intake", async () => {
     const negative = live()
     expectRefused(await pay(negative, await tokenFor(), { amount: -1n }), negative)
     const badAsset = live()
-    expectRefused(await pay(badAsset, await tokenFor(), { allowance: { ...handle({ rate: RATE }), asset: "not a type" } }), badAsset)
+    await expect(pay(badAsset, await tokenFor(), { allowance: { ...handle({ rate: RATE }), asset: "not a type" } })).rejects.toThrow(/is not a coin type/)
+  })
+
+  it("an amount past u256 is `not-authorized` without digesting it, and a genuine token presented with it stays unspent", async () => {
+    const U256 = (1n << 256n) - 1n
+    const before = allowanceState({ funder: P, spender: A, rate: windowed(0n, null) })
+    const chain = mockChain(before, 0n)
+    const token = await tokenFor()
+    // The last amount never finishes stringifying, so answering at all shows it is never digested.
+    for (const amount of [U256 + 1n, -(U256 + 1n), 1n << 1_073_741_000n]) {
+      for (const over of [{ amount }, { amount, recipient: "nope" }, { amount, recipient: `0x${MERCHANT.slice(2).toUpperCase()}` }]) {
+        const genuine = await pay(chain, token, over)
+        expectRefused(genuine, chain)
+        expect(genuine).toMatchObject({ amount: null, amountText: null })
+        expect(genuine.refusal?.why).toContain("no payment digest")
+        expect(JSON.stringify(genuine).length).toBeLessThan(20_000)
+        // A forged authorization, with requireAuthorization off: refused as a forgery, never digested either.
+        const forged = await pay(chain, undefined, { ...over, authorization: {} }, false)
+        expectRefused(forged, chain)
+        expect(forged.refusal?.why).toContain("no sink issued")
+        expect(forged.refusal?.why).not.toContain("no payment digest")
+      }
+      // requireAuthorization with none presented stays `not-authorized`, as before.
+      expectRefused(await pay(chain, undefined, { amount }), chain)
+    }
+    // Every refusal above was local, so the token still pays the one payment it approved.
+    chain.script.push({ kind: "executed", digest: DIGEST(1), timestampMs: ANCHOR, after: { ...before, currentSpend: AMOUNT, rate: windowed(AMOUNT, ANCHOR) } })
+    expect(await pay(chain, token)).toMatchObject({ verdict: "executed", authorizedBy: token.authorizedBy })
   })
 
   it("runs before every other check and before any chain read", async () => {

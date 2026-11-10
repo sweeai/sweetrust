@@ -209,7 +209,10 @@ export interface AllowanceReceipt {
   readonly atSource: "chain" | "local"
   readonly funder: string | null
   readonly spender: string
-  /** Spend only: base units, and the same amount in the adapter's display scale. */
+  /**
+   * Spend only: base units, and the same amount in the adapter's display scale. Both are null on a
+   * spend refused because its amount is past u256, which is never written out.
+   */
   readonly amount: string | null
   readonly amountText: string | null
   readonly recipient: string | null

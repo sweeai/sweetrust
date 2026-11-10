@@ -23,6 +23,19 @@ on mainnet; this package has spent only on testnet). Tested against `@mysten/sui
 
 ### Security
 
+- **A spend's amount past u256 can no longer stall your process.** `spend` used to format and write out
+  the amount before refusing it, and an agent's `1n << 1073741000n` never returned. Now an amount
+  whose size is past u256, positive or negative, is refused at once as `invalid-amount` with one
+  fixed sentence, and the receipt's `amount` and `amountText` are `null`. With an authorization
+  presented it is `not-authorized` and is never digested, and a genuine token presented with it is
+  not consumed, so it still pays the payment it approved. Amounts up to u256 read as before (DAN-1463).
+- **A hand-built handle whose asset the Sui SDK cannot parse as a coin type is rejected at intake.**
+  `spend`, `revoke` and `remaining` throw a `TypeError` naming `allowance.asset is not a coin type`
+  before any chain read, instead of the SDK's raw `Invalid struct tag` from inside the send. This
+  changes one behavior: a spend presenting an authorization with such a handle used to return a
+  `not-authorized` receipt, and now throws, as any malformed handle does. A handle from `open` is
+  unaffected (DAN-1463).
+
 - **`chainSpends` now finds a spend from what moved, not from the command list.** It lists a
   transaction when an input withdraws from this allowance (`FUNDS_WITHDRAWAL`, `source:
   SENDER_ALLOWANCE`), so a spend through your own Move module no longer reads clean, and the asset
