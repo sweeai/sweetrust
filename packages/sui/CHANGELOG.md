@@ -31,10 +31,10 @@ on mainnet; this package has spent only on testnet). Tested against `@mysten/sui
   not consumed, so it still pays the payment it approved. Amounts up to u256 read as before (DAN-1463).
 - **A hand-built handle whose asset the Sui SDK cannot parse as a coin type is rejected at intake.**
   `spend`, `revoke` and `remaining` throw a `TypeError` naming `allowance.asset is not a coin type`
-  before any chain read, instead of the SDK's raw `Invalid struct tag` from inside the send. This
-  changes one behavior: a spend presenting an authorization with such a handle used to return a
-  `not-authorized` receipt, and now throws, as any malformed handle does. A handle from `open` is
-  unaffected (DAN-1463).
+  before any chain read, instead of the SDK's raw `Invalid struct tag` from inside the send. Calls
+  that used to answer with such a handle now throw, as any malformed handle does: `remaining` used to
+  return a status, `revoke` a `not-submitted` or `errored` receipt, and `spend` an `invalid-amount`,
+  `wrong-network` or `not-authorized` receipt. A handle from `open` is unaffected (DAN-1463).
 
 - **`chainSpends` now finds a spend from what moved, not from the command list.** It lists a
   transaction when an input withdraws from this allowance (`FUNDS_WITHDRAWAL`, `source:
