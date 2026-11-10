@@ -62,7 +62,15 @@ executing, executed. It is claimed synchronously before the first await.**
    releases only the exact action the owner was shown. Once that approved action is attempted, the
    doubt on the payment is answered and a memo the judge has not doubted goes back to the judge. An
    action's own doubt is kept apart from the payment's: approving memo B never answers a doubt the
-   judge scored on memo A, so A stays held for its owner. A duplicate of an action that already ran is
+   judge scored on memo A, so A stays held for its owner. No doubt stands in for another: the sink
+   keeps every unanswered scored doubt on the payment, not the latest one, and an approval answers
+   the doubt it names, never one still inside its window when the approved one was judged. A doubt
+   whose window had passed by then is answered for the payment's other memos (the owner was shown a
+   hold made because of it), and for its own memo only by an approval on that memo. A verdict
+   recorded while another sink's block on the payment is still open is recorded as a block, and a
+   receipt names the strongest standing doubt (open over expired, block over hold), not the latest.
+   A one-slot record let a later hold on memo B, once approved, hide memo A's open block (the third
+   DAN-1466 review). A duplicate of an action that already ran is
    refused before another memo's doubt is consulted. The in-process `judging` claim covers the
    payment too, within one sink object. Dedupe and approvals stay on the exact action.
    A sink with no payment keeps exact-action stickiness: two null digests are never one payment.

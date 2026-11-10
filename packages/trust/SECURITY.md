@@ -171,10 +171,27 @@ Within one sink object, a memo variant sent while the payment is still being jud
 answer. A second sink object over the same log does not wait; it reads the log again once its own
 judge returns. A doubt or an attempt that another sink wrote on this same action stands, and the
 receipt says another sink decided it. A doubt on another action of the payment does not replace
-this action's own verdict: that verdict is recorded, and the payment's doubt holds or blocks the
+this action's own verdict: that verdict is recorded, and the payment's doubts hold or block the
 call through it, so approving the other action never leaves this one without a doubt of its own.
-In that race a `match` is held under its own verdict, and then needs its owner like any doubted
-action.
+In that race the call's own verdict is recorded as a block whenever a doubt on the payment that is
+still inside its window is a block, even when the judge said `match`, so no hold exists for the
+owner to approve under an open block; otherwise a `match` or an `unsure` is held under its own
+verdict and a confident `mismatch` is blocked. Either way it is now a doubt of its own, with its own
+window, and needs its owner like any doubted action. A second sink whose judge answers before the
+first sink's doubt reaches the log does not see that doubt, and runs on a `match` when no other
+doubt on the payment stands.
+
+A payment can therefore carry more than one doubt at a time, and each one stands on its own until
+it is answered. Only the owner's approval answers a doubt, and an approval answers the doubt it
+names (and that action's own earlier doubts whose windows had passed when the approved one was
+judged), never a doubt that was still inside its window when the approved one was judged. While
+any unanswered doubt on the payment is inside its window, a call for another memo of the payment
+that reaches the sink is held or blocked by it without a judge call, whichever other doubts the
+owner has approved. When a call is answered from the payment's doubts, or judged while some still
+stand, its receipt names the strongest of them: one still inside its window over one whose window
+has passed, a block over a hold, then the judge's own assessment (`mismatch` over `unsure` over
+`match`). A receipt never names a weaker doubt that happens to be
+the latest, and a call that was judged never says it was not judged again.
 
 You can rely on four things. A held memo variant's `held` names the doubted action, not the call
 in front of you, and carries `underAnotherAction: true`, and its receipt's reason says so; an
@@ -182,22 +199,27 @@ approval of it releases only that doubted action, once, exactly as the owner was
 resuming the variant with it is refused as `approval-mismatch`. Show the owner the doubted action,
 not the variant: the variant's receipt holds the variant's own args next to the doubted action's
 verdict, so a host that displays `receipt.args` for that hold would get the owner to approve
-something other than what they read. Second, once the owner's approval of the payment's doubt has
-been attempted, the payment's doubt is answered and a memo the judge has not doubted goes back to
-the judge, which can doubt it again. An approved action whose `execute` throws still counts as
-attempted, so its doubt is answered all the same. Third, approving one memo never answers a doubt
-the judge scored on another: if memo A was blocked or held, and after the window the owner approved
-memo B, A itself is still held for its owner, however the judge answers it next. Fourth, an action
-that already ran is refused as `duplicate-action` before any other memo's doubt is consulted, so a
-retry of a paid action never comes back as a hold naming some other memo. Dedupe stays on the exact
-action.
+something other than what they read. Second, once the owner's approval of a doubt has been
+attempted, that doubt is answered. A memo the judge has not doubted goes back to the judge once no
+unanswered doubt on the payment is inside its window, and the judge can doubt it again; it can run only when
+no doubt on the payment is left standing. A doubt whose window had passed when the approved one
+was judged counts as answered for those other memos, although the approved hold's receipt named
+only the strongest doubt standing then. A doubt still inside its window then is not answered for
+any memo: the other memos stay held or blocked under it, and after its window they are judged
+again and still need its owner (the expired-doubt rule, per doubt). An approved action whose
+`execute` throws still counts as attempted, so its doubt is answered all the same. Third, approving
+one memo never answers a doubt the judge scored on another for that other memo: if memo A was
+blocked or held and the owner approved memo B, A itself stays held or blocked for its owner,
+however the judge answers it next. Fourth, an action that already ran is refused as
+`duplicate-action` before any other memo's doubt is consulted, so a retry of a paid action never
+comes back as a hold naming some other memo. Dedupe stays on the exact action.
 
 The cost of that breadth falls on repeat payments. A doubt nobody answers holds every later payment
 of the same payee, amount, asset and network, so a recurring bill of the same amount to the same
 payee, under a new memo and a new idempotency key each month, stays held until the owner approves
 one of them, and on a sink with no `judgment.approvalKey` it stays held for the life of the grant.
-After the owner's approval runs, the same payment under a memo the judge has not doubted goes back
-to the judge, which may let it run: dedupe does not stop a second payment of the same amount under a different memo,
+After the owner's approval runs, and no other doubt on the payment stands, the same payment under a
+memo the judge has not doubted goes back to the judge, which may let it run: dedupe does not stop a second payment of the same amount under a different memo,
 and neither do concurrent memo variants that the judge matches. Bound repeat payments with the
 grant's limits and the chain's own.
 

@@ -46,19 +46,28 @@ release that makes it. A patch version changes none of these.
   a memo variant, under any idempotency key, is held or blocked without a judge call inside the
   doubt's window. After it, the variant is judged again: a `match` is held for the owner and a
   confident `mismatch` is blocked. Within one sink object, a variant sent while the payment is still
-  being judged waits for that answer; a second sink over the same log reads the log again once its
-  judge returns, and records its own verdict rather than answering from another memo's doubt, so
-  approving that other memo does not release it. The hold a variant gets names the doubted action and sets
+  being judged waits for that answer. A second sink over the same log reads the log again once its
+  judge returns and records its own verdict rather than answering from another memo's doubt, so
+  approving that other memo does not release it; if a doubt on the payment that is still inside its
+  window is a block, that verdict is recorded as a block even on a `match`, so there is no hold to
+  approve. A second sink whose judge answers before the other sink's doubt reaches the log still
+  runs on a `match`. The hold a variant gets names the doubted action and sets
   `underAnotherAction: true` on `held`, and its receipt says so, so an approval releases only the
-  action the owner was shown, once; show the owner that action, not the variant's receipt args. Once
-  that approved action is attempted (even if `execute` throws), a memo the judge has not doubted is
-  judged afresh. Approving one memo never answers a doubt the judge scored on another: a memo that
-  was itself blocked or held stays held for its owner. An action that already ran is refused as a
-  duplicate before another memo's doubt is consulted. A different payee, amount, asset or network is still a different
-  payment, and a judged sink with no `purposeArgs` keeps exact-action stickiness. No digest or
-  receipt shape changes (ADR 0010, DAN-1466). A log from before this change in which a memo variant
-  ran after a doubt keeps that doubt, so the next variant of that payment is held until the owner
-  approves it.
+  action the owner was shown, once; show the owner that action, not the variant's receipt args.
+  A payment can carry several doubts at once, and each stands until an owner's approval answers it,
+  once that approval is attempted (even if `execute` throws). The approval of a doubt answers that
+  doubt. It never answers another doubt that was still inside its window when the approved one was
+  judged, so approving memo B never lets a reworded memo run inside memo A's open block or hold. A
+  doubt whose window had passed when the approved one was judged is answered too, but for its own
+  memo only when the approved doubt is on that same memo: approving memo B lets the payment's other
+  memos go back to the judge, while a memo that was itself blocked or held stays held for its
+  owner. A receipt answered from the payment's doubts names the strongest one standing (open over expired,
+  block over hold), not the latest. An action that already ran is refused as a duplicate before
+  another memo's doubt is consulted. A different payee, amount, asset or network is still a
+  different payment, and a judged sink with no `purposeArgs` keeps exact-action stickiness. No
+  digest or receipt shape changes (ADR 0010, DAN-1466). A log from before this change in which a
+  memo variant ran after a doubt keeps that doubt, so the next variant of that payment is held or
+  blocked until the owner answers it.
 
 - **`JudgmentVerdict.confidence` no longer claims to be calibrated.** It is whatever the provider
   reports, and `floor` is only a line drawn on that number, so re-examine a floor when the provider or

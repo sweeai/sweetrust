@@ -530,3 +530,139 @@ describe("the doubt is no wider than the payment", () => {
     expect(runs).toEqual(["a", "b"])
   })
 })
+
+describe("two sinks over one log: one doubt never stands in for another that is still open", () => {
+  // The third DAN-1466 review (rework 3). Sink2's judge was out on memo B while
+  // sink1 doubted memo A. B came back `match` and, with one "latest doubt" slot
+  // per payment, B's own verdict became an approvable hold; approving B emptied
+  // the slot, and a reworded memo C ran inside A's open block (F1). With no
+  // approval at all, C was judged afresh inside A's block and its receipt named
+  // B's match-hold instead of A's block (F1b). Each doubt now stands on its own
+  // until it is answered, and receipts name the strongest open one.
+  const straddle = async (aAnswer: unknown) => {
+    clock()
+    const log = new ReceiptLog()
+    let releaseB!: () => void
+    const gate = new Promise<void>((r) => { releaseB = r })
+    let bCalls = 0
+    const judgeB = {
+      name: "j",
+      model: "j@1",
+      async assess() {
+        bCalls++
+        if (bCalls === 1) await gate
+        return MATCH as never
+      },
+    }
+    const judgeA = byMemoAnswer(aAnswer)
+    const s1 = build(judgeA, log)
+    const s2 = build(judgeB, log)
+    const pendingB = s2.sink(pay("B"))
+    await vi.waitFor(() => expect(bCalls).toBe(1))
+    const a = await s1.sink(pay("A"))
+    releaseB()
+    const b = await pendingB
+    return { log, s1, s2, a, b, judgeA, runs: () => [...s1.runs, ...s2.runs] }
+  }
+  // A judge that answers `aAnswer` for memo A and `match` for everything else.
+  const byMemoAnswer = (aAnswer: unknown) => {
+    const p = {
+      name: "j",
+      model: "j@1",
+      calls: 0,
+      async assess(input: JudgmentInput) {
+        p.calls++
+        return (input.action.args.memo === "A" ? aAnswer : MATCH) as never
+      },
+    }
+    return p
+  }
+
+  it("F1, block: B's match is blocked under A's open block, so there is no hold to approve and C cannot run", async () => {
+    const { s1, a, b, judgeA, runs } = await straddle(MISMATCH)
+    expect(a.receipt.decision).toBe("judgment-blocked")
+    // B's own verdict reaches the log, as a block, and its receipt names A's open block.
+    expect(b.ok).toBe(false)
+    expect(b.receipt.decision).toBe("judgment-blocked")
+    expect("held" in b).toBe(false)
+    expect(b.receipt.verdict?.assessment).toBe("match")
+    expect(b.receipt.verdict?.unkeyedActionDigest).not.toBe(a.receipt.verdict?.unkeyedActionDigest)
+    expect(b.receipt.reason).toContain("an earlier judgment-blocked (j, mismatch, conf 0.95) on another action of this payment needs its owner, and its window is still open")
+    expect(b.receipt.reason).not.toContain("was not judged again")
+    wait(5 * 60_000)
+    const c = await s1.sink(pay("C"))
+    expect(c.ok).toBe(false)
+    expect(c.receipt.decision).toBe("judgment-blocked")
+    expect(judgeA.calls).toBe(1)
+    expect(runs()).toEqual([])
+  })
+
+  it("F1, hold: approving B's hold answers only B's doubt, so C is still held under A's open hold", async () => {
+    const { s1, s2, a, b, judgeA, runs } = await straddle(UNSURE)
+    const heldA = heldOf(a)
+    const heldB = heldOf(b)
+    // B's hold names B itself: it is B's own verdict, held because A's doubt is open.
+    expect(heldB.actionDigest).not.toBe(heldA.actionDigest)
+    expect(heldB.underAnotherAction).toBeUndefined()
+    expect(b.receipt.reason).toContain("an earlier judgment-held (j, unsure, conf 0.3) on another action of this payment needs its owner, and its window is still open")
+    expect((await s2.sink.resume(pay("B"), approve(heldB))).ok).toBe(true)
+    wait(5 * 60_000)
+    const c = await s1.sink(pay("C"))
+    expect(c.ok).toBe(false)
+    expect(c.receipt.decision).toBe("judgment-held")
+    expect(judgeA.calls).toBe(1)
+    expect(heldOf(c)).toEqual({ ...heldA, underAnotherAction: true })
+    expect(runs()).toEqual(["B"])
+  })
+
+  it("F1, hold: after A's window, B's earlier approval still does not answer A's doubt; C's fresh hold does", async () => {
+    const { s1, s2, a, b, judgeA, runs } = await straddle(UNSURE)
+    expect((await s2.sink.resume(pay("B"), approve(heldOf(b)))).ok).toBe(true)
+    wait(HOLD_MS + 1)
+    // A's window has passed, but B was judged while it was open, so B's approval
+    // never answered it (DAN-1443, per doubt): C is judged again and still held.
+    const c = await s1.sink(pay("C"))
+    expect(judgeA.calls).toBe(2)
+    expect(c.receipt.decision).toBe("judgment-held")
+    expect(heldOf(c).actionDigest).not.toBe(heldOf(a).actionDigest)
+    expect(c.receipt.reason).toContain("an earlier judgment-held (j, unsure, conf 0.3) on another action of this payment needs its owner")
+    expect(c.receipt.reason).not.toContain("window is still open")
+    expect(runs()).toEqual(["B"])
+    // The owner approves C, shown A's expired doubt: that answers the payment for
+    // a memo the judge has not doubted (settled rule 4), and never answers A for A.
+    expect((await s1.sink.resume(pay("C"), approve(heldOf(c)))).ok).toBe(true)
+    expect((await s1.sink(pay("D"))).ok).toBe(true)
+    const again = await s1.sink(pay("A"))
+    expect(again.receipt.decision).toBe("judgment-held")
+    expect(again.receipt.reason).toContain("on this action needs its owner")
+    expect(runs().sort()).toEqual(["B", "C", "D"])
+  })
+
+  it("F1b, block: with no approval, C inside A's block is blocked unjudged and its receipt names A's block, not B's", async () => {
+    const { s1, a, b, judgeA, runs } = await straddle(MISMATCH)
+    expect(b.receipt.decision).toBe("judgment-blocked")
+    wait(16 * 60_000)
+    const c = await s1.sink(pay("C"))
+    expect(c.ok).toBe(false)
+    expect(c.receipt.decision).toBe("judgment-blocked")
+    expect(judgeA.calls).toBe(1)
+    // The strongest open doubt is A's confident mismatch, and the call was not judged.
+    expect(c.receipt.verdict).toEqual(a.receipt.verdict)
+    expect(c.receipt.reason).toContain("(j, mismatch, conf 0.95)")
+    expect(c.receipt.reason).toContain("was not judged again")
+    expect(runs()).toEqual([])
+  })
+
+  it("F1b, hold: C inside both windows is held unjudged under A's unsure, not B's match-hold", async () => {
+    const { s1, a, b, judgeA, runs } = await straddle(UNSURE)
+    expect(b.receipt.decision).toBe("judgment-held")
+    wait(5 * 60_000)
+    const c = await s1.sink(pay("C"))
+    expect(c.receipt.decision).toBe("judgment-held")
+    expect(judgeA.calls).toBe(1)
+    expect(c.receipt.verdict).toEqual(a.receipt.verdict)
+    expect(heldOf(c)).toEqual({ ...heldOf(a), underAnotherAction: true })
+    expect(c.receipt.reason).toContain("(j, unsure, conf 0.3)")
+    expect(runs()).toEqual([])
+  })
+})
