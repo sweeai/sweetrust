@@ -35,6 +35,17 @@ on mainnet; this package has spent only on testnet). Tested against `@mysten/sui
   that used to answer with such a handle now throw, as any malformed handle does: `remaining` used to
   return a status, `revoke` a `not-submitted` or `errored` receipt, and `spend` an `invalid-amount`,
   `wrong-network` or `not-authorized` receipt. A handle from `open` is unaffected (DAN-1463).
+- **A limit past u256 can no longer stall your process either.** A receipt writes each limit out, and
+  a `lifetimeCap`, `rate.amount` or `perSpendMax` of `1n << 1073741000n` never finished formatting.
+  On a hand-built handle, such a limit (positive or negative) now makes `spend`, `revoke` and
+  `remaining` throw a `TypeError` naming the field and u256, before any chain read; `open` never
+  returns such a handle. For `remaining` this changes one answer: it used to hang only when the
+  allowance could not be read or was not found, and returned a status when it was found, because it
+  then reads the chain's limits rather than the handle's. At `open`, a grant with one is still refused as a result,
+  by whichever check fails first, exactly as before (`invalid-limit` for an oversized cap or rate,
+  `limit-unheld` for `perSpendMax`, `unbounded-time` for a cap with no expiry and no rate), and the value reads
+  as "an amount past u256 (not written out)" in the sentence and the limit lines.
+  Limits up to u256 read exactly as before (DAN-1469).
 
 - **`chainSpends` now finds a spend from what moved, not from the command list.** It lists a
   transaction when an input withdraws from this allowance (`FUNDS_WITHDRAWAL`, `source:
