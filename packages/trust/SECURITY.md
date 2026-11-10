@@ -175,6 +175,15 @@ resuming the variant with it is refused as `approval-mismatch`. Once the owner's
 doubt has been attempted, the payment's doubt is answered and the next memo goes back to the judge,
 which can doubt it again. Dedupe stays on the exact action.
 
+The cost of that breadth falls on repeat payments. A doubt nobody answers holds every later payment
+of the same payee, amount, asset and network, so a recurring bill of the same amount to the same
+payee, under a new memo and a new idempotency key each month, stays held until the owner approves
+one of them, and on a sink with no `judgment.approvalKey` it stays held for the life of the grant.
+After the owner's approval runs, the same payment under another memo goes back to the judge, which
+may let it run: dedupe does not stop a second payment of the same amount under a different memo,
+and neither do concurrent memo variants that the judge matches. Bound repeat payments with the
+grant's limits and the chain's own.
+
 What is still a new action: a different payee, amount, asset or network is a different payment and
 gets a new judge call, so changing an amount by one base unit asks again, and so does a respelled
 payee unless you set `judgment.spelling` (see the next section). On a judged sink with no

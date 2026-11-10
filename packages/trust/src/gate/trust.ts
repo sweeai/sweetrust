@@ -2448,7 +2448,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
       const { verdict, decision } = receipt
       if (receipt.sink !== cfg.name || verdict === undefined) continue
       const sameAction = verdict.unkeyedActionDigest === action.unkeyed
-      const samePayment = payment !== null && typeof verdict.paymentDigest === "string" && verdict.paymentDigest === payment
+      const samePayment = payment !== null && verdict.paymentDigest === payment
       if (!sameAction && !samePayment) continue
       if (verdict.grantHash !== bound.granted.grantHash || verdict.purposeHash !== bound.purposeHash) continue
       if (decision === "judgment-blocked" || decision === "judgment-held") {
@@ -2797,6 +2797,10 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
           }
           if (digest !== approval.verdictDigest) continue
           if (receipt.decision !== "judgment-held") attempted = true
+          // The FIRST held receipt is load-bearing: it is the one the judge wrote,
+          // with the doubted action's own args. A later one under this verdict can
+          // be a memo variant's (DAN-1466), which carries this verdict and its own
+          // args, so the amount-type check and the expiry below must not read it.
           else if (heldReceipt === undefined) {
             heldReceipt = receipt
             heldVerdict = v
@@ -2900,18 +2904,19 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
           // A doubt on the payment answers another action of it, such as the same
           // payment under another memo (DAN-1466). The hold still names the doubted
           // action, so an approval of it can only resume what the owner was shown.
-          const underAnotherAction = verdict.unkeyedActionDigest !== action.unkeyed
-          const underAnotherKey = !underAnotherAction && label === "judgment-held" && verdict.actionDigest !== action.digest
+          // One discriminant, so the two `held` flags can never both be set.
+          const names: "this" | "another-action" | "another-key" = verdict.unkeyedActionDigest !== action.unkeyed
+            ? "another-action"
+            : verdict.actionDigest !== action.digest ? "another-key" : "this"
+          const underAnotherAction = names === "another-action"
+          const underAnotherKey = names === "another-key" && label === "judgment-held"
           const answered = underAnotherAction
             ? ": this payment already has this answer, on another action of it, and was not judged again"
             : ": this action already has this answer and was not judged again"
-          const anotherNote = underAnotherAction
-            ? label === "judgment-held"
-              ? "; the hold names the doubted action, so an approval of it resumes that action and not this one"
-              : ""
-            : underAnotherKey
-              ? "; the hold was made under a different idempotency key, so approve and resume under that key"
-              : ""
+          const anotherNote = label !== "judgment-held" ? ""
+            : underAnotherAction ? "; the hold names the doubted action, so an approval of it resumes that action and not this one"
+            : underAnotherKey ? "; the hold was made under a different idempotency key, so approve and resume under that key"
+            : ""
           const reason = `⚖ ${cfg.name} ${label}${detail}${answered}${anotherNote}`
           const refusal = bound.rationaleInRefusal ? `⚖ ${cfg.name} ${label}${detail}${answered}` : `⚖ ${cfg.name} ${STOPPED_BY_JUDGMENT}`
           const receipt = cfg.log.append({ at: now(), sink: cfg.name, decision: label, args: rendered, reason, verdict })
