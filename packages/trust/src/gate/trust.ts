@@ -2906,7 +2906,15 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
     // failure is a violation too, so it refuses here and the judge never runs.
     if (violations.length > 0 && cfg.mode === "enforce") return refuseViolations()
 
-    const standingAnswer = (action: ActionSnapshot, bound: BoundJudge): SinkResult<Awaited<R>> | undefined => {
+    // `afterJudge`: this call's own judge has already answered, and the log is
+    // being read again for what another sink decided meanwhile. Only this
+    // action's own doubt or its own attempt may then replace the fresh verdict.
+    // Another action's doubt on the payment must not: it would discard this
+    // action's own verdict, which then never reaches the log, so approving that
+    // other action would leave this one with no doubt of its own (the DAN-1466
+    // adversarial review). The fresh verdict goes on the log instead, and the
+    // payment's doubt still holds it, through `earlier`.
+    const standingAnswer = (action: ActionSnapshot, bound: BoundJudge, afterJudge = false): SinkResult<Awaited<R>> | undefined => {
       const { own, onPayment, attempted } = actionState(action, bound, paymentDigestOfCall)
       // `!(now >= until)` so that a verdict whose time does not parse stands.
       const open = (doubt: typeof own) =>
@@ -2915,7 +2923,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
       // can. Then an attempt of this exact action, before another action's doubt
       // on the payment: an action that already ran is a duplicate, and a hold
       // naming some other memo would only invite the owner to approve that one.
-      const standing = open(own) ? own : attempted === undefined && open(onPayment) ? onPayment : undefined
+      const standing = open(own) ? own : !afterJudge && attempted === undefined && open(onPayment) ? onPayment : undefined
       if (standing !== undefined) {
         const { verdict, label } = standing
         {
@@ -2937,9 +2945,12 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
             : verdict.actionDigest !== action.digest ? "another-key" : "this"
           const underAnotherAction = names === "another-action"
           const underAnotherKey = names === "another-key" && label === "judgment-held"
-          const answered = underAnotherAction
-            ? ": this payment already has this answer, on another action of it, and was not judged again"
-            : ": this action already has this answer and was not judged again"
+          // After this call's own judge answered, the text must not say it was not judged.
+          const answered = afterJudge
+            ? ": another sink decided this action while its judge was out, and that answer stands"
+            : underAnotherAction
+              ? ": this payment already has this answer, on another action of it, and was not judged again"
+              : ": this action already has this answer and was not judged again"
           const anotherNote = label !== "judgment-held" ? ""
             : underAnotherAction ? "; the hold names the doubted action, so an approval of it resumes that action and not this one"
             : underAnotherKey ? "; the hold was made under a different idempotency key, so approve and resume under that key"
@@ -3040,7 +3051,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
         // have decided or run this action while this judge was out. Nothing
         // between here and execute() awaits, so the first to get here wins.
         if (cfg.mode === "enforce") {
-          const decidedElsewhere = standingAnswer(action, judge)
+          const decidedElsewhere = standingAnswer(action, judge, true)
           if (decidedElsewhere !== undefined) return decidedElsewhere
         }
         const scored = !("failure" in answer)

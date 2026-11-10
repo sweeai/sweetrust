@@ -169,7 +169,12 @@ window it is held or blocked without a judge call. After the window it is judged
 is held for the owner, like the exact action, and a confident `mismatch` is blocked (DAN-1466).
 Within one sink object, a memo variant sent while the payment is still being judged waits for that
 answer. A second sink object over the same log does not wait; it reads the log again once its own
-judge returns, and answers from a doubt it finds there.
+judge returns. A doubt or an attempt that another sink wrote on this same action stands, and the
+receipt says another sink decided it. A doubt on another action of the payment does not replace
+this action's own verdict: that verdict is recorded, and the payment's doubt holds or blocks the
+call through it, so approving the other action never leaves this one without a doubt of its own.
+In that race a `match` is held under its own verdict, and then needs its owner like any doubted
+action.
 
 You can rely on four things. A held memo variant's `held` names the doubted action, not the call
 in front of you, and carries `underAnotherAction: true`, and its receipt's reason says so; an

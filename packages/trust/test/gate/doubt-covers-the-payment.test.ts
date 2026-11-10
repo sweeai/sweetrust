@@ -279,6 +279,78 @@ describe("approving another memo never answers an action's own doubt", () => {
   })
 })
 
+describe("two sinks over one log: a fresh doubt is never discarded for another action's", () => {
+  // The DAN-1466 adversarial review: sink2's judge was out on memo B while sink1
+  // held memo A. B's own doubt came back, the re-read found A's hold on the same
+  // payment and answered with it, so B's doubt never reached the log; approving
+  // A then cleared the payment, and a resampled B ran with no approval.
+  it.each([
+    ["a confident mismatch", MISMATCH, "judgment-blocked"],
+    ["an unsure", UNSURE, "judgment-held"],
+  ])("B's %s reaches the log, and approving A does not let B run", async (_label, bFirst, bDecision) => {
+    const log = new ReceiptLog()
+    let releaseB!: () => void
+    const gate = new Promise<void>((r) => { releaseB = r })
+    let bCalls = 0
+    const judgeB = {
+      name: "j",
+      model: "j@1",
+      async assess() {
+        bCalls++
+        if (bCalls === 1) {
+          await gate
+          return bFirst as never
+        }
+        return MATCH as never
+      },
+    }
+    const s1 = build(scripted(UNSURE), log)
+    const s2 = build(judgeB, log)
+    const pendingB = s2.sink(pay("B"))
+    await vi.waitFor(() => expect(bCalls).toBe(1))
+    const a = heldOf(await s1.sink(pay("A")))
+    releaseB()
+    const b = await pendingB
+    expect(b.ok).toBe(false)
+    expect(b.receipt.decision).toBe(bDecision)
+    // B's own verdict is on the log, and the receipt does not claim B went unjudged.
+    expect(b.receipt.verdict?.unkeyedActionDigest).not.toBe(log.all()[0]!.verdict?.unkeyedActionDigest)
+    expect(b.receipt.reason).not.toContain("was not judged again")
+    expect(b.receipt.reason).toContain("on another action of this payment needs its owner")
+    expect((await s1.sink.resume(pay("A"), approve(a))).ok).toBe(true)
+    const again = await s2.sink(pay("B"))
+    expect(again.ok).toBe(false)
+    expect([...s1.runs, ...s2.runs]).toEqual(["A"])
+  })
+
+  it("an answer another sink wrote on this same action stands, and says the judge was out", async () => {
+    const log = new ReceiptLog()
+    let release!: () => void
+    const gate = new Promise<void>((r) => { release = r })
+    let calls = 0
+    const slowMatch = {
+      name: "j",
+      model: "j@1",
+      async assess() {
+        calls++
+        await gate
+        return MATCH as never
+      },
+    }
+    const s1 = build(scripted(MISMATCH), log)
+    const s2 = build(slowMatch, log)
+    const pending = s2.sink(pay("A"))
+    await vi.waitFor(() => expect(calls).toBe(1))
+    expect((await s1.sink(pay("A"))).receipt.decision).toBe("judgment-blocked")
+    release()
+    const r = await pending
+    expect(r.receipt.decision).toBe("judgment-blocked")
+    expect(r.receipt.reason).toContain("another sink decided this action while its judge was out")
+    expect(r.receipt.reason).not.toContain("was not judged again")
+    expect(s2.runs).toHaveLength(0)
+  })
+})
+
 describe("an approval stays on the exact action", () => {
   it("approving a memo variant's hold cannot resume the memo variant", async () => {
     const { sink, runs } = build(scripted(UNSURE, MATCH))

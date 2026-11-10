@@ -47,7 +47,8 @@ release that makes it. A patch version changes none of these.
   doubt's window. After it, the variant is judged again: a `match` is held for the owner and a
   confident `mismatch` is blocked. Within one sink object, a variant sent while the payment is still
   being judged waits for that answer; a second sink over the same log reads the log again once its
-  judge returns. The hold a variant gets names the doubted action and sets
+  judge returns, and records its own verdict rather than answering from another memo's doubt, so
+  approving that other memo does not release it. The hold a variant gets names the doubted action and sets
   `underAnotherAction: true` on `held`, and its receipt says so, so an approval releases only the
   action the owner was shown, once; show the owner that action, not the variant's receipt args. Once
   that approved action is attempted (even if `execute` throws), a memo the judge has not doubted is
