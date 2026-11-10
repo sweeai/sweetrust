@@ -101,6 +101,7 @@ describe("open() refuses a limit past u256 as a result, with today's code, and n
 
   it.each([
     ["lifetimeCap", { lifetimeCap: JUST_PAST, expiry: FAR }],
+    ["negative lifetimeCap", { lifetimeCap: -JUST_PAST, expiry: FAR }],
     ["rate", { rate: { amount: JUST_PAST, windowMs: DAY } }],
     ["negative rate", { rate: { amount: -JUST_PAST, windowMs: DAY } }],
     ["perSpendMax", { lifetimeCap: 100n, perSpendMax: JUST_PAST, expiry: FAR }],
