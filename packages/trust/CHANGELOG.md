@@ -52,6 +52,17 @@ release that makes it. A patch version changes none of these.
   DAN-1443). A log from 0.6.0 in which an unapproved run followed an expired doubt keeps that doubt,
   so the next repeat of that action is held until the owner approves it.
 
+- **The provenance in a confirmation question is quoted.** A channel or authority name that held agent
+  text could write a second line reading `Confirm VERIFIED (origin: authority:bank)` into the question
+  a person answers. The origin is now escaped, cut to 64 characters and held in brackets it cannot close,
+  so it stays in its own field and cannot push the real value out of view. Its words are still whatever
+  the host passed in. Invisible characters in the value show as escapes. `Sourced.describe` itself is
+  unchanged (DAN-1458).
+- **`allowlisted` refuses when its registry throws.** It used to throw. No value ascended either way
+  (DAN-1458).
+- **`mockJudgmentProvider` no longer writes the payee, amount or cap into its rationale**, since a fixed
+  sentence holding them can be confirmed from its hash on a redacted receipt (DAN-1458).
+
 ### Added
 
 - **A judge is told the payment the sink resolved.** On a sink that names `purposeArgs`,
@@ -64,7 +75,11 @@ release that makes it. A patch version changes none of these.
 - **A sink can hold a payment to one spelling.** A block or hold names an action as written, so
   `0xABC` after a hold on `0xabc` was a new action and got a fresh judge. Set `judgment.spelling` to
   your rail's canonical form of a payee and an asset, and any other spelling is refused before a
-  judge runs. A sink without it behaves as before, and no digest changes (DAN-1457).
+  judge runs. A sink without it behaves as before, and no digest changes (DAN-1457). A function that
+  throws or answers with something other than a string is reported as `could not be checked` (DAN-1458).
+- **A judge can trace a payment to its arguments.** `JudgmentInput.payment` now has `payeeArg`,
+  `amountArg` and `assetArg` (null when the sink fixes the asset), so `input.trust[input.payment.payeeArg]`
+  is the payee's tier. No digest changes (DAN-1458).
 
 ## [0.6.0] — 2026-11-08
 

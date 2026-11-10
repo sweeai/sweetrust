@@ -982,12 +982,24 @@ describe("spend(): authorizedBy binds a payment to the verdict that approved it"
     expect(r).toMatchObject({ schema: "sweetrust-sui/receipt@2", verdict: "executed", digest: signedDigest(chain), refusal: null, authorizedBy: token.authorizedBy })
   })
 
-  it("digests its own normalized recipient: a full-length mixed-case payee passes against the canonical digest", async () => {
+  it("a full-length mixed-case payee is refused and named in its canonical form", async () => {
     const before = allowanceState({ funder: P, spender: A, rate: windowed(0n, null) })
     const chain = mockChain(before, 0n)
+    const token = await tokenFor()
+    const r = await pay(chain, token, { recipient: `0x${MERCHANT.slice(2).toUpperCase()}` })
+    expect(chain.executed).toHaveLength(0)
+    expect(r.refusal?.code).toBe("invalid-address")
+    expect(r.refusal?.why).toContain(`spell it ${MERCHANT}`)
+    // The refusal is local, so the token is still good for the payment it approved.
     chain.script.push({ kind: "executed", digest: DIGEST(1), timestampMs: ANCHOR, after: before })
-    const r = await pay(chain, await tokenFor(), { recipient: `0x${MERCHANT.slice(2).toUpperCase()}` })
-    expect(r).toMatchObject({ verdict: "executed", recipient: MERCHANT })
+    expect(await pay(chain, token)).toMatchObject({ verdict: "executed", recipient: MERCHANT })
+  })
+
+  it("refuses a mixed-case payee with no authorization and no requireAuthorization", async () => {
+    const chain = mockChain(allowanceState({ funder: P, spender: A, rate: windowed(0n, null) }), 0n)
+    const r = await pay(chain, undefined, { recipient: `0x${MERCHANT.slice(2).toUpperCase()}` }, false)
+    expect(chain.executed).toHaveLength(0)
+    expect(r.refusal?.code).toBe("invalid-address")
   })
 
   it("a short-form payee is refused even when the token's payment matches its padded form", async () => {

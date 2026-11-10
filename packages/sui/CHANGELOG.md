@@ -40,7 +40,13 @@ on mainnet; this package has spent only on testnet). Tested against `@mysten/sui
   sink's `judgment.spelling` so a respelled payee is refused before a judge runs. A sink's `asset`
   and a purpose's `payees` must then be in the long form it returns, and something that is not an
   address or a resolved coin type is refused too. A coin type over 1,024 characters or 16 sets of
-  type arguments is refused before it is parsed, because the parser runs on agent input (DAN-1457).
+  type arguments is refused before it is parsed, because the parser runs on agent input (DAN-1457). The same limits apply to `open` and to the
+  asset on any handle passed to `spend`, `revoke` or `remaining`. `open` also refuses a type that grows past them once normalized, so it
+  cannot issue a handle it could not then revoke, and a handle's ids are bounded the same way (DAN-1458).
+
+- **`spend` refuses a recipient that is not in canonical form**, as `invalid-address`, and the refusal
+  names the canonical spelling. It used to normalize silently, so a respelled payee could be paid
+  from a sink that had not set `judgment.spelling` (DAN-1458).
 
 - **Each spend is authorized by a one-shot token (ADR 0010, DAN-1406).** `spend` takes
   `authorization`, the `SpendAuthorization` a sink hands its `execute`, and every receipt@2 repeats

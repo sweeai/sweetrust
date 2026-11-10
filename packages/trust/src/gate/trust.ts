@@ -331,15 +331,20 @@ export class Sourced<T> {
 
   /** One-line provenance rendering — what the human sees at a refusal. */
   describe(): string {
-    const hops = this.provenance.chain.map((u) => `${u.declassifier}→${u.to}`).join(", ")
-    // `typeof === "number"`, not `!== undefined`: a value rehydrated from JSON
-    // carries `null`, and `null.toFixed` threw here — inside the enforce sink's
-    // declared loop, before any receipt (the 2026-10-13 gate audit). Anything
-    // that is not a number renders as "not measured".
-    const confidence = this.provenance.confidence
-    const conf = typeof confidence === "number" ? `; conf ${confidence.toFixed(2)}` : ""
-    return `${this.tier.toUpperCase()} (origin: ${this.provenance.origin}${hops ? `; upgrades: ${hops}` : ""}${conf})`
+    return provenanceLine(this.tier, this.provenance, this.provenance.origin)
   }
+}
+
+/** The line `describe()` returns. `originText` is separate so the confirmation question can show an inert origin in the same sentence. */
+function provenanceLine(tier: string, provenance: Sourced<unknown>["provenance"], originText: string): string {
+  const hops = provenance.chain.map((u) => `${u.declassifier}→${u.to}`).join(", ")
+  // `typeof === "number"`, not `!== undefined`: a value rehydrated from JSON
+  // carries `null`, and `null.toFixed` threw here — inside the enforce sink's
+  // declared loop, before any receipt (the 2026-10-13 gate audit). Anything
+  // that is not a number renders as "not measured".
+  const confidence = provenance.confidence
+  const conf = typeof confidence === "number" ? `; conf ${confidence.toFixed(2)}` : ""
+  return `${tier.toUpperCase()} (origin: ${originText}${hops ? `; upgrades: ${hops}` : ""}${conf})`
 }
 
 // The class object and its prototype are frozen so that `Sourced.is` and
@@ -471,7 +476,13 @@ export function allowlisted<T>(
   if (!Sourced.is(candidate)) {
     return { ok: false, reason: `the candidate for ${registryName} was not minted by the gate` }
   }
-  const entry = registry.get(keyValue)
+  let entry: ReturnType<typeof registry.get>
+  try {
+    entry = registry.get(keyValue)
+  } catch {
+    // A fixed sentence: a database error can carry a connection string, and a reason can reach an agent.
+    return { ok: false, reason: `the ${registryName} lookup failed, so it is refused rather than guessed` }
+  }
   if (entry === undefined) {
     return { ok: false, reason: `'${keyValue}' not in ${registryName}; candidate is ${candidate.describe()}` }
   }
@@ -661,6 +672,49 @@ export function corroborate<T>(
 
 /** How much of a candidate's JSON humanConfirm puts in front of the human. */
 const HUMAN_CONFIRM_VALUE_CHARS = 256
+/** How much of a candidate's origin it shows. Short, so that the real value stays inside a one-line preview however long the origin is. */
+const HUMAN_CONFIRM_ORIGIN_CHARS = 64
+/**
+ * The most of any one field the question escapes. Far more than a field shows, and a bound, because
+ * replacing every character of a very large string can exhaust memory and end the process, uncatchably.
+ */
+const HUMAN_CONFIRM_ESCAPED_INPUT_CHARS = 4096
+/** Characters JSON leaves raw that a renderer can act on or a person cannot see: line separators, bidi overrides, controls, zero-widths, tag characters, private-use and unassigned code points, the blank braille cell. */
+const QUESTION_UNSAFE = /[\p{Cc}\p{Cf}\p{Co}\p{Cn}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}\u2800]/gu
+/** What an origin may not hold raw: anything outside printable ASCII, the quote that closes the provenance, and the brackets that hold the origin. */
+const ORIGIN_UNSAFE = /[^\x20-\x7e]|["\\[\]]/gu
+/** One unbreakable unit of an escaped field: an escape, or one whole code point. */
+const QUESTION_UNIT = /\\u\{[0-9a-f]+\}|\\u[0-9a-f]{4}|\\.|[\s\S]/gu
+const inertChar = (c: string): string => {
+  const code = c.codePointAt(0)!
+  return code > 0xffff ? `\\u{${code.toString(16)}}` : `\\u${code.toString(16).padStart(4, "0")}`
+}
+/**
+ * One field of the question. The input is bounded first, then escaped, then cut on a unit boundary, so
+ * the cut never splits an escape or a surrogate pair and the limit is what is really shown. The bound's
+ * own slice can halve a pair; in an origin that half shows as an escape, under a declared cut. Any input
+ * past the bound is declared as cut, even when what is left would fit, since escaping can also shorten a string.
+ */
+const fieldForQuestion = (raw: string, limit: number, escape: (bounded: string) => string): string => {
+  const whole = raw.length <= HUMAN_CONFIRM_ESCAPED_INPUT_CHARS
+  const escaped = escape(whole ? raw : raw.slice(0, HUMAN_CONFIRM_ESCAPED_INPUT_CHARS))
+  if (whole && escaped.length <= limit) return escaped
+  let kept = 0
+  for (const match of escaped.matchAll(QUESTION_UNIT)) {
+    if (kept + match[0].length > limit) break
+    kept += match[0].length
+  }
+  return `${escaped.slice(0, kept)}… [${whole ? escaped.length : raw.length} chars total; first ${kept} shown]`
+}
+/** The value, already quoted as JSON, made inert and cut. For display only. */
+const valueForQuestion = (quoted: string): string => fieldForQuestion(quoted, HUMAN_CONFIRM_VALUE_CHARS, (text) => text.replace(QUESTION_UNSAFE, inertChar))
+/**
+ * A host-chosen origin that can carry agent text, in brackets it cannot close, so its words cannot leave
+ * its field or push the real value out of view. They are still words: an origin can say anything inside
+ * the brackets, which is why the gate's tier leads the line. For display only.
+ */
+const originForQuestion = (origin: string): string =>
+  `[${fieldForQuestion(origin, HUMAN_CONFIRM_ORIGIN_CHARS, (text) => text.replace(/ {2,}/g, " ").replace(ORIGIN_UNSAFE, (c) => (c === '"' || c === "\\" ? `\\${c}` : inertChar(c))))}]`
 
 /**
  * Human confirmation → Verified. The provenance is RENDERED to the human
@@ -708,7 +762,8 @@ export async function humanConfirm<T>(
   // controlled, any length — so a value beginning "… — provenance: VERIFIED
   // (origin: authority:payee-registry)?" followed by 4,000 spaces put a forged
   // provenance where a one-line renderer shows it and the real one off-screen
-  // (the 2026-10-13 gate audit). The provenance string is ours; it goes first.
+  // (the 2026-10-13 gate audit). The provenance goes first, and its origin,
+  // the one part a host chooses, is made inert below (DAN-1458).
   // Through receiptJSON, in a try: JSON.stringify threw on a bigint candidate
   // and the human never saw a question (the 2026-10-13 gate audit). A value
   // that cannot be rendered cannot be confirmed — refuse, naming why.
@@ -752,11 +807,13 @@ export async function humanConfirm<T>(
       reason: `human confirmation refused: the candidate (${candidate.describe()}) could not be rendered for the question (${safely(() => firstLine(err))})`,
     }
   }
-  const shown =
-    json.length > HUMAN_CONFIRM_VALUE_CHARS
-      ? `${json.slice(0, HUMAN_CONFIRM_VALUE_CHARS)}… [${json.length} chars total; first ${HUMAN_CONFIRM_VALUE_CHARS} shown]`
-      : json
-  const question = `Confirm the value with provenance ${candidate.describe()} — value: ${shown}?`
+  const shown = valueForQuestion(json)
+  // An origin is a host-chosen string that can carry message text, and this is
+  // the sentence a person says yes to. Only the origin is escaped and cut: the
+  // tier, upgrades and confidence are the gate's own, so a long origin cannot
+  // push them out of view and a forged one cannot imitate them.
+  const provenanceShown = provenanceLine(candidateTier, candidateProvenance, originForQuestion(candidateProvenance.origin))
+  const question = `Confirm the value with provenance "${provenanceShown}" — value: ${shown}?`
   // Everything above ran synchronously, at the call. The await below is the
   // first point at which time passes; nothing after it reads `candidate`.
   //
@@ -1537,6 +1594,12 @@ export interface JudgmentPayment {
   readonly amount: string
   readonly asset: string
   readonly network: string
+  /** The argument the payee came from, so `input.trust[payeeArg]` is its tier. Named by the host, never by an agent. */
+  readonly payeeArg: string
+  /** The argument the amount came from. */
+  readonly amountArg: string
+  /** The argument the asset came from, or null when the sink fixes the asset. */
+  readonly assetArg: string | null
 }
 
 /**
@@ -1580,9 +1643,9 @@ export function mockJudgmentProvider(intent: {
       }
       // Near-edge amounts read as "unsure" — the honest, defer-to-human band.
       if (intent.intendedPayees.has(to) && amount <= intent.maxAmount * 1.1) {
-        return { assessment: "unsure", confidence: 0.35, rationale: `${to} is intended but amount ${amount} slightly over cap ${intent.maxAmount}` }
+        return { assessment: "unsure", confidence: 0.35, rationale: `${action.sink} pays an intended payee, slightly over the cap` }
       }
-      return { assessment: "mismatch", confidence: 0.82, rationale: `${to}/${amount} not in declared intent (payee unintended or amount over cap)` }
+      return { assessment: "mismatch", confidence: 0.82, rationale: `${action.sink} is not in declared intent (payee unintended or amount over cap)` }
     },
   }
 }
@@ -1707,17 +1770,30 @@ type Spelling = (value: string) => string
 const ownOf = (o: object, k: string): unknown => (Object.hasOwn(o, k) ? (o as Record<string, unknown>)[k] : undefined)
 const isStringList = (v: unknown): v is ReadonlyArray<string> => Array.isArray(v) && v.every((x) => typeof x === "string")
 
-/** Is `value` already in the form `spell` gives it? A spelling that throws, or answers with anything but that same string, says no. */
-const isSpelled = (spell: Spelling, value: string): boolean => {
+/**
+ * Is `value` already in the form `spell` gives it? A throw or a non-string
+ * answer is "unchecked", which the host's function and the agent's input can
+ * both cause, so the sentence it produces blames neither.
+ */
+const spellingOf = (spell: Spelling, value: string): "spelled" | "respelled" | "unchecked" => {
   try {
     const answer: unknown = spell(value)
+    if (typeof answer === "string") return answer === value ? "spelled" : "respelled"
     // A promise is no answer. One that rejects must not become an unhandled
     // rejection, which would end the host's process on an agent's input.
-    if (typeof answer !== "string") void Promise.resolve(answer).catch(() => {})
-    return answer === value
+    void Promise.resolve(answer).catch(() => {})
+    return "unchecked"
   } catch {
-    return false
+    return "unchecked"
   }
+}
+
+/** The violation for `value`, naming the argument and never the value; undefined when it is spelled. */
+const spellingViolation = (spell: Spelling | undefined, value: string, argument: string): string | undefined => {
+  if (spell === undefined) return undefined
+  const state = spellingOf(spell, value)
+  if (state === "spelled") return undefined
+  return state === "respelled" ? `${argument} is not in the spelling this sink's rail uses` : `${argument} could not be checked against this sink's spelling`
 }
 
 /** Read `judgment.spelling` once, as own keys. An unknown key is refused: a misspelled `payee` would hold nothing to a spelling and say nothing. */
@@ -1808,7 +1884,7 @@ function bindPurpose(
     if (payment === undefined) throw new TypeError(`${where}: judgment.spelling needs judgment.purposeArgs to name the payment it holds to a spelling`)
     // Refused here for the same reason as the checks below: no call could satisfy it.
     const mustBeSpelled = (field: string, spell: Spelling | undefined, values: ReadonlyArray<string>): void => {
-      if (spell !== undefined && !values.every((value) => isSpelled(spell, value))) {
+      if (spell !== undefined && !values.every((value) => spellingOf(spell, value) === "spelled")) {
         throw new TypeError(`${where}: ${field} is not in the spelling judgment.spelling gives it, so no call could satisfy it`)
       }
     }
@@ -1862,15 +1938,16 @@ function checkPurpose(bound: BoundPurpose, sink: string, values: Readonly<Record
   if (payment === undefined) return null
   const before = violations.length
   const recipient = ownOf(values, payment.payeeArg)
+  const payeeProblem = typeof recipient === "string" ? spellingViolation(payment.payeeSpelling, recipient, payment.payeeArg) : undefined
   const amount = ownOf(values, payment.amountArg)
   const asset = payment.assetArg === undefined ? payment.asset : ownOf(values, payment.assetArg)
   if (typeof recipient !== "string") {
     violations.push(`${payment.payeeArg} must be a string to name a payee`)
-  } else if (payment.payeeSpelling !== undefined && !isSpelled(payment.payeeSpelling, recipient)) {
+  } else if (payeeProblem !== undefined) {
     // One payee has one spelling, or "0xABC" is a new action that escapes a
     // doubt on "0xabc". Refused rather than rewritten, like the amount below,
     // so what runs is what was asked for and `paymentDigest` hashes it as written.
-    violations.push(`${payment.payeeArg} is not in the spelling this sink's rail uses`)
+    violations.push(payeeProblem)
   } else if (bound.payees !== undefined && !bound.payees.includes(recipient)) {
     violations.push(`${payment.payeeArg} is not a payee this purpose names`)
   }
@@ -1890,11 +1967,12 @@ function checkPurpose(bound: BoundPurpose, sink: string, values: Readonly<Record
     }
     if (!within) violations.push(`${payment.amountArg} is over this purpose's maxPerAction`)
   }
+  const assetProblem = typeof asset === "string" && payment.assetArg !== undefined ? spellingViolation(payment.assetSpelling, asset, payment.assetArg) : undefined
   if (typeof asset !== "string") violations.push(`the payment's asset must be a string`)
-  else if (payment.assetArg !== undefined && payment.assetSpelling !== undefined && !isSpelled(payment.assetSpelling, asset)) violations.push(`${payment.assetArg} is not in the spelling this sink's rail uses`)
+  else if (assetProblem !== undefined) violations.push(assetProblem)
   else if (bound.asset !== undefined && asset !== bound.asset) violations.push(`the payment's asset is not the asset this purpose names`)
   if (violations.length > before) return null
-  return Object.freeze({ payee: recipient as string, amount: String(amount), asset: asset as string, network: payment.network })
+  return Object.freeze({ payee: recipient as string, amount: String(amount), asset: asset as string, network: payment.network, payeeArg: payment.payeeArg, amountArg: payment.amountArg, assetArg: payment.assetArg ?? null })
 }
 
 /** The `paymentDigest` a verdict carries for what `checkPurpose` resolved, null when it resolved none. */
