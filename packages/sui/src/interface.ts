@@ -101,6 +101,11 @@ export type RefusalCode =
   | "not-authorized"
   /** The chain refused for a reason this library does not classify; `native` and `why` quote it. */
   | "chain-error"
+  /**
+   * spend()/revoke(): the handle names a coin type the allowance object on chain does not hold.
+   * The library read the object and refused in-process; nothing was sent.
+   */
+  | "asset-mismatch"
 
 /** What the chain itself said, quoted beside the neutral code. */
 export interface NativeAbort {
