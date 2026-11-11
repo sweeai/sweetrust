@@ -2,7 +2,7 @@
 title:       "ADR 0010: a judged action has a lifecycle, issued once, bound to its purpose, consumed once"
 kind:        adr
 status:      accepted
-updated:     2026-11-08
+updated:     2026-11-09
 owner:       sweetrust maintainers
 verified_by: "pnpm -C packages/trust test (test/gate/action-lifecycle.test.ts, including ReceiptLog.fromReceipts and SignedReceiptLog.fromSigned) and pnpm -C packages/sui test (spend authorization section of test/receipts.test.ts)."
 ---
@@ -52,6 +52,30 @@ executing, executed. It is claimed synchronously before the first await.**
    that exact action stays held under that grant, whatever its idempotency key. Before this, an
    agent could wait out each window and resample the judge until it said `match`, which is the retry
    this record exists to stop.
+   **Amended 2026-11-09 (DAN-1466): on a payment, a doubt stands on the payment.** When the sink's
+   purpose names a payment (the verdict's `paymentDigest` is not null), a block or a hold answers
+   every action with the same `paymentDigest`, so the same payee, amount, asset and network under
+   another memo, or any other changed argument, is held or blocked without a judge call while the
+   doubt's window is open, and after it is judged again and held on a `match` or blocked on a
+   confident `mismatch`, by the rule above. The hold it gets names the doubted action (its
+   `actionDigest` and `verdictDigest`, with `underAnotherAction: true`), so the owner's approval still
+   releases only the exact action the owner was shown. Once that approved action is attempted, the
+   doubt on the payment is answered and a memo the judge has not doubted goes back to the judge. An
+   action's own doubt is kept apart from the payment's: approving memo B never answers a doubt the
+   judge scored on memo A, so A stays held for its owner. No doubt stands in for another: the sink
+   keeps every unanswered scored doubt on the payment, not the latest one, and an approval answers
+   the doubt it names, never one still inside its window when the approved one was judged. A doubt
+   whose window had passed by then is answered for the payment's other memos (the owner was shown a
+   hold made because of it), and for its own memo only by an approval on that memo. A verdict
+   recorded while another sink's block on the payment is still open is recorded as a block, and a
+   receipt names the strongest standing doubt (open over expired, block over hold), not the latest.
+   A one-slot record let a later hold on memo B, once approved, hide memo A's open block (the third
+   DAN-1466 review). A duplicate of an action that already ran is
+   refused before another memo's doubt is consulted. The in-process `judging` claim covers the
+   payment too, within one sink object. Dedupe and approvals stay on the exact action.
+   A sink with no payment keeps exact-action stickiness: two null digests are never one payment.
+   Doubt broadly, allow narrowly. Before this, a reworded memo was a new action and a fresh judge
+   sample, which the agent could ask for as often as it liked.
 2. **Execution dedupe keys on the action plus an idempotency key.** The sink's second argument is
    `{ idempotencyKey }`, supplied by the host and never agent-controlled, and it enters the action
    digest. With no key, an identical action that has already been attempted is refused as a
@@ -98,11 +122,13 @@ executing, executed. It is claimed synchronously before the first await.**
 
 - **It does not enforce in warn or observe.** Those modes run the action by definition, so they keep
   no block, hold or dedupe. Only `reconcile` sees a repeat there.
-- **It does not stop fresh samples through changed arguments.** A changed argument is a new action
-  and gets a new judge call. Stickiness holds one exact action, so an agent that changes an amount by
-  one base unit, or edits a free-text argument, asks again. Withholding the score removes what it
-  would climb on, and purpose fields and on-chain limits still bound it. This design does not prevent
-  the new call.
+- **It does not stop fresh samples through a changed payment.** Since 2026-11-09 (DAN-1466) a doubt
+  on a payment covers every action of that payment, so a changed memo or other free-text argument
+  is answered by the doubt. A changed payee, amount, asset or network is a different payment and gets
+  a new judge call: an agent that changes an amount by one base unit asks again. On a sink with no
+  payment, stickiness still holds one exact action, so any changed argument asks again. Withholding
+  the score removes what it would climb on, and purpose fields and on-chain limits still bound it.
+  This design does not prevent the new call.
 - **It does not bind a mismatched `granted` at the sink.** `granted` is `{ purpose, grantHash }`, and
   the gate cannot recompute a grant's hash without the grant event. A host that pairs a real hash
   with a different purpose is caught afterward, by `verifyVerdictPurpose`, not refused at the call.
