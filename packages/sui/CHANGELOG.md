@@ -46,6 +46,20 @@ on mainnet; this package has spent only on testnet). Tested against `@mysten/sui
   `limit-unheld` for `perSpendMax`, `unbounded-time` for a cap with no expiry and no rate), and the value reads
   as "an amount past u256 (not written out)" in the sentence and the limit lines.
   Limits up to u256 read exactly as before (DAN-1469).
+- **A coin type the Sui SDK rewrites without complaint, but that is not a valid type, is now
+  rejected at intake too.** The SDK's normalizer pads and returns strings such as `0xzz::a::B`,
+  `0x2::sui::SUI<>`, `0x2::a::B!` or `" 0x2::sui::SUI "` as if they were canonical, so a hand-built
+  handle carrying one reached the chain: `spend` could read the allowance and execute a transaction,
+  or come back `not-submitted`. Now `spend`, `revoke` and `remaining` throw the same `TypeError`
+  naming `allowance.asset is not a coin type` before any chain read, and `open` throws its existing
+  `is not a Move type` error before sending. For such an asset this throw now comes before the
+  `wrong-network` check, so with a malformed asset on another network `spend`, `revoke` and `open`
+  throw instead of returning a `wrong-network` receipt (`remaining` already threw). The check is the Sui SDK's `isValidStructTag`, the same one
+  `suiPaymentSpelling` uses, and it is stricter than Move in one way: it refuses an identifier that
+  starts with `_`, so `0xabc::_coin::C` is now refused at `open`, and a handle on such a coin can no
+  longer be spent, revoked or read here (revoke it with your own transaction). No live coin with
+  such a name was found. Other coin types behave as before, and an MVR name such as
+  `@org/app::coin::COIN` is not refused here; only `suiPaymentSpelling` refuses those (DAN-1470).
 
 - **`chainSpends` now finds a spend from what moved, not from the command list.** It lists a
   transaction when an input withdraws from this allowance (`FUNDS_WITHDRAWAL`, `source:
