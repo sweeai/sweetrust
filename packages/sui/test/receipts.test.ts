@@ -735,6 +735,58 @@ describe("intake: each argument field is read once", () => {
     expect(spies.reduce((n, s) => n + s.mock.calls.length, 0)).toBe(0)
     expect(chain.executed).toHaveLength(0)
   })
+
+  // The SDK's normalizer rewrites each of these without throwing, and `isValidStructTag` refuses
+  // the rewrite. The first two are DAN-1470's cut-time probe; the rest are DAN-1463's security
+  // review, three of which used to make nine chain reads and execute a transaction on the mock.
+  const NORMALIZES_BUT_INVALID = ["0xzz::a::B", "0x2::sui::SUI<>", "0x2::a::B!", "0x2::sui::SU I", "0x2::s-ui::SUI", " 0x2::sui::SUI ", "0x2::sui::SUI<u8,>"]
+
+  it.each(NORMALIZES_BUT_INVALID)("a hand-built handle whose asset %j normalizes but is not a valid coin type is rejected by spend, revoke and remaining before any chain read", async (asset) => {
+    const chain = mockChain(allowanceState({ funder: P, spender: A, rate: windowed(0n, null) }), 0n)
+    const core = chain.client.core as unknown as Record<string, (...a: Array<unknown>) => unknown>
+    const spies = Object.keys(core).map((k) => vi.spyOn(core, k))
+    const bad = { ...handle({ rate: RATE }), asset }
+    const a = adapter(chain)
+    for (const call of [
+      () => a.spend({ signer: agent, allowance: bad, amount: 1n, recipient: MERCHANT }),
+      () => a.revoke({ signer: principal, allowance: bad }),
+      () => a.remaining({ allowance: bad }),
+    ]) {
+      const err = await call().then(() => null, (e: unknown) => e)
+      expect(err).toBeInstanceOf(TypeError)
+      expect((err as TypeError).message).toContain("allowance.asset is not a coin type")
+    }
+    expect(spies.reduce((n, s) => n + s.mock.calls.length, 0)).toBe(0)
+    expect(chain.executed).toHaveLength(0)
+  })
+
+  it.each(NORMALIZES_BUT_INVALID)("open() with asset %j, which normalizes but is not a valid coin type, throws before sending", async (asset) => {
+    const chain = mockChain(null, 0n)
+    chain.script.push({ kind: "executed", digest: DIGEST(0), timestampMs: ANCHOR, created: true })
+    const err = await adapter(chain)
+      .open({ signer: principal, allowance: { network: "sui:testnet", asset, spender: A, limits: { rate: RATE } } })
+      .then(() => null, (e: unknown) => e)
+    expect(err).toBeInstanceOf(TypeError)
+    expect((err as TypeError).message).toContain("is not a Move type")
+    expect(chain.executed).toHaveLength(0)
+  })
+
+  it("a canonical coin type and an MVR name are not refused as malformed at intake", async () => {
+    const chain = mockChain(allowanceState({ funder: P, spender: A, rate: windowed(0n, null) }), 0n)
+    const a = adapter(chain)
+    const r = await a.spend({ signer: agent, allowance: { ...handle({ rate: RATE }), asset: "0x2::sui::SUI" }, amount: 1n, recipient: MERCHANT })
+    expect(r.refusal).toBeNull()
+    expect(chain.executed).toHaveLength(1)
+    // An MVR name passes intake: remaining goes on to read the chain and answers, and open() answers
+    // with a receipt (the mock cannot resolve the name, so the build fails) instead of throwing.
+    const core = chain.client.core as unknown as Record<string, (...a: Array<unknown>) => unknown>
+    const spies = Object.keys(core).map((k) => vi.spyOn(core, k))
+    const status = await a.remaining({ allowance: { ...handle({ rate: RATE }), asset: "@org/app::coin::COIN" } })
+    expect(status.exists).toBe(true)
+    expect(spies.reduce((n, s) => n + s.mock.calls.length, 0)).toBeGreaterThan(0)
+    const { receipt } = await adapter(mockChain(null, 0n)).open({ signer: principal, allowance: { network: "sui:testnet", asset: "@org/app::coin::COIN", spender: A, limits: { rate: RATE } } })
+    expect(receipt.refusal?.why ?? "").not.toContain("is not a Move type")
+  })
 })
 
 // ── The security review's also-dos (2026-11-07) ──────────────────────────────
