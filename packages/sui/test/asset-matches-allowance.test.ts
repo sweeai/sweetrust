@@ -84,7 +84,7 @@ describe("a handle naming another coin than its allowance holds is refused befor
       answerForAllowance(chain, typed("0x2::clock::Clock"))
       const r = verb === "spend" ? await pay(chain, "0x2::sui::SUI") : await revoke(chain, "0x2::sui::SUI")
       refusedInProcess(r, chain, "asset-mismatch")
-      expect(r.refusal?.why).toContain(`is an object of type "0x2::clock::Clock", not an allowance`)
+      expect(r.refusal?.why).toContain(`is an object of type "0x2::clock::Clock", not an allowance over a coin's Balance`)
     }
   })
 
@@ -97,6 +97,14 @@ describe("a handle naming another coin than its allowance holds is refused befor
     expect(performance.now() - started).toBeLessThan(2000)
     refusedInProcess(r, chain, "asset-mismatch")
     expect(r.refusal!.why.length).toBeLessThan(1000)
+  })
+
+  it("an asset nested inside an MVR-free generic is compared too, and only its own allowance matches", async () => {
+    const asset = "0x7::wrap::W<0x2::sui::SUI>"
+    const chain = live()
+    const r = await pay(chain, asset)
+    refusedInProcess(r, chain, "asset-mismatch")
+    expect(r.refusal?.why).toContain(`holds ${SUI}.`)
   })
 
   it("local rules still come first: an invalid amount with a mismatched coin is `invalid-amount`, and the allowance is not read", async () => {
@@ -117,6 +125,22 @@ describe("a handle whose coin matches still reaches the chain", () => {
       const r = await pay(chain, asset)
       expect(chain.executed).toHaveLength(1)
       expect(r).toMatchObject({ verdict: "executed", refusal: null })
+    }
+  })
+
+  it("a coin type that is valid at intake but long once normalized still matches its own allowance (code review)", async () => {
+    // ~1 KB as written, ~7 KB normalized: every 0x2 is written out to 64 hex digits.
+    const asset = `0x2::m::T<${Array(100).fill("0x2::a::B").join(",")}>`
+    expect(asset.length).toBeLessThanOrEqual(1024)
+    const wrapper = normalizeStructTag(`0x2::allowance::Allowance<0x2::balance::Balance<${asset}>>`)
+    expect(wrapper.length).toBeGreaterThan(4 * 1024)
+    for (const served of [wrapper, `0x2::allowance::Allowance<0x2::balance::Balance<${asset}>>`]) {
+      const chain = live()
+      answerForAllowance(chain, typed(served))
+      chain.script.push({ kind: "executed", digest: DIGEST(0), timestampMs: ANCHOR, after: allowanceState({ funder: P, spender: A, lifetimeCap: 1000n, currentSpend: 5n }) })
+      const r = await pay(chain, asset)
+      expect(r.refusal).toBeNull()
+      expect(chain.executed).toHaveLength(1)
     }
   })
 

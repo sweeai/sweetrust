@@ -71,8 +71,8 @@ on mainnet; this package has spent only on testnet). Tested against `@mysten/sui
   every local check and the network check. It fails closed: an allowance that cannot be read is
   refused as `not-submitted`, and one that is not found as `allowance-not-found`, both before
   anything is built (before, they came back with the same codes after a failed build). An asset
-  spelled as an MVR name (`@org/app::coin::COIN`) is not compared and behaves as before; see
-  `SECURITY.md` (DAN-1480).
+  that is or contains an MVR name (`@org/app::coin::COIN`) is not compared and behaves as before;
+  see `SECURITY.md` (DAN-1480).
 
 - **`chainSpends` now finds a spend from what moved, not from the command list.** It lists a
   transaction when an input withdraws from this allowance (`FUNDS_WITHDRAWAL`, `source:

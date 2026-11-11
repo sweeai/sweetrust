@@ -23,7 +23,7 @@
 import { Transaction, TransactionDataBuilder } from "@mysten/sui/transactions"
 import type { Signer } from "@mysten/sui/cryptography"
 import type { ClientWithCoreApi, SuiClientTypes } from "@mysten/sui/client"
-import { isValidStructTag, isValidSuiAddress, normalizeStructTag, normalizeSuiAddress } from "@mysten/sui/utils"
+import { isValidStructTag, isValidSuiAddress, normalizeStructTag, normalizeSuiAddress, parseStructTag } from "@mysten/sui/utils"
 import { paymentDigest, SpendAuthorization, type ReceiptLog } from "sweetrust/gate"
 import {
   ABORTS, ALLOWANCE_MODULE, CLOCK_OBJECT_ID, decodeClockMs, MAX_NAME_BYTES, U256_MAX, U64_MAX,
@@ -189,7 +189,7 @@ const MAX_COIN_TYPE_GENERICS = 16
  * `normalizeStructTag`, bounded. The SDK's parser is superlinear in nesting, and
  * a coin type can come from an agent: 15 KB of nested generics blocked the event
  * loop for 43 s, and 640 KB ended the process out of memory. Every direct call in this file goes
- * through here (or `allowanceTypeOf`, the same bound widened for an allowance's type), and a handle is bounded at intake, because `Transaction.coin` parses its asset too.
+ * through here (or `chainTypeOf`, the same bound sized to the allowance type expected), and a handle is bounded at intake, because `Transaction.coin` parses its asset too.
  */
 const boundedCoinType = (coinType: string): boolean => coinType.length <= MAX_COIN_TYPE_CHARS && coinType.split("<").length - 1 <= MAX_COIN_TYPE_GENERICS
 const parseCoinType = (coinType: string): string => {
@@ -217,24 +217,40 @@ const boundTo = (coinType: string | null, asset: string): boolean => {
   }
 }
 const normAddr = (a: string): string => normalizeSuiAddress(a)
+/** `0x2::allowance::Allowance<0x2::balance::Balance<`, canonical: an allowance's type is this, a canonical coin type, then `>>`. */
+const ALLOWANCE_TYPE_HEAD = `${normalizeSuiAddress("0x2")}::allowance::Allowance<${normalizeSuiAddress("0x2")}::balance::Balance<`
+/** The canonical type of an allowance over `Balance<coinType>`, for a coin type already canonical: `normalizeStructTag` of the wrapper, without parsing again. */
+const allowanceTypeFor = (canonicalCoinType: string): string => `${ALLOWANCE_TYPE_HEAD}${canonicalCoinType}>>`
 /**
- * The canonical type of an allowance over `Balance<coinType>`, or of whatever a fullnode says
- * an object's type is: `normalizeStructTag`, bounded, or null when the string is not a type this
- * bound admits. The allowance wrapper adds two generics around a coin type `parseValidCoinType`
- * already bounded, and normalizing writes every address out to 64 hex digits, so the bound is wider
- * than a coin type's, never unbounded. A fullnode's answer is not trusted to be small.
+ * What a fullnode says an object's type is, canonical, or null when it is not a type this bound
+ * admits. A fullnode's answer is not trusted to be small: the bound is the expected type's own
+ * size (twice it, for a node that spells the same type differently) and two generics past a coin
+ * type's, because the SDK's parser is superlinear (see `parseCoinType`).
  */
-const MAX_ALLOWANCE_TYPE_CHARS = 4 * MAX_COIN_TYPE_CHARS
-const allowanceTypeOf = (type: unknown): string | null => {
-  if (typeof type !== "string" || type.length > MAX_ALLOWANCE_TYPE_CHARS || type.split("<").length - 1 > MAX_COIN_TYPE_GENERICS + 2) return null
+const chainTypeOf = (type: unknown, expected: string): string | null => {
+  if (typeof type !== "string") return null
+  if (type === expected) return type
+  if (type.length > 2 * expected.length + MAX_COIN_TYPE_CHARS || type.split("<").length - 1 > MAX_COIN_TYPE_GENERICS + 2) return null
   try {
     return normalizeStructTag(type)
   } catch {
     return null
   }
 }
-/** `0x2::allowance::Allowance<0x2::balance::Balance<`, canonical: what an allowance's type starts with. */
-const ALLOWANCE_TYPE_HEAD = `${normalizeSuiAddress("0x2")}::allowance::Allowance<${normalizeSuiAddress("0x2")}::balance::Balance<`
+/** The coin an allowance's canonical type holds, or null when the type is not `Allowance<Balance<T>>`. */
+const coinOfAllowanceType = (canonical: string): string | null => {
+  try {
+    const t = parseStructTag(canonical)
+    const two = normalizeSuiAddress("0x2")
+    if (t.address !== two || t.module !== "allowance" || t.name !== "Allowance" || t.typeParams.length !== 1) return null
+    const b = t.typeParams[0]
+    if (typeof b !== "object" || b.address !== two || b.module !== "balance" || b.name !== "Balance" || b.typeParams.length !== 1) return null
+    const coin = b.typeParams[0]
+    return typeof coin === "string" ? coin : normalizeStructTag(coin)
+  } catch {
+    return null
+  }
+}
 /** `0x` and 64 hex digits, the longest a canonical address can be. */
 const SUI_ADDRESS_CHARS = 66
 /** A string as a refusal's sentence quotes it: short, so the sentence stays one. The receipt's own `recipient` field still holds the whole argument, as an in-memory receipt does for any argument. */
@@ -598,26 +614,26 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
    * It fails closed: a read that cannot say is a refusal, never a send on an unread type.
    *
    * An MVR name (`@org/app::coin::COIN`) is resolved only when the transaction is built, so there
-   * is nothing canonical to compare here; such a handle skips this check and keeps the behavior it
-   * had before (DAN-1473 item 2; SECURITY.md, "Honest limits").
+   * is nothing canonical to compare here; a handle whose asset contains one anywhere, as itself or
+   * as a type argument, skips this check and keeps the behavior it had before (DAN-1473 item 2;
+   * SECURITY.md, "Honest limits").
    */
   const assetMismatch = async (h: SuiAllowance, verb: "spend" | "revoke"): Promise<{ code: RefusalCode; reason: string } | null> => {
     if (h.asset.includes("/") || h.asset.includes("@")) return null
     const named = parseValidCoinType(h.asset)
-    const expected = allowanceTypeOf(`0x2::allowance::Allowance<0x2::balance::Balance<${named}>>`)
+    const expected = allowanceTypeFor(named)
     const refused = verb === "spend"
       ? "Refused in-process; nothing was sent to Sui, so nothing was spent."
       : "Refused in-process; nothing was sent to Sui. The revoke was not built or signed, so it did NOT run."
     const obj = await readAllowanceObject(h.allowanceId, null)
     if (obj === null) return { code: "allowance-not-found", reason: `${refused} ${notFoundWords(h.allowanceId)}` }
-    if (obj === undefined || expected === null) {
+    if (obj === undefined) {
       return { code: "not-submitted", reason: `${refused} sweetrust-sui could not read allowance ${h.allowanceId} on ${network} to confirm that it holds ${named}, and it never sends on a coin type it has not read.` }
     }
-    const held = allowanceTypeOf(obj.type)
+    const held = chainTypeOf(obj.type, expected)
     if (held === expected) return null
-    const holds = held !== null && held.startsWith(ALLOWANCE_TYPE_HEAD) && held.endsWith(">>")
-      ? `holds ${held.slice(ALLOWANCE_TYPE_HEAD.length, -2)}`
-      : `is an object of type ${quotedShort(String(obj.type))}, not an allowance`
+    const coin = held === null ? null : coinOfAllowanceType(held)
+    const holds = coin !== null ? `holds ${coin}` : `is an object of type ${quotedShort(String(obj.type))}, not an allowance over a coin's Balance`
     return {
       code: "asset-mismatch",
       reason: `${refused} The handle passed to ${verb}() names the coin type ${named}, but allowance ${h.allowanceId} on ${network} ${holds}. ` +
