@@ -181,6 +181,22 @@ describe("an allowance whose type cannot be read never leads to a send", () => {
     }
   }
 
+  // DAN-1480 blind review: a degraded node answer with no usable `type` is an unread type, not a
+  // different one. The refusal must never state what the chain holds.
+  for (const [what, type] of [["missing", undefined], ["empty", ""], ["null", null], ["a number", 42]] as const) {
+    it(`spend: a node answer whose type is ${what} → not-submitted, and the refusal names no type`, async () => {
+      const chain = live()
+      answerForAllowance(chain, async (real) => {
+        const { objects } = await real()
+        return { objects: objects.map((o) => (o instanceof Error ? o : { ...(o as object), type })) }
+      })
+      const r = await pay(chain, "0x2::sui::SUI")
+      refusedInProcess(r, chain, "not-submitted")
+      expect(r.refusal?.why).toContain(`could not read allowance ${ALLOWANCE_ID} on sui:testnet to confirm that it holds ${SUI}`)
+      expect(r.refusal?.why).not.toContain("is an object of type")
+    })
+  }
+
   it("the check's own read failing is enough: a build whose read would succeed sends nothing", async () => {
     // The SDK's build reads the object too (with no `include`), so a node that fails every read is
     // caught twice. This one fails only the check's read (`include: { content: true }`), as a flaky

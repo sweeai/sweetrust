@@ -627,7 +627,9 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
       : "Refused in-process; nothing was sent to Sui. The revoke was not built or signed, so it did NOT run."
     const obj = await readAllowanceObject(h.allowanceId, null)
     if (obj === null) return { code: "allowance-not-found", reason: `${refused} ${notFoundWords(h.allowanceId)}` }
-    if (obj === undefined) {
+    // A node answer with no usable `type` is an unread type, not a different one: refuse
+    // as unread, and never state what the chain holds (DAN-1480 blind review).
+    if (obj === undefined || typeof obj.type !== "string" || obj.type.trim() === "") {
       return { code: "not-submitted", reason: `${refused} sweetrust-sui could not read allowance ${h.allowanceId} on ${network} to confirm that it holds ${named}, and it never sends on a coin type it has not read.` }
     }
     const held = chainTypeOf(obj.type, expected)
