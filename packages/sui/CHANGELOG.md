@@ -25,8 +25,8 @@ on mainnet; this package has spent only on testnet). Tested against `@mysten/sui
 
 - **A spend's amount past u256 can no longer stall your process.** `spend` used to format and write out
   the amount before refusing it, and an agent's `1n << 1073741000n` never returned. Now an amount
-  whose size is past u256, positive or negative, is refused at once as `invalid-amount` with one
-  fixed sentence, and the receipt's `amount` and `amountText` are `null`. With an authorization
+  whose size is past u256's maximum (`U256_MAX`, 2^256 − 1), positive or negative, is refused at
+  once as `invalid-amount` with one fixed sentence, and the receipt's `amount` and `amountText` are `null`. With an authorization
   presented it is `not-authorized` and is never digested, and a genuine token presented with it is
   not consumed, so it still pays the payment it approved. Amounts up to u256 read as before (DAN-1463).
 - **A hand-built handle whose asset the Sui SDK cannot parse as a coin type is rejected at intake.**
