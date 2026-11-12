@@ -23,7 +23,7 @@
 import { Transaction, TransactionDataBuilder } from "@mysten/sui/transactions"
 import type { Signer } from "@mysten/sui/cryptography"
 import type { ClientWithCoreApi, SuiClientTypes } from "@mysten/sui/client"
-import { isValidStructTag, isValidSuiAddress, normalizeStructTag, normalizeSuiAddress } from "@mysten/sui/utils"
+import { isValidStructTag, isValidSuiAddress, normalizeStructTag, normalizeSuiAddress, parseStructTag } from "@mysten/sui/utils"
 import { paymentDigest, SpendAuthorization, type ReceiptLog } from "sweetrust/gate"
 import {
   ABORTS, ALLOWANCE_MODULE, CLOCK_OBJECT_ID, decodeClockMs, MAX_NAME_BYTES, U256_MAX, U64_MAX,
@@ -189,7 +189,7 @@ const MAX_COIN_TYPE_GENERICS = 16
  * `normalizeStructTag`, bounded. The SDK's parser is superlinear in nesting, and
  * a coin type can come from an agent: 15 KB of nested generics blocked the event
  * loop for 43 s, and 640 KB ended the process out of memory. Every direct call in this file goes
- * through here, and a handle is bounded at intake, because `Transaction.coin` parses its asset too.
+ * through here (or `chainTypeOf`, the same bound sized to the allowance type expected), and a handle is bounded at intake, because `Transaction.coin` parses its asset too.
  */
 const boundedCoinType = (coinType: string): boolean => coinType.length <= MAX_COIN_TYPE_CHARS && coinType.split("<").length - 1 <= MAX_COIN_TYPE_GENERICS
 const parseCoinType = (coinType: string): string => {
@@ -217,6 +217,40 @@ const boundTo = (coinType: string | null, asset: string): boolean => {
   }
 }
 const normAddr = (a: string): string => normalizeSuiAddress(a)
+/** `0x2::allowance::Allowance<0x2::balance::Balance<`, canonical: an allowance's type is this, a canonical coin type, then `>>`. */
+const ALLOWANCE_TYPE_HEAD = `${normalizeSuiAddress("0x2")}::allowance::Allowance<${normalizeSuiAddress("0x2")}::balance::Balance<`
+/** The canonical type of an allowance over `Balance<coinType>`, for a coin type already canonical: `normalizeStructTag` of the wrapper, without parsing again. */
+const allowanceTypeFor = (canonicalCoinType: string): string => `${ALLOWANCE_TYPE_HEAD}${canonicalCoinType}>>`
+/**
+ * What a fullnode says an object's type is, canonical, or null when it is not a type this bound
+ * admits. A fullnode's answer is not trusted to be small: the bound is the expected type's own
+ * size (twice it, for a node that spells the same type differently) and two generics past a coin
+ * type's, because the SDK's parser is superlinear (see `parseCoinType`).
+ */
+const chainTypeOf = (type: unknown, expected: string): string | null => {
+  if (typeof type !== "string") return null
+  if (type === expected) return type
+  if (type.length > 2 * expected.length + MAX_COIN_TYPE_CHARS || type.split("<").length - 1 > MAX_COIN_TYPE_GENERICS + 2) return null
+  try {
+    return normalizeStructTag(type)
+  } catch {
+    return null
+  }
+}
+/** The coin an allowance's canonical type holds, or null when the type is not `Allowance<Balance<T>>`. */
+const coinOfAllowanceType = (canonical: string): string | null => {
+  try {
+    const t = parseStructTag(canonical)
+    const two = normalizeSuiAddress("0x2")
+    if (t.address !== two || t.module !== "allowance" || t.name !== "Allowance" || t.typeParams.length !== 1) return null
+    const b = t.typeParams[0]
+    if (typeof b !== "object" || b.address !== two || b.module !== "balance" || b.name !== "Balance" || b.typeParams.length !== 1) return null
+    const coin = b.typeParams[0]
+    return typeof coin === "string" ? coin : normalizeStructTag(coin)
+  } catch {
+    return null
+  }
+}
 /** `0x` and 64 hex digits, the longest a canonical address can be. */
 const SUI_ADDRESS_CHARS = 66
 /** A string as a refusal's sentence quotes it: short, so the sentence stays one. The receipt's own `recipient` field still holds the whole argument, as an in-memory receipt does for any argument. */
@@ -481,12 +515,12 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
   }
 
   /**
-   * Read the allowance. null = explicitly not found, ABSENT_READS times in a row;
+   * Read the allowance object. null = explicitly not found, ABSENT_READS times in a row;
    * undefined = the read could not say (it failed, came back empty, or never
    * reached minVersion). A read never says why an object is missing, so callers
    * report null as "not found", never as revoked.
    */
-  const readAllowance = async (id: string, minVersion: bigint | null): Promise<AllowanceState | null | undefined> => {
+  const readAllowanceObject = async (id: string, minVersion: bigint | null): Promise<SuiClientTypes.Object<{ content: true }> | null | undefined> => {
     let absent = 0
     for (let attempt = 0; attempt < READ_ATTEMPTS; attempt++) {
       if (attempt > 0) await sleep(READ_BACKOFF_MS)
@@ -502,12 +536,22 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
         // A load-balanced fullnode can answer from a replica one transaction
         // behind; wait until the read reflects the transaction just executed.
         if (minVersion !== null && BigInt(obj.version) < minVersion) continue
-        return decodeAllowance(obj.content)
       } catch {
         return undefined
       }
+      return obj
     }
     return undefined
+  }
+  /** The allowance, decoded: null and undefined as `readAllowanceObject` says them, and undefined for content that does not decode. */
+  const readAllowance = async (id: string, minVersion: bigint | null): Promise<AllowanceState | null | undefined> => {
+    const obj = await readAllowanceObject(id, minVersion)
+    if (obj === null || obj === undefined) return obj
+    try {
+      return decodeAllowance(obj.content)
+    } catch {
+      return undefined
+    }
   }
 
   /** The chain's clock, or null when it could not be read: a caller says so, it never substitutes this machine's. */
@@ -558,6 +602,46 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
   /** How a missing allowance is worded everywhere: not found, never revoked, and never more than a read can know. */
   const notFoundWords = (id: string): string => `Allowance ${id} was not found on ${network} after ${ABSENT_READS} reads. A read cannot say why, and a node that is behind answers the same way, so this does not prove the allowance is dead.`
   const clip = (e: unknown): string => (e instanceof Error ? e.message : String(e)).replace(/\s+/g, " ").slice(0, 400)
+
+  /**
+   * Does the allowance on chain hold the coin the handle names? null = it does, or the check does
+   * not apply; otherwise the refusal, and the caller sends nothing. `spend` and `revoke` ask it
+   * after `wrongChain()` and before building. The SDK's own check of the object's type runs only
+   * when no `funder` is passed, and `spend` always passes one, so this is the library's check
+   * (DAN-1480): without it a handle naming another coin built, signed and sent a transaction, and
+   * Sui refused it only after gas was spent, under a receipt naming a coin that never moved.
+   *
+   * It fails closed: a read that cannot say is a refusal, never a send on an unread type.
+   *
+   * An MVR name (`@org/app::coin::COIN`) is resolved only when the transaction is built, so there
+   * is nothing canonical to compare here; a handle whose asset contains one anywhere, as itself or
+   * as a type argument, skips this check and keeps the behavior it had before (DAN-1473 item 2;
+   * SECURITY.md, "Honest limits").
+   */
+  const assetMismatch = async (h: SuiAllowance, verb: "spend" | "revoke"): Promise<{ code: RefusalCode; reason: string } | null> => {
+    if (h.asset.includes("/") || h.asset.includes("@")) return null
+    const named = parseValidCoinType(h.asset)
+    const expected = allowanceTypeFor(named)
+    const refused = verb === "spend"
+      ? "Refused in-process; nothing was sent to Sui, so nothing was spent."
+      : "Refused in-process; nothing was sent to Sui. The revoke was not built or signed, so it did NOT run."
+    const obj = await readAllowanceObject(h.allowanceId, null)
+    if (obj === null) return { code: "allowance-not-found", reason: `${refused} ${notFoundWords(h.allowanceId)}` }
+    // A node answer with no usable `type` is an unread type, not a different one: refuse
+    // as unread, and never state what the chain holds (DAN-1480 blind review).
+    if (obj === undefined || typeof obj.type !== "string" || obj.type.trim() === "") {
+      return { code: "not-submitted", reason: `${refused} sweetrust-sui could not read allowance ${h.allowanceId} on ${network} to confirm that it holds ${named}, and it never sends on a coin type it has not read.` }
+    }
+    const held = chainTypeOf(obj.type, expected)
+    if (held === expected) return null
+    const coin = held === null ? null : coinOfAllowanceType(held)
+    const holds = coin !== null ? `holds ${coin}` : `is an object of type ${quotedShort(String(obj.type))}, not an allowance over a coin's Balance`
+    return {
+      code: "asset-mismatch",
+      reason: `${refused} The handle passed to ${verb}() names the coin type ${named}, but allowance ${h.allowanceId} on ${network} ${holds}. ` +
+        "A transaction under the handle's coin type would fail on chain after gas was spent, and its receipt would name a coin that never moved.",
+    }
+  }
 
   /**
    * The client every transaction is BUILT with: the caller's client, minus its
@@ -1021,6 +1105,9 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
     // The client is on the network the allowance names, checked after every local rule.
     const offChain = await wrongChain()
     if (offChain !== null) return notSent(offChain.code, `Refused in-process; nothing was sent. ${offChain.reason}`)
+    // The allowance on chain holds the coin the handle names, read before anything is built.
+    const mismatch = await assetMismatch(h, "spend")
+    if (mismatch !== null) return notSent(mismatch.code, mismatch.reason)
 
     // Send it. The chain holds the rest; a refusal comes back as a failed transaction with a digest.
     const tx = new Transaction()
@@ -1132,6 +1219,10 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
     if (offChain !== null) {
       const why = `Refused in-process; nothing was sent. ${offChain.reason}`
       return finish(receiptOf({ ...base, verdict: "refused", digest: null, ...localAt(), limits: [], refusal: refusal(offChain.code, "library", null, why), summary: why }))
+    }
+    const mismatch = await assetMismatch(h, "revoke")
+    if (mismatch !== null) {
+      return finish(receiptOf({ ...base, verdict: "refused", digest: null, ...localAt(), limits: [], refusal: refusal(mismatch.code, "library", null, mismatch.reason), summary: mismatch.reason }))
     }
     const tx = new Transaction()
     // Mutability stated, so the build needs no function-signature lookup (the SDK's own pattern for 0x8 Random).

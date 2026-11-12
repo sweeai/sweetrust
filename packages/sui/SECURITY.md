@@ -19,6 +19,11 @@ same list.
   regardless.
 - **Library-held limits bind only spends routed through this library.** The recipient list is
   checked in-process before sending, and it lives in the handle `open()` returns, not on chain.
+- **An MVR-named asset is not checked against its allowance.** `spend` and `revoke` refuse a handle
+  whose coin type differs from the allowance object's as `asset-mismatch`, but a handle whose asset
+  is or contains an MVR name such as `@org/app::coin::COIN` (even as a type argument) is resolved
+  only when the transaction is built, so this check skips it and a mismatch there still reaches the
+  chain (DAN-1473 item 2).
 - **Sui's rate window is fixed, not rolling.** Up to twice the rate can pass across a window
   boundary.
 - **No per-spend maximum in 0.1.** `open()` refuses one rather than drop it.
