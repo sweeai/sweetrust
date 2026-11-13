@@ -73,6 +73,15 @@ on mainnet; this package has spent only on testnet). Tested against `@mysten/sui
   anything is built (before, they came back with the same codes after a failed build). An asset
   that is or contains an MVR name (`@org/app::coin::COIN`) is not compared and behaves as before;
   see `SECURITY.md` (DAN-1480).
+- **A revoke is no longer stopped by a handle that names the wrong coin.** Revoke is the owner's
+  kill switch and moves nothing, so when its handle's `asset` differs from the coin the allowance
+  object holds, `revoke` now revokes that allowance under the coin type it just read from the chain,
+  instead of refusing as `asset-mismatch`. An object's type never changes, so nothing can swap it
+  between the read and the send, and Sui still refuses a revoke whose `AllowanceCap` is not this
+  allowance's. The receipt's `asset` is the coin the chain holds, its `limits` is empty because the
+  handle's limits describe another coin, and its summary names both coin types, on every outcome.
+  `spend` still refuses such a handle, and an object that is not an allowance, a missing allowance
+  and an unreadable one are still refused before anything is sent (DAN-1502).
 
 - **`chainSpends` now finds a spend from what moved, not from the command list.** It lists a
   transaction when an input withdraws from this allowance (`FUNDS_WITHDRAWAL`, `source:

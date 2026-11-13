@@ -251,6 +251,15 @@ const coinOfAllowanceType = (canonical: string): string | null => {
     return null
   }
 }
+/**
+ * What `checkAsset` found. `holds` carries the handle's coin and the chain's, both canonical, and
+ * the refusal a caller that will not proceed under the chain's coin returns.
+ */
+type AssetCheck =
+  | { readonly kind: "match" }
+  | { readonly kind: "holds"; readonly named: string; readonly coin: string; readonly reason: string }
+  | { readonly kind: "refuse"; readonly code: RefusalCode; readonly reason: string }
+const MATCH: AssetCheck = Object.freeze({ kind: "match" })
 /** `0x` and 64 hex digits, the longest a canonical address can be. */
 const SUI_ADDRESS_CHARS = 66
 /** A string as a refusal's sentence quotes it: short, so the sentence stays one. The receipt's own `recipient` field still holds the whole argument, as an in-memory receipt does for any argument. */
@@ -604,12 +613,15 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
   const clip = (e: unknown): string => (e instanceof Error ? e.message : String(e)).replace(/\s+/g, " ").slice(0, 400)
 
   /**
-   * Does the allowance on chain hold the coin the handle names? null = it does, or the check does
-   * not apply; otherwise the refusal, and the caller sends nothing. `spend` and `revoke` ask it
-   * after `wrongChain()` and before building. The SDK's own check of the object's type runs only
-   * when no `funder` is passed, and `spend` always passes one, so this is the library's check
-   * (DAN-1480): without it a handle naming another coin built, signed and sent a transaction, and
-   * Sui refused it only after gas was spent, under a receipt naming a coin that never moved.
+   * Does the allowance on chain hold the coin the handle names? `match` = it does, or the check
+   * does not apply. `holds` = it is an allowance over another coin, named canonically, with the
+   * refusal a caller that will not proceed returns. `refuse` = the caller sends nothing. `spend`
+   * and `revoke` ask it after `wrongChain()` and before building. The SDK's own check of the
+   * object's type runs only when no `funder` is passed, and `spend` always passes one, so this is
+   * the library's check (DAN-1480): without it a handle naming another coin built, signed and sent
+   * a transaction, and Sui refused it only after gas was spent, under a receipt naming a coin that
+   * never moved. `spend` refuses on `holds`; `revoke` builds under the coin the chain holds
+   * (DAN-1502), since a Sui object's type is fixed for its ID and the read is authoritative.
    *
    * It fails closed: a read that cannot say is a refusal, never a send on an unread type.
    *
@@ -618,29 +630,27 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
    * as a type argument, skips this check and keeps the behavior it had before (DAN-1473 item 2;
    * SECURITY.md, "Honest limits").
    */
-  const assetMismatch = async (h: SuiAllowance, verb: "spend" | "revoke"): Promise<{ code: RefusalCode; reason: string } | null> => {
-    if (h.asset.includes("/") || h.asset.includes("@")) return null
+  const checkAsset = async (h: SuiAllowance, verb: "spend" | "revoke"): Promise<AssetCheck> => {
+    if (h.asset.includes("/") || h.asset.includes("@")) return MATCH
     const named = parseValidCoinType(h.asset)
     const expected = allowanceTypeFor(named)
     const refused = verb === "spend"
       ? "Refused in-process; nothing was sent to Sui, so nothing was spent."
       : "Refused in-process; nothing was sent to Sui. The revoke was not built or signed, so it did NOT run."
     const obj = await readAllowanceObject(h.allowanceId, null)
-    if (obj === null) return { code: "allowance-not-found", reason: `${refused} ${notFoundWords(h.allowanceId)}` }
+    if (obj === null) return { kind: "refuse", code: "allowance-not-found", reason: `${refused} ${notFoundWords(h.allowanceId)}` }
     // A node answer with no usable `type` is an unread type, not a different one: refuse
     // as unread, and never state what the chain holds (DAN-1480 blind review).
     if (obj === undefined || typeof obj.type !== "string" || obj.type.trim() === "") {
-      return { code: "not-submitted", reason: `${refused} sweetrust-sui could not read allowance ${h.allowanceId} on ${network} to confirm that it holds ${named}, and it never sends on a coin type it has not read.` }
+      return { kind: "refuse", code: "not-submitted", reason: `${refused} sweetrust-sui could not read allowance ${h.allowanceId} on ${network} to confirm that it holds ${named}, and it never sends on a coin type it has not read.` }
     }
     const held = chainTypeOf(obj.type, expected)
-    if (held === expected) return null
+    if (held === expected) return MATCH
     const coin = held === null ? null : coinOfAllowanceType(held)
     const holds = coin !== null ? `holds ${coin}` : `is an object of type ${quotedShort(String(obj.type))}, not an allowance over a coin's Balance`
-    return {
-      code: "asset-mismatch",
-      reason: `${refused} The handle passed to ${verb}() names the coin type ${named}, but allowance ${h.allowanceId} on ${network} ${holds}. ` +
-        "A transaction under the handle's coin type would fail on chain after gas was spent, and its receipt would name a coin that never moved.",
-    }
+    const reason = `${refused} The handle passed to ${verb}() names the coin type ${named}, but allowance ${h.allowanceId} on ${network} ${holds}. ` +
+      "A transaction under the handle's coin type would fail on chain after gas was spent, and its receipt would name a coin that never moved."
+    return coin === null ? { kind: "refuse", code: "asset-mismatch", reason } : { kind: "holds", named, coin, reason }
   }
 
   /**
@@ -1106,8 +1116,9 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
     const offChain = await wrongChain()
     if (offChain !== null) return notSent(offChain.code, `Refused in-process; nothing was sent. ${offChain.reason}`)
     // The allowance on chain holds the coin the handle names, read before anything is built.
-    const mismatch = await assetMismatch(h, "spend")
-    if (mismatch !== null) return notSent(mismatch.code, mismatch.reason)
+    const checked = await checkAsset(h, "spend")
+    if (checked.kind === "refuse") return notSent(checked.code, checked.reason)
+    if (checked.kind === "holds") return notSent("asset-mismatch", checked.reason)
 
     // Send it. The chain holds the rest; a refusal comes back as a failed transaction with a digest.
     const tx = new Transaction()
@@ -1220,42 +1231,51 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
       const why = `Refused in-process; nothing was sent. ${offChain.reason}`
       return finish(receiptOf({ ...base, verdict: "refused", digest: null, ...localAt(), limits: [], refusal: refusal(offChain.code, "library", null, why), summary: why }))
     }
-    const mismatch = await assetMismatch(h, "revoke")
-    if (mismatch !== null) {
-      return finish(receiptOf({ ...base, verdict: "refused", digest: null, ...localAt(), limits: [], refusal: refusal(mismatch.code, "library", null, mismatch.reason), summary: mismatch.reason }))
+    const checked = await checkAsset(h, "revoke")
+    if (checked.kind === "refuse") {
+      return finish(receiptOf({ ...base, verdict: "refused", digest: null, ...localAt(), limits: [], refusal: refusal(checked.code, "library", null, checked.reason), summary: checked.reason }))
     }
+    // A kill switch is not stopped by a handle that names the wrong coin (DAN-1502). The type just
+    // read is the allowance's for good, so the revoke is built under the coin the chain holds and its
+    // receipt names that coin. The handle's limits describe a handle the chain contradicts, so they
+    // are not listed. Every receipt from here says so. The chain still checks the AllowanceCap.
+    const coin = checked.kind === "holds" ? checked.coin : h.asset
+    const run = checked.kind === "holds" ? { ...base, asset: coin } : base
+    const note = checked.kind === "holds"
+      ? ` The handle passed to revoke() names the coin type ${checked.named}, but allowance ${h.allowanceId} on ${network} holds ${coin}, so this revoke was built under ${coin}, the coin type the chain holds; the handle's limits describe another coin and are not listed.`
+      : ""
     const tx = new Transaction()
     // Mutability stated, so the build needs no function-signature lookup (the SDK's own pattern for 0x8 Random).
     const byValue = (objectId: string) => tx.object({ $kind: "UnresolvedObject", UnresolvedObject: { objectId, mutable: true } })
-    tx.moveCall({ target: "0x2::allowance::revoke", typeArguments: [balanceType(h.asset)], arguments: [byValue(h.capId), byValue(h.allowanceId)] })
+    tx.moveCall({ target: "0x2::allowance::revoke", typeArguments: [balanceType(coin)], arguments: [byValue(h.capId), byValue(h.allowanceId)] })
     const out = await execute(tx, signer)
     // A kill switch has one honest "done": an executed revoke. Unknown is `errored`
     // whatever a read says, since a signed revoke may yet land.
     if (out.kind === "unknown") {
-      const why = `Could not confirm the revoke: the transaction was signed and may have reached ${network}, but sweetrust-sui could not read its outcome within ${confirmTimeoutMs} ms. The allowance MAY or MAY NOT still be live. Look up ${out.digest} on ${network}, or call remaining(), before relying on it. The Sui client said: ${out.message}`
-      return finish(receiptOf({ ...base, verdict: "errored", digest: out.digest, ...localAt(), limits: [], refusal: null, summary: why }))
+      const why = `Could not confirm the revoke: the transaction was signed and may have reached ${network}, but sweetrust-sui could not read its outcome within ${confirmTimeoutMs} ms. The allowance MAY or MAY NOT still be live. Look up ${out.digest} on ${network}, or call remaining(), before relying on it. The Sui client said: ${out.message}${note}`
+      return finish(receiptOf({ ...run, verdict: "errored", digest: out.digest, ...localAt(), limits: [], refusal: null, summary: why }))
     }
     if (out.kind === "not-sent") {
       // The same refusal either way: a revoke that did not run must not read as already done.
       const missing = (await readAllowance(h.allowanceId, null)) === null
       const cause = missing ? notFoundWords(h.allowanceId) : `Only the funder ${h.funder}, who holds the AllowanceCap ${h.capId}, can revoke.`
-      const why = `Refused in-process; nothing was sent to Sui. The revoke could not be built or signed, so it did NOT run. ${cause} ${notSentWords(out)}`
-      return finish(receiptOf({ ...base, verdict: "refused", digest: null, ...localAt(), limits: [], refusal: refusal(missing ? "allowance-not-found" : "not-submitted", "library", null, why), summary: why }))
+      const why = `Refused in-process; nothing was sent to Sui. The revoke could not be built or signed, so it did NOT run. ${cause} ${notSentWords(out)}${note}`
+      return finish(receiptOf({ ...run, verdict: "refused", digest: null, ...localAt(), limits: [], refusal: refusal(missing ? "allowance-not-found" : "not-submitted", "library", null, why), summary: why }))
     }
     const when = await chainTime(out.digest)
     const at = { at: new Date(Number(when.ms)).toISOString(), atSource: when.source }
     if (out.kind === "failed") {
       const native = nativeOf(out.tx.status.error)
-      const why = `Refused by Sui validators${native === null ? "" : ` (${native.module}::${native.abortName})`}: ${out.tx.status.error?.message ?? "the revoke failed"}. The allowance is still live.`
-      return finish(receiptOf({ ...base, verdict: "refused", digest: out.digest, ...at, limits: [], refusal: refusal("chain-error", "chain", native, why), summary: why }))
+      const why = `Refused by Sui validators${native === null ? "" : ` (${native.module}::${native.abortName})`}: ${out.tx.status.error?.message ?? "the revoke failed"}. The allowance is still live.${note}`
+      return finish(receiptOf({ ...run, verdict: "refused", digest: out.digest, ...at, limits: [], refusal: refusal("chain-error", "chain", native, why), summary: why }))
     }
-    const lines = present.map((l) => line(l, limitValue(l, h.limits, scale), holder(l), "revoked",
+    const lines = checked.kind === "holds" ? [] : present.map((l) => line(l, limitValue(l, h.limits, scale), holder(l), "revoked",
       holder(l) === "chain"
         ? "Revoked on chain: the Allowance object is deleted, so Sui refuses every later spend against it, from any client."
         : "Revoked: the library refuses nothing more because there is nothing left to spend against; the on-chain object is gone."))
     return finish(receiptOf({
-      ...base, verdict: "executed", digest: out.digest, ...at, limits: lines, refusal: null,
-      summary: `Revoked allowance ${h.allowanceId} on ${network}: the funder's AllowanceCap deleted it, so Sui refuses every later spend against it (tx ${out.digest}).`,
+      ...run, verdict: "executed", digest: out.digest, ...at, limits: lines, refusal: null,
+      summary: `Revoked allowance ${h.allowanceId} on ${network}: the funder's AllowanceCap deleted it, so Sui refuses every later spend against it (tx ${out.digest}).${note}`,
     }))
   }
 

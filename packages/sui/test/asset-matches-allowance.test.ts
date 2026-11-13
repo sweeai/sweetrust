@@ -3,9 +3,12 @@
  * DAN-1473 item 1). `spend` passes `funder`, so the SDK skips its own type check,
  * and before this a handle naming another coin built, signed and sent a
  * transaction. The library reads the object and refuses in-process instead.
+ * A revoke is the owner's kill switch and moves nothing, so it is not refused:
+ * it runs under the coin the chain holds, and says so (DAN-1502).
  */
 import { describe, expect, it } from "vitest"
 import { ObjectError } from "@mysten/sui/client"
+import { Transaction } from "@mysten/sui/transactions"
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519"
 import { normalizeStructTag, normalizeSuiAddress } from "@mysten/sui/utils"
 import { defineScale, suiAllowances, type AllowanceReceipt, type SuiAllowance } from "../src/index.ts"
@@ -58,15 +61,6 @@ describe("a handle naming another coin than its allowance holds is refused befor
       expect(r.limits.map((l) => l.verdict)).toEqual(["unchecked"])
     })
 
-    it(`revoke with ${asset} on a SUI allowance → asset-mismatch, the revoke did NOT run`, async () => {
-      const chain = live()
-      const r = await revoke(chain, asset)
-      refusedInProcess(r, chain, "asset-mismatch")
-      expect(r.refusal?.why).toContain(`names the coin type ${normalizeStructTag(asset)}`)
-      expect(r.refusal?.why).toContain(`holds ${SUI}.`)
-      expect(r.summary).toContain("it did NOT run")
-      expect(r.summary).not.toMatch(/already revoked/i)
-    })
   }
 
   it("the spend refusal, word for word", async () => {
@@ -250,5 +244,82 @@ describe("an MVR-named coin skips the comparison and keeps its earlier behavior 
       expect(r.refusal?.why).toContain("could not be built or signed")
       expect(typeReads).toBeLessThanOrEqual(1)
     }
+  })
+})
+
+describe("a revoke whose handle names another coin runs under the coin the chain holds (DAN-1502)", () => {
+  const BALANCE_SUI = normalizeStructTag(`0x2::balance::Balance<${SUI}>`)
+  /** The type argument the signed revoke carried, read back from the bytes the chain executed. */
+  const revokedUnder = (chain: MockChain): string | null => {
+    const call = Transaction.from(chain.executed[0]!.bytes).getData().commands.find((c) => c.MoveCall?.function === "revoke")
+    const t = call?.MoveCall?.typeArguments[0]
+    return t === undefined ? null : normalizeStructTag(t)
+  }
+  const noted = (r: AllowanceReceipt, asset: string): void => {
+    expect(r.asset).toBe(SUI)
+    expect(r.limits).toEqual([])
+    expect(r.summary).toContain(`The handle passed to revoke() names the coin type ${normalizeStructTag(asset)}, but allowance ${ALLOWANCE_ID} on sui:testnet holds ${SUI}`)
+    expect(r.summary).toContain(`built under ${SUI}, the coin type the chain holds`)
+  }
+
+  for (const asset of ["0x3::evil::EVIL", "0x2::coin::COIN", "0x7::wrap::W<0x2::sui::SUI>"]) {
+    it(`revoke with ${asset} on a SUI allowance executes under Balance<SUI>, and its receipt names SUI`, async () => {
+      const chain = live()
+      chain.script.push({ kind: "executed", digest: DIGEST(3), timestampMs: ANCHOR, after: null })
+      const r = await revoke(chain, asset)
+      expect(chain.executed).toHaveLength(1)
+      expect(revokedUnder(chain)).toBe(BALANCE_SUI)
+      expect(r).toMatchObject({ verb: "revoke", verdict: "executed", refusal: null })
+      noted(r, asset)
+      expect(r.summary).toMatch(/^Revoked allowance /)
+    })
+  }
+
+  it("an outcome it cannot confirm is `errored`, under the chain's coin, and says the handle named another", async () => {
+    const chain = live()
+    const r = await suiAllowances({ client: chain.client, network: "sui:testnet", scale: testUSD, now: () => ANCHOR, confirmTimeoutMs: 0 })
+      .revoke({ signer: principal, allowance: handle("0x3::evil::EVIL") })
+    expect(chain.executed).toHaveLength(1)
+    expect(revokedUnder(chain)).toBe(BALANCE_SUI)
+    expect(r).toMatchObject({ verdict: "errored", refusal: null })
+    expect(r.summary).toContain("MAY or MAY NOT still be live")
+    noted(r, "0x3::evil::EVIL")
+  })
+
+  it("a chain refusal is `chain-error` under the chain's coin, and says the handle named another", async () => {
+    const chain = live()
+    chain.script.push({ kind: "abort", digest: DIGEST(4), timestampMs: ANCHOR, abortName: "EExceedsRateLimit", errorCode: 4 })
+    const r = await revoke(chain, "0x3::evil::EVIL")
+    expect(chain.executed).toHaveLength(1)
+    expect(r).toMatchObject({ verdict: "refused" })
+    expect(r.refusal).toMatchObject({ code: "chain-error", refusedBy: "chain" })
+    expect(r.summary).toBe(r.refusal?.why)
+    expect(r.summary).toContain("The allowance is still live.")
+    noted(r, "0x3::evil::EVIL")
+  })
+
+  it("a build that fails is `not-submitted` under the chain's coin, and says the handle named another", async () => {
+    const chain = live()
+    chain.breakBuild = true
+    const r = await revoke(chain, "0x3::evil::EVIL")
+    refusedInProcess(r, chain, "not-submitted")
+    expect(r.summary).toContain("it did NOT run")
+    noted(r, "0x3::evil::EVIL")
+  }, 10_000)
+
+  it("a matching revoke is unchanged: the handle's asset, its limits listed, no note", async () => {
+    const chain = live()
+    chain.script.push({ kind: "executed", digest: DIGEST(3), timestampMs: ANCHOR, after: null })
+    const r = await revoke(chain, "0x2::sui::SUI")
+    expect(revokedUnder(chain)).toBe(BALANCE_SUI)
+    expect(r.asset).toBe("0x2::sui::SUI")
+    expect(r.limits.map((l) => l.verdict)).toEqual(["revoked"])
+    expect(r.summary).not.toContain("names the coin type")
+  })
+
+  it("spend with the same handle is still refused as asset-mismatch: only revoke runs under the chain's coin", async () => {
+    const chain = live()
+    const r = await pay(chain, "0x3::evil::EVIL")
+    refusedInProcess(r, chain, "asset-mismatch")
   })
 })
