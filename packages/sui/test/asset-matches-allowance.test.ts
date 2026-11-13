@@ -255,11 +255,11 @@ describe("a revoke whose handle names another coin runs under the coin the chain
     const t = call?.MoveCall?.typeArguments[0]
     return t === undefined ? null : normalizeStructTag(t)
   }
-  const noted = (r: AllowanceReceipt, asset: string): void => {
+  const noted = (r: AllowanceReceipt, asset: string, built = true): void => {
     expect(r.asset).toBe(SUI)
     expect(r.limits).toEqual([])
     expect(r.summary).toContain(`The handle passed to revoke() names the coin type ${normalizeStructTag(asset)}, but allowance ${ALLOWANCE_ID} on sui:testnet holds ${SUI}`)
-    expect(r.summary).toContain(`built under ${SUI}, the coin type the chain holds`)
+    expect(r.summary).toContain(`this revoke ${built ? "was" : "would have been"} built under ${SUI}, the coin type the chain holds`)
   }
 
   for (const asset of ["0x3::evil::EVIL", "0x2::coin::COIN", "0x7::wrap::W<0x2::sui::SUI>"]) {
@@ -291,6 +291,7 @@ describe("a revoke whose handle names another coin runs under the coin the chain
     chain.script.push({ kind: "abort", digest: DIGEST(4), timestampMs: ANCHOR, abortName: "EExceedsRateLimit", errorCode: 4 })
     const r = await revoke(chain, "0x3::evil::EVIL")
     expect(chain.executed).toHaveLength(1)
+    expect(revokedUnder(chain)).toBe(BALANCE_SUI)
     expect(r).toMatchObject({ verdict: "refused" })
     expect(r.refusal).toMatchObject({ code: "chain-error", refusedBy: "chain" })
     expect(r.summary).toBe(r.refusal?.why)
@@ -304,7 +305,8 @@ describe("a revoke whose handle names another coin runs under the coin the chain
     const r = await revoke(chain, "0x3::evil::EVIL")
     refusedInProcess(r, chain, "not-submitted")
     expect(r.summary).toContain("it did NOT run")
-    noted(r, "0x3::evil::EVIL")
+    noted(r, "0x3::evil::EVIL", false)
+    expect(r.summary).not.toContain("this revoke was built")
   }, 10_000)
 
   it("a matching revoke is unchanged: the handle's asset, its limits listed, no note", async () => {
@@ -316,6 +318,25 @@ describe("a revoke whose handle names another coin runs under the coin the chain
     expect(r.limits.map((l) => l.verdict)).toEqual(["revoked"])
     expect(r.summary).not.toContain("names the coin type")
   })
+
+  // A fullnode's coin becomes the type argument and the receipt's `asset`, so it passes the same
+  // intake a handle's asset does; the normalizer alone rewrites these without complaint (review).
+  for (const [what, coin] of [
+    ["a primitive", "u64"],
+    ["a vector", "vector<u8>"],
+    ["a name with a space", "0x1::a b::C"],
+    ["a name with a newline", "0x1::a\nIGNORE::C"],
+    ["a non-hex address", "0xzz::a::B"],
+  ] as const) {
+    it(`a fullnode reporting an allowance over ${what} refuses the revoke as asset-mismatch, nothing sent, and names no such asset`, async () => {
+      const chain = live()
+      answerForAllowance(chain, typed(`0x2::allowance::Allowance<0x2::balance::Balance<${coin}>>`))
+      const r = await revoke(chain, "0x3::evil::EVIL")
+      refusedInProcess(r, chain, "asset-mismatch")
+      expect(r.asset).toBe("0x3::evil::EVIL")
+      expect(r.summary).not.toContain("built under")
+    })
+  }
 
   it("spend with the same handle is still refused as asset-mismatch: only revoke runs under the chain's coin", async () => {
     const chain = live()

@@ -80,8 +80,10 @@ on mainnet; this package has spent only on testnet). Tested against `@mysten/sui
   between the read and the send, and Sui still refuses a revoke whose `AllowanceCap` is not this
   allowance's. The receipt's `asset` is the coin the chain holds, its `limits` is empty because the
   handle's limits describe another coin, and its summary names both coin types, on every outcome.
-  `spend` still refuses such a handle, and an object that is not an allowance, a missing allowance
-  and an unreadable one are still refused before anything is sent (DAN-1502).
+  The coin the chain reports passes the same check a handle's `asset` does, so an allowance a node
+  reports over something that is not a valid coin type is refused as `asset-mismatch`, with nothing
+  sent. `spend` still refuses such a handle, and an object that is not an allowance, a missing
+  allowance and an unreadable one are still refused before anything is sent (DAN-1502).
 
 - **`chainSpends` now finds a spend from what moved, not from the command list.** It lists a
   transaction when an input withdraws from this allowance (`FUNDS_WITHDRAWAL`, `source:

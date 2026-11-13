@@ -208,6 +208,14 @@ const parseValidCoinType = (coinType: string): string => {
   if (!isValidStructTag(canonical)) throw new TypeError("not a valid Sui coin type")
   return canonical
 }
+/** `parseValidCoinType`, or null instead of a throw: for a coin type a fullnode reported. */
+const validCoinOrNull = (coinType: string): string | null => {
+  try {
+    return parseValidCoinType(coinType)
+  } catch {
+    return null
+  }
+}
 /** Is `asset` the coin a scale is bound to? A malformed asset is not, and never throws here. */
 const boundTo = (coinType: string | null, asset: string): boolean => {
   try {
@@ -650,7 +658,12 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
     const holds = coin !== null ? `holds ${coin}` : `is an object of type ${quotedShort(String(obj.type))}, not an allowance over a coin's Balance`
     const reason = `${refused} The handle passed to ${verb}() names the coin type ${named}, but allowance ${h.allowanceId} on ${network} ${holds}. ` +
       "A transaction under the handle's coin type would fail on chain after gas was spent, and its receipt would name a coin that never moved."
-    return coin === null ? { kind: "refuse", code: "asset-mismatch", reason } : { kind: "holds", named, coin, reason }
+    // The fullnode's coin becomes a type argument and a receipt's `asset`, so it passes the same
+    // intake a handle's asset does: `coinOfAllowanceType` only normalizes, and the normalizer rewrites
+    // without validating (`Balance<u64>`, a name with a newline or space, `0xzz::a::B`). A coin that
+    // fails is refused exactly as a non-coin is, with the refusal's words unchanged (DAN-1502 review).
+    const valid = coin === null ? null : validCoinOrNull(coin)
+    return valid === null ? { kind: "refuse", code: "asset-mismatch", reason } : { kind: "holds", named, coin: valid, reason }
   }
 
   /**
@@ -1241,9 +1254,11 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
     // are not listed. Every receipt from here says so. The chain still checks the AllowanceCap.
     const coin = checked.kind === "holds" ? checked.coin : h.asset
     const run = checked.kind === "holds" ? { ...base, asset: coin } : base
-    const note = checked.kind === "holds"
-      ? ` The handle passed to revoke() names the coin type ${checked.named}, but allowance ${h.allowanceId} on ${network} holds ${coin}, so this revoke was built under ${coin}, the coin type the chain holds; the handle's limits describe another coin and are not listed.`
+    // "would have been" where the build itself is what failed (not-sent), so no receipt claims a build that never happened.
+    const noteFor = (built: boolean): string => checked.kind === "holds"
+      ? ` The handle passed to revoke() names the coin type ${checked.named}, but allowance ${h.allowanceId} on ${network} holds ${coin}, so this revoke ${built ? "was" : "would have been"} built under ${coin}, the coin type the chain holds; the handle's limits describe another coin and are not listed.`
       : ""
+    const note = noteFor(true)
     const tx = new Transaction()
     // Mutability stated, so the build needs no function-signature lookup (the SDK's own pattern for 0x8 Random).
     const byValue = (objectId: string) => tx.object({ $kind: "UnresolvedObject", UnresolvedObject: { objectId, mutable: true } })
@@ -1259,7 +1274,7 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
       // The same refusal either way: a revoke that did not run must not read as already done.
       const missing = (await readAllowance(h.allowanceId, null)) === null
       const cause = missing ? notFoundWords(h.allowanceId) : `Only the funder ${h.funder}, who holds the AllowanceCap ${h.capId}, can revoke.`
-      const why = `Refused in-process; nothing was sent to Sui. The revoke could not be built or signed, so it did NOT run. ${cause} ${notSentWords(out)}${note}`
+      const why = `Refused in-process; nothing was sent to Sui. The revoke could not be built or signed, so it did NOT run. ${cause} ${notSentWords(out)}${noteFor(false)}`
       return finish(receiptOf({ ...run, verdict: "refused", digest: null, ...localAt(), limits: [], refusal: refusal(missing ? "allowance-not-found" : "not-submitted", "library", null, why), summary: why }))
     }
     const when = await chainTime(out.digest)
