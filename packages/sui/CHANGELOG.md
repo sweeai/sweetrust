@@ -60,6 +60,30 @@ on mainnet; this package has spent only on testnet). Tested against `@mysten/sui
   longer be spent, revoked or read here (revoke it with your own transaction). No live coin with
   such a name was found. Other coin types behave as before, and an MVR name such as
   `@org/app::coin::COIN` is not refused here; only `suiPaymentSpelling` refuses those (DAN-1470).
+- **A handle naming a different coin from its allowance is refused before anything is sent.** `spend`
+  and `revoke` now read the allowance object and compare its type with the handle's `asset`. Before,
+  a hand-built handle saying `0x3::evil::EVIL` or `0x2::coin::COIN` on a SUI allowance built, signed
+  and sent a transaction: Sui would refuse it only after gas was spent, and the receipt named a coin
+  that never moved. Now such a call returns a `refused` receipt with the new `RefusalCode`
+  `asset-mismatch`, held by `library`, whose `why` names both coin types; an object that is not an
+  allowance at all is refused the same way. If an exhaustive `switch` over `RefusalCode` is in your
+  code, add the new member. The read costs one extra object read per `spend` and `revoke`, after
+  every local check and the network check. It fails closed: an allowance that cannot be read is
+  refused as `not-submitted`, and one that is not found as `allowance-not-found`, both before
+  anything is built (before, they came back with the same codes after a failed build). An asset
+  that is or contains an MVR name (`@org/app::coin::COIN`) is not compared and behaves as before;
+  see `SECURITY.md` (DAN-1480).
+- **A revoke is no longer stopped by a handle that names the wrong coin.** Revoke is the owner's
+  kill switch and moves nothing, so when its handle's `asset` differs from the coin the allowance
+  object holds, `revoke` now revokes that allowance under the coin type it just read from the chain,
+  instead of refusing as `asset-mismatch`. An object's type never changes, so nothing can swap it
+  between the read and the send, and Sui still refuses a revoke whose `AllowanceCap` is not this
+  allowance's. The receipt's `asset` is the coin the chain holds, its `limits` is empty because the
+  handle's limits describe another coin, and its summary names both coin types, on every outcome.
+  The coin the chain reports passes the same check a handle's `asset` does, so an allowance a node
+  reports over something that is not a valid coin type is refused as `asset-mismatch`, with nothing
+  sent. `spend` still refuses such a handle, and an object that is not an allowance, a missing
+  allowance and an unreadable one are still refused before anything is sent (DAN-1502).
 
 - **`chainSpends` now finds a spend from what moved, not from the command list.** It lists a
   transaction when an input withdraws from this allowance (`FUNDS_WITHDRAWAL`, `source:
