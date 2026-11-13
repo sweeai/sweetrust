@@ -391,7 +391,7 @@ A free tier without enforcement is an advisory guardrail, which is the exact fai
 
 ## Status
 
-**v0.6.0 is current.** It lets a judge you supply score each action against the owner's signed purpose, and every sink call now returns a Promise. `CHANGELOG.md` § *[0.6.0]* has the migration. The package was formed 2026-07-30 by merging three unpublished packages (`@sweetrust/mandate`, `@sweetrust/gate`, `@sweetrust/verify`) into one with subpath exports, then hardened through the adversarial passes `SECURITY.md` lists. Before 0.4.0, npm held only a 0.0.1 name placeholder with no code. `CHANGELOG.md` ships in the tarball.
+**v0.7.0 is current.** It closes the holes the audits after 0.6.0 found, and `allowlisted`, `humanConfirm` and `corroborate` now refuse values the gate did not mint. `CHANGELOG.md` § *[0.7.0]* has the migration, and `SECURITY.md` § *Honest limits* states what remains. The package was formed 2026-07-30 by merging three unpublished packages (`@sweetrust/mandate`, `@sweetrust/gate`, `@sweetrust/verify`) into one with subpath exports, then hardened through the adversarial passes `SECURITY.md` lists. Before 0.4.0, npm held only a 0.0.1 name placeholder with no code. `CHANGELOG.md` ships in the tarball.
 
 ## Versioning
 

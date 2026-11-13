@@ -14,7 +14,7 @@ verified by one version is unaffected by an upgrade; a chain that crosses a vers
 re-verified by the newer code, which may refuse it — each such change is a *Breaking* bullet in the
 release that makes it. A patch version changes none of these.
 
-## [Unreleased]
+## [0.7.0] — 2026-11-12
 
 ### Breaking
 
@@ -832,6 +832,7 @@ this repository and is not carried forward.
   protect — in particular that `revokeMandate` writes only to this package's log and stops no
   money a chain already holds.
 
+[0.7.0]: https://github.com/sweeai/sweetrust/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/sweeai/sweetrust/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/sweeai/sweetrust/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/sweeai/sweetrust/compare/v0.4.0...v0.5.0
