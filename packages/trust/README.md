@@ -53,7 +53,7 @@ Values carry their provenance, and privileged operations can demand it.
 - **The tier lattice** — `untrusted → corroborated → verified`. `minTier` gives the lowest tier of its inputs, and a value you compute from a `.value` is plain until you wrap it. LLM output is born untrusted no matter how good the model. *Inference is not evidence.*
 - **Three declassifiers** — the only ways a value can rise, and the constructor is module-private — at runtime too, not only in the types — so there is no fourth. A successful ascent is recorded in the value's provenance; a refusal is not yet recorded anywhere (see `SECURITY.md`): `allowlisted` (matches a registry you control → verified), `corroborate` (independent sources agree → corroborated, never verified), `humanConfirm` (asks a person, with the provenance rendered into the question so the answer is informed rather than reflexive).
 - **Sinks that declare their appetite** — `makeSink` refuses under-tier arguments and fails closed, naming the tier gap in the refusal. Adoption ladder: `observe → warn → enforce`, so you can install it into a running system without breaking it on day one; a mode outside the ladder is a `TypeError` at construction, never a guess. `execute()` receives a snapshot of the declared arguments, read once when they were checked.
-- **The judgment seam** — a pluggable calibrated scorer that runs *after* the tiers pass, to catch the action that is in-bounds but still wrong. In `enforce`, only a `match` at or above the sink's `floor` runs and only a `mismatch` at or above it blocks. Everything else is **held** for a human: `unsure`, either answer below the floor, and a provider that times out, throws or cannot score. Nothing runs on doubt. In `observe` and `warn` the action runs, flagged, with the verdict on the receipt. A block stands for an hour by default and a hold stands until it is resolved or expires, so a retry gets the same answer without asking the judge again. In `enforce` an identical action runs once unless the host names a new `{ idempotencyKey }`, which must never come from the agent (ADR 0010).
+- **The judgment seam** — a pluggable scorer that runs *after* the tiers pass, to catch the action that is in-bounds but still wrong. In `enforce`, only a `match` at or above the sink's `floor` runs and only a `mismatch` at or above it blocks. Everything else is **held** for a human: `unsure`, either answer below the floor, and a provider that times out, throws or cannot score. Nothing runs on doubt. In `observe` and `warn` the action runs, flagged, with the verdict on the receipt. A block stands for an hour by default and a hold the judge actually scored stands until it is resolved or expires, so a retry gets the same answer without asking the judge again. A hold from a judge that gave no answer does not stand: a retry asks again. When either ends the judge is asked again, but a `match` on an action it really doubted is still held for the owner. In `enforce` an identical action runs once unless the host names a new `{ idempotencyKey }`, which must never come from the agent (ADR 0010).
 - **`ReceiptLog`** — every **sink** decision, allow *and* refuse, lands on a hash-chained tamper-evident log. A declassifier's refusal does not (see `SECURITY.md`).
 
 <!-- readme-check: prelude
@@ -61,7 +61,7 @@ import type { Sourced as S } from "sweetrust/gate"
 declare const raw: string
 declare const extracted: { account: string }
 declare const PAYEE_REGISTRY: ReadonlyMap<string, S<string>>
-declare const vendor: string
+declare const po: { vendorId: string }
 declare const amount: S<number>
 declare const settle: (to: string, amount: number) => string
 -->
@@ -79,6 +79,7 @@ const pay = makeSink<{ to: Sourced<string>; amount: Sourced<number> }, string>({
 
 const email   = Sourced.fromChannel(raw, "email-inbound")
 const account = Sourced.fromLLM(extracted.account, "ExtractInvoice", [email]) // untrusted, always
+const vendor  = Sourced.fromAuthority(po.vendorId, "purchase-orders") // the key is your own record, never the email's
 const payee   = allowlisted(account, PAYEE_REGISTRY, vendor, "payee-registry") // → verified | refusal
 
 // A declassifier can REFUSE, and the refusal is the interesting branch — it is
@@ -390,7 +391,7 @@ A free tier without enforcement is an advisory guardrail, which is the exact fai
 
 ## Status
 
-**v0.6.0 is current.** It lets a judge you supply score each action against the owner's signed purpose, and every sink call now returns a Promise. `CHANGELOG.md` § *[0.6.0]* has the migration. The package was formed 2026-07-30 by merging three unpublished packages (`@sweetrust/mandate`, `@sweetrust/gate`, `@sweetrust/verify`) into one with subpath exports, then hardened through the adversarial passes `SECURITY.md` lists. Before 0.4.0, npm held only a 0.0.1 name placeholder with no code. `CHANGELOG.md` ships in the tarball.
+**v0.7.0 is current.** It closes the holes the audits after 0.6.0 found, and `allowlisted`, `humanConfirm` and `corroborate` now refuse values the gate did not mint. `CHANGELOG.md` § *[0.7.0]* has the migration, and `SECURITY.md` § *Honest limits* states what remains. The package was formed 2026-07-30 by merging three unpublished packages (`@sweetrust/mandate`, `@sweetrust/gate`, `@sweetrust/verify`) into one with subpath exports, then hardened through the adversarial passes `SECURITY.md` lists. Before 0.4.0, npm held only a 0.0.1 name placeholder with no code. `CHANGELOG.md` ships in the tarball.
 
 ## Versioning
 

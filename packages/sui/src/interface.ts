@@ -101,6 +101,11 @@ export type RefusalCode =
   | "not-authorized"
   /** The chain refused for a reason this library does not classify; `native` and `why` quote it. */
   | "chain-error"
+  /**
+   * spend()/revoke(): the handle names a coin type the allowance object on chain does not hold.
+   * The library read the object and refused in-process; nothing was sent.
+   */
+  | "asset-mismatch"
 
 /** What the chain itself said, quoted beside the neutral code. */
 export interface NativeAbort {
@@ -209,7 +214,10 @@ export interface AllowanceReceipt {
   readonly atSource: "chain" | "local"
   readonly funder: string | null
   readonly spender: string
-  /** Spend only: base units, and the same amount in the adapter's display scale. */
+  /**
+   * Spend only: base units, and the same amount in the adapter's display scale. Both are null on a
+   * spend refused because its amount is past u256, which is never written out.
+   */
   readonly amount: string | null
   readonly amountText: string | null
   readonly recipient: string | null

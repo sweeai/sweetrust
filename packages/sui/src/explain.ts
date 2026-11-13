@@ -6,7 +6,7 @@
  */
 import type { AllowanceLimits, HeldBy, LimitLine, LimitName, LimitVerdict } from "./interface.ts"
 import type { Scale } from "./scale.ts"
-import { ABORTS, ALLOWANCE_MODULE, currentWindow, type AllowanceState } from "./allowance-move.ts"
+import { ABORTS, ALLOWANCE_MODULE, currentWindow, U256_MAX, type AllowanceState } from "./allowance-move.ts"
 
 // ── Formatting ───────────────────────────────────────────────────────────────
 
@@ -66,13 +66,27 @@ const nativeTag = (name: string): string => `${abortRef(name)}, abort code ${ABO
 const windowWords = (ms: number, as: (ms: bigint) => string): string =>
   Number.isSafeInteger(ms) && ms > 0 ? as(BigInt(ms)) : `${ms} ms`
 
+/** Is this amount's size past u256? Two comparisons, so it never writes the amount out. */
+export const pastU256 = (v: bigint): boolean => v > U256_MAX || v < -U256_MAX
+
+/** How a receipt names a limit past u256 in place of its digits. One fixed phrase, whatever the value. */
+export const OVERSIZED_LIMIT_WORDS = "an amount past u256 (not written out)"
+
+/**
+ * A limit's amount in words. A value past u256 fits no Sui integer, and
+ * formatting it is the cost: 2^1073741000 never finishes. Such a value is
+ * named by one fixed phrase and never formatted; every other value reads
+ * exactly as `scale.format` writes it.
+ */
+export const limitAmount = (v: bigint, scale: Scale): string => (pastU256(v) ? OVERSIZED_LIMIT_WORDS : scale.format(v))
+
 export function limitValue(limit: LimitName, limits: AllowanceLimits, scale: Scale): string {
   switch (limit) {
     case "lifetimeCap":
-      return `${scale.format(limits.lifetimeCap ?? 0n)} in total`
+      return `${limitAmount(limits.lifetimeCap ?? 0n, scale)} in total`
     case "rate": {
       const r = limits.rate
-      return r === undefined ? "none" : `${scale.format(r.amount)} per ${windowWords(r.windowMs, periodPhrase)}, in fixed windows counted from the first charge`
+      return r === undefined ? "none" : `${limitAmount(r.amount, scale)} per ${windowWords(r.windowMs, periodPhrase)}, in fixed windows counted from the first charge`
     }
     case "start":
       return limits.start === undefined ? "none" : `from ${fmtTime(limits.start.getTime())}`
@@ -83,7 +97,7 @@ export function limitValue(limit: LimitName, limits: AllowanceLimits, scale: Sca
       return `${r.length} address${r.length === 1 ? "" : "es"}: ${r.map(shortAddress).join(", ")}`
     }
     case "perSpendMax":
-      return `${scale.format(limits.perSpendMax ?? 0n)} per spend`
+      return `${limitAmount(limits.perSpendMax ?? 0n, scale)} per spend`
   }
 }
 
@@ -133,10 +147,10 @@ export const line = (limit: LimitName, value: string, heldBy: HeldBy, verdict: L
 export function heldWhy(limit: LimitName, limits: AllowanceLimits, scale: Scale): string {
   switch (limit) {
     case "lifetimeCap":
-      return `Held by Sui: a spend that would bring the total past ${scale.format(limits.lifetimeCap ?? 0n)} aborts on chain (${nativeTag("EExceedsLifetimeCap")}).`
+      return `Held by Sui: a spend that would bring the total past ${limitAmount(limits.lifetimeCap ?? 0n, scale)} aborts on chain (${nativeTag("EExceedsLifetimeCap")}).`
     case "rate": {
       const r = limits.rate
-      const amount = r === undefined ? "?" : scale.format(r.amount)
+      const amount = r === undefined ? "?" : limitAmount(r.amount, scale)
       const period = r === undefined ? "?" : windowWords(r.windowMs, periodPhrase)
       const length = r === undefined ? "?" : windowWords(r.windowMs, fmtDuration)
       return `Held by Sui: at most ${amount} per ${period}; a spend past it aborts on chain (${nativeTag("EExceedsRateLimit")}). Sui's windows are fixed, not rolling: the first charge opens the first window, and each window lasts exactly ${length}.`

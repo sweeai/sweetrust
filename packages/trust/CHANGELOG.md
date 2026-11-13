@@ -14,6 +14,103 @@ verified by one version is unaffected by an upgrade; a chain that crosses a vers
 re-verified by the newer code, which may refuse it — each such change is a *Breaking* bullet in the
 release that makes it. A patch version changes none of these.
 
+## [0.7.0] — 2026-11-12
+
+### Breaking
+
+- **`allowlisted` takes its key as a `Sourced<string>` and refuses one below `verified`.** The key
+  picks the record a candidate is compared against, so a key the message supplied could pick the
+  attacker's own record. Migrate by wrapping the key your host holds:
+  `allowlisted(candidate, registry, Sourced.fromAuthority(po.vendorId, "purchase-orders"), name)`.
+  A plain string is a `TypeError`. The key's tier and origin are now in the ascent's `evidence`
+  (DAN-1444).
+- **`allowlisted` refuses a registry row below `verified`, and a row or candidate the gate did not
+  mint.** A row from parsed JSON, or built with `Sourced.fromChannel`, used to come back as a real
+  `verified` value. Build registry rows with `Sourced.fromAuthority` (DAN-1448).
+
+- **A confirmed value and a registry row are frozen at every depth.** `humanConfirm` deep-freezes the
+  value it promotes, and `allowlisted` deep-freezes a row in place when a lookup finds it, so a value
+  shown as good cannot be rewritten after the yes or through a nested field. A host that mutates a
+  confirmed value or a nested registry row must copy it first. `humanConfirm` now refuses a value that
+  is not plain JSON (a Map, a Set, bytes, a Date, an `undefined` field, `NaN`), because the question
+  could not show it as it is.
+  `corroborate` and `humanConfirm` refuse a claim, reference or candidate the gate did not mint, and
+  no person is asked. `Sourced.fromLLM` throws a `TypeError` on an input the gate did not mint (DAN-1451).
+
+### Security
+
+- **A doubt on a payment covers the same payment under another memo.** A block or a hold was keyed on
+  the whole action, so an agent whose payment was held or blocked could send the same payee, amount,
+  asset and network again with a reworded memo, get a fresh judge, and run on a `match` the owner
+  never saw. On a sink that names `purposeArgs`, a doubt now stands on the payment (`paymentDigest`):
+  a memo variant, under any idempotency key, is held or blocked without a judge call inside the
+  doubt's window. After it, the variant is judged again: a `match` is held for the owner and a
+  confident `mismatch` is blocked. Within one sink object, a variant sent while the payment is still
+  being judged waits for that answer. A second sink over the same log reads the log again once its
+  judge returns and records its own verdict rather than answering from another memo's doubt, so
+  approving that other memo does not release it; if a doubt on the payment that is still inside its
+  window is a block, that verdict is recorded as a block even on a `match`, so there is no hold to
+  approve. A second sink whose judge answers before the other sink's doubt reaches the log still
+  runs on a `match`. The hold a variant gets names the doubted action and sets
+  `underAnotherAction: true` on `held`, and its receipt says so, so an approval releases only the
+  action the owner was shown, once; show the owner that action, not the variant's receipt args.
+  A payment can carry several doubts at once, and each stands until an owner's approval answers it,
+  once that approval is attempted (even if `execute` throws). The approval of a doubt answers that
+  doubt. It never answers another doubt that was still inside its window when the approved one was
+  judged, so approving memo B never lets a reworded memo run inside memo A's open block or hold. A
+  doubt whose window had passed when the approved one was judged is answered too, but for its own
+  memo only when the approved doubt is on that same memo: approving memo B lets the payment's other
+  memos go back to the judge, while a memo that was itself blocked or held stays held for its
+  owner. A receipt answered from the payment's doubts names the strongest one standing (open over expired,
+  block over hold), not the latest. An action that already ran is refused as a duplicate before
+  another memo's doubt is consulted. A different payee, amount, asset or network is still a
+  different payment, and a judged sink with no `purposeArgs` keeps exact-action stickiness. No
+  digest or receipt shape changes (ADR 0010, DAN-1466). A log from before this change in which a
+  memo variant ran after a doubt keeps that doubt, so the next variant of that payment is held or
+  blocked until the owner answers it.
+
+- **`JudgmentVerdict.confidence` no longer claims to be calibrated.** It is whatever the provider
+  reports, and `floor` is only a line drawn on that number, so re-examine a floor when the provider or
+  its pinned model changes. `SECURITY.md` now also describes how a provider's text reaches the
+  receipt, so scrub what a provider throws or returns (DAN-1446).
+
+- **A doubted action needs its owner, however long the agent waits.** A hold expired after 15 minutes
+  and a block after its window, and the next identical call was judged afresh, so a `match` ran with
+  no approval and an agent could retry until the judge agreed. The judge is still asked, so the owner
+  gets a fresh hold to approve, but a `match` on an action with a real doubt behind it is now held. A
+  judge outage is not a doubt, and only the owner's approval of that doubt clears it (ADR 0010,
+  DAN-1443). A log from 0.6.0 in which an unapproved run followed an expired doubt keeps that doubt,
+  so the next repeat of that action is held until the owner approves it.
+
+- **The provenance in a confirmation question is quoted.** A channel or authority name that held agent
+  text could write a second line reading `Confirm VERIFIED (origin: authority:bank)` into the question
+  a person answers. The origin is now escaped, cut to 64 characters and held in brackets it cannot close,
+  so it stays in its own field and cannot push the real value out of view. Its words are still whatever
+  the host passed in. Invisible characters in the value show as escapes. `Sourced.describe` itself is
+  unchanged (DAN-1458).
+- **`allowlisted` refuses when its registry throws.** It used to throw. No value ascended either way
+  (DAN-1458).
+- **`mockJudgmentProvider` no longer writes the payee, amount or cap into its rationale**, since a fixed
+  sentence holding them can be confirmed from its hash on a redacted receipt (DAN-1458).
+
+### Added
+
+- **A judge is told the payment the sink resolved.** On a sink that names `purposeArgs`,
+  `JudgmentInput` now has a frozen `payment` (`payee`, `amount`, `asset`, `network`) built from the
+  same values as the verdict's `paymentDigest`, so a provider can read the payment without repeating
+  the sink's `purposeArgs` and can see a sink-level `judgment.asset`. `amount` is the decimal string the digest
+  hashes, even for a bigint argument. The view has a fourth key only on such a sink. On every judged
+  sink `input` no longer inherits from `Object`, so a provider that calls `input.hasOwnProperty` or
+  stringifies `input` must use `Object.hasOwn` instead, or the call has no verdict (DAN-1445).
+- **A sink can hold a payment to one spelling.** A block or hold names an action as written, so
+  `0xABC` after a hold on `0xabc` was a new action and got a fresh judge. Set `judgment.spelling` to
+  your rail's canonical form of a payee and an asset, and any other spelling is refused before a
+  judge runs. A sink without it behaves as before, and no digest changes (DAN-1457). A function that
+  throws or answers with something other than a string is reported as `could not be checked` (DAN-1458).
+- **A judge can trace a payment to its arguments.** `JudgmentInput.payment` now has `payeeArg`,
+  `amountArg` and `assetArg` (null when the sink fixes the asset), so `input.trust[input.payment.payeeArg]`
+  is the payee's tier. No digest changes (DAN-1458).
+
 ## [0.6.0] — 2026-11-08
 
 This release adds the intent layer: the owner's purpose is signed into the mandate,
@@ -735,6 +832,7 @@ this repository and is not carried forward.
   protect — in particular that `revokeMandate` writes only to this package's log and stops no
   money a chain already holds.
 
+[0.7.0]: https://github.com/sweeai/sweetrust/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/sweeai/sweetrust/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/sweeai/sweetrust/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/sweeai/sweetrust/compare/v0.4.0...v0.5.0

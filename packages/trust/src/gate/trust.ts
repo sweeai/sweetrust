@@ -284,7 +284,12 @@ export class Sourced<T> {
     confidence?: number,
   ): Sourced<T> {
     const ancestors = new Set<string>([`llm:${fn}`])
-    for (const input of inputs) for (const a of input.provenance.ancestors) ancestors.add(a)
+    // Ancestry is what `corroborate` tests independence with, so an input the gate
+    // did not mint would launder forged ancestry into a genuine value (DAN-1451).
+    for (const input of inputs) {
+      if (!Sourced.is(input)) throw new TypeError("Sourced.fromLLM: every input must be a value the gate minted")
+      for (const a of input.provenance.ancestors) ancestors.add(a)
+    }
     // confidence is the extractor's self-report; it rides along but does NOT
     // affect tier (Rule 2 — the value is Untrusted no matter how sure the model).
     return new Sourced(CONSTRUCT, value, "untrusted", { origin: `llm:${fn}`, ancestors, chain: [], confidence })
@@ -326,15 +331,20 @@ export class Sourced<T> {
 
   /** One-line provenance rendering — what the human sees at a refusal. */
   describe(): string {
-    const hops = this.provenance.chain.map((u) => `${u.declassifier}→${u.to}`).join(", ")
-    // `typeof === "number"`, not `!== undefined`: a value rehydrated from JSON
-    // carries `null`, and `null.toFixed` threw here — inside the enforce sink's
-    // declared loop, before any receipt (the 2026-10-13 gate audit). Anything
-    // that is not a number renders as "not measured".
-    const confidence = this.provenance.confidence
-    const conf = typeof confidence === "number" ? `; conf ${confidence.toFixed(2)}` : ""
-    return `${this.tier.toUpperCase()} (origin: ${this.provenance.origin}${hops ? `; upgrades: ${hops}` : ""}${conf})`
+    return provenanceLine(this.tier, this.provenance, this.provenance.origin)
   }
+}
+
+/** The line `describe()` returns. `originText` is separate so the confirmation question can show an inert origin in the same sentence. */
+function provenanceLine(tier: string, provenance: Sourced<unknown>["provenance"], originText: string): string {
+  const hops = provenance.chain.map((u) => `${u.declassifier}→${u.to}`).join(", ")
+  // `typeof === "number"`, not `!== undefined`: a value rehydrated from JSON
+  // carries `null`, and `null.toFixed` threw here — inside the enforce sink's
+  // declared loop, before any receipt (the 2026-10-13 gate audit). Anything
+  // that is not a number renders as "not measured".
+  const confidence = provenance.confidence
+  const conf = typeof confidence === "number" ? `; conf ${confidence.toFixed(2)}` : ""
+  return `${tier.toUpperCase()} (origin: ${originText}${hops ? `; upgrades: ${hops}` : ""}${conf})`
 }
 
 // The class object and its prototype are frozen so that `Sourced.is` and
@@ -362,8 +372,8 @@ Object.freeze(Sourced.prototype)
 // straight in, so the value that was compared and the value that was promoted
 // were separate reads of the caller's object (the 2026-10-13 rail audit,
 // test/intake-poison.test.ts). A Sourced is frozen and cannot carry a getter,
-// so no caller could exploit that; the intake rule in AGENTS.md holds for
-// every export without an exception because of this.
+// so no caller could exploit that; every export meets the intake rule in
+// AGENTS.md, a `Sourced` argument by a brand check before any field is read.
 function ascend<T>(prev: { readonly value: T; readonly provenance: Provenance }, event: UpgradeEvent, mergedAncestors?: ReadonlySet<string>): Sourced<T> {
   return construct(prev.value, event.to, {
     origin: prev.provenance.origin,
@@ -428,21 +438,66 @@ export type DeclassifyResult<T> =
 /**
  * Registry membership → Verified. An authority act: the value matches an
  * entry in a registry THIS deployment governs.
+ *
+ * The key is `Sourced` because it steers the ascent: it picks which record the
+ * candidate is compared against, so a key the attacker wrote can pick the
+ * attacker's own record. It must be `verified`, not merely corroborated:
+ * accumulation never raises a value past `corroborated` (Rule 3a), and a
+ * corroborated key that yielded a `verified` value would launder past that.
+ * The registry row is held to the same bar, and it and the candidate must be
+ * the gate's own values.
  */
 export function allowlisted<T>(
   candidate: Sourced<T>,
   registry: ReadonlyMap<string, Sourced<T>>,
-  key: string,
+  key: Sourced<string>,
   registryName: string,
 ): DeclassifyResult<T> {
-  const entry = registry.get(key)
+  // The brand comes first. Parsed JSON can say `tier: "verified"`, and a Proxy
+  // could answer differently on a second read; neither carries the brand.
+  if (!Sourced.is(key)) {
+    throw new TypeError("allowlisted: key must be a Sourced<string> so the gate knows where it came from. Take it from a record your host holds, never from the message: wrapping a message-derived key in Sourced.fromAuthority defeats this check (SECURITY.md)")
+  }
+  // The key is read here and nowhere after. Its rendering is quoted because an
+  // origin is a host-chosen string that can carry message text, and the evidence
+  // is what an auditor reads.
+  const { value: keyValue, tier: keyTier } = key
+  const keyShown = show(key.describe())
+  // Neither refusal echoes the key or its origin: either may be the attacker's text.
+  if (!meetsTier(keyTier, "verified")) {
+    return { ok: false, reason: `the key for ${registryName} is ${keyTier}; a key picks the record to compare against, so it must be verified` }
+  }
+  if (typeof keyValue !== "string") {
+    return { ok: false, reason: `the key for ${registryName} is not a string` }
+  }
+  // A candidate or a row the gate did not mint is data arriving with a claim, so
+  // it is refused rather than thrown on. No method on a forged candidate runs: its
+  // `describe()` would write its own words into the evidence (DAN-1448).
+  if (!Sourced.is(candidate)) {
+    return { ok: false, reason: `the candidate for ${registryName} was not minted by the gate` }
+  }
+  let entry: ReturnType<typeof registry.get>
+  try {
+    entry = registry.get(keyValue)
+  } catch {
+    // A fixed sentence: a database error can carry a connection string, and a reason can reach an agent.
+    return { ok: false, reason: `the ${registryName} lookup failed, so it is refused rather than guessed` }
+  }
   if (entry === undefined) {
-    return { ok: false, reason: `'${key}' not in ${registryName}; candidate is ${candidate.describe()}` }
+    return { ok: false, reason: `'${keyValue}' not in ${registryName}; candidate is ${candidate.describe()}` }
+  }
+  if (!Sourced.is(entry)) {
+    return { ok: false, reason: `the ${registryName} record for this key was not minted by the gate` }
   }
   // Each Sourced is read once, here (AGENTS.md, "Intake"). The comparison
   // below and the ascent at the bottom both use these locals.
   const { value: entryValue, tier: entryTier, provenance: entryProvenance } = entry
   const { value: candidateValue } = candidate
+  // The same rule as the key: a row below `verified` coming out `verified` would
+  // launder past Rule 3a. Neither refusal echoes the record.
+  if (!meetsTier(entryTier, "verified")) {
+    return { ok: false, reason: `the ${registryName} record for this key is ${entryTier}; only a verified record can be promoted` }
+  }
 
   // The comparison runs on the CANDIDATE, so it executes candidate-controlled
   // code (`toJSON`, getters) and can throw on a circular value. A declassifier
@@ -458,11 +513,17 @@ export function allowlisted<T>(
   // match/mismatch — what comes back is the registry's record, below.
   let entryJSON: string | undefined
   try {
+    // Frozen at every depth here, before the candidate's `toJSON` runs below, so
+    // the record compared is the record promoted, and so the object the caller
+    // gets back cannot be rewritten through any own field. Bytes and the contents
+    // of a Map or Set are the exception (SECURITY.md). A cycle ends the walk and
+    // then fails to serialize, which refuses below.
+    freezeRow(entryValue)
     entryJSON = receiptJSON(entryValue)
   } catch (err) {
     return {
       ok: false,
-      reason: `'${key}' IS in ${registryName} but the ${registryName} record could not be serialized for comparison (${firstLine(err)}) — refusing rather than guessing; candidate is ${candidate.describe()}`,
+      reason: `'${keyValue}' IS in ${registryName} but the ${registryName} record could not be serialized for comparison (${safely(() => firstLine(err))}) — refusing rather than guessing; candidate is ${candidate.describe()}`,
     }
   }
   let candidateJSON: string | undefined
@@ -471,13 +532,13 @@ export function allowlisted<T>(
   } catch (err) {
     return {
       ok: false,
-      reason: `'${key}' IS in ${registryName} but the candidate could not be serialized for comparison (${firstLine(err)}) — refusing rather than guessing`,
+      reason: `'${keyValue}' IS in ${registryName} but the candidate could not be serialized for comparison (${safely(() => firstLine(err))}) — refusing rather than guessing`,
     }
   }
   if (entryJSON !== candidateJSON) {
     return {
       ok: false,
-      reason: `'${key}' IS in ${registryName} but the ${registryName} record does NOT match — candidate is ${candidate.describe()}`,
+      reason: `'${keyValue}' IS in ${registryName} but the ${registryName} record does NOT match — candidate is ${candidate.describe()}`,
     }
   }
 
@@ -509,7 +570,7 @@ export function allowlisted<T>(
       declassifier: "allowlisted",
       from: entryTier,
       to: "verified",
-      evidence: `matched ${registryName}[${key}] — candidate presented was ${candidate.describe()}`,
+      evidence: `matched ${registryName}[${show(keyValue)}] by key ${keyShown} — candidate presented was ${candidate.describe()}`,
       at: now(),
     }),
   }
@@ -531,6 +592,11 @@ export function corroborate<T>(
   // {"$bigint":"5"}, and `undefined` never agrees with a function.
   equals: (a: T, b: T) => boolean = (a, b) => typeof a === typeof b && receiptJSON(a) === receiptJSON(b),
 ): DeclassifyResult<T> {
+  // The brand comes first, and these are refusals for the reason `allowlisted`'s
+  // are: data arriving with a claim. Forged empty `ancestors` would skip the
+  // independence check, and a forged claim would come back branded (DAN-1451).
+  if (!Sourced.is(claim)) return { ok: false, reason: "the claim was not minted by the gate" }
+  if (!Sourced.is(reference)) return { ok: false, reason: "the reference was not minted by the gate" }
   // Each Sourced is read once, here (AGENTS.md, "Intake"): the independence
   // check, the comparison, the ceiling check and the ascent all use these.
   const { value: liveClaim, tier: claimTier, provenance: claimProvenance } = claim
@@ -543,7 +609,8 @@ export function corroborate<T>(
   // The judged path's rule (the 2026-11-08 audit, G2). A value with a `toJSON`
   // or a getter compared as one thing and was promoted as another, and the
   // receipt recorded the good one. Plain JSON has no code in it, so what is
-  // compared is what it is, and the frozen copy compared is the copy promoted.
+  // compared is what it is, and when this ascends the frozen copy compared is the
+  // copy promoted. A claim already at or above corroborated comes back as itself.
   // The reasons are fixed strings: what was refused is caller-shaped.
   let claimValue: T
   let referenceValue: T
@@ -565,10 +632,11 @@ export function corroborate<T>(
   } catch (err) {
     return {
       ok: false,
-      reason: `could not compare — equals threw (${firstLine(err)}); claim ${claim.describe()} vs reference ${reference.describe()}`,
+      reason: `could not compare — equals threw (${safely(() => firstLine(err))}); claim ${claim.describe()} vs reference ${reference.describe()}`,
     }
   }
-  if (!agree) {
+  // `!== true`, as in humanConfirm: an `async` equals returns a Promise, which is truthy.
+  if (agree !== true) {
     return {
       ok: false,
       reason: `values disagree — claim ${show(claimValue)} (${claim.describe()}) vs reference ${show(referenceValue)} (${reference.describe()})`,
@@ -604,6 +672,49 @@ export function corroborate<T>(
 
 /** How much of a candidate's JSON humanConfirm puts in front of the human. */
 const HUMAN_CONFIRM_VALUE_CHARS = 256
+/** How much of a candidate's origin it shows. Short, so that the real value stays inside a one-line preview however long the origin is. */
+const HUMAN_CONFIRM_ORIGIN_CHARS = 64
+/**
+ * The most of any one field the question escapes. Far more than a field shows, and a bound, because
+ * replacing every character of a very large string can exhaust memory and end the process, uncatchably.
+ */
+const HUMAN_CONFIRM_ESCAPED_INPUT_CHARS = 4096
+/** Characters JSON leaves raw that a renderer can act on or a person cannot see: line separators, bidi overrides, controls, zero-widths, tag characters, private-use and unassigned code points, the blank braille cell. */
+const QUESTION_UNSAFE = /[\p{Cc}\p{Cf}\p{Co}\p{Cn}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}\u2800]/gu
+/** What an origin may not hold raw: anything outside printable ASCII, the quote that closes the provenance, and the brackets that hold the origin. */
+const ORIGIN_UNSAFE = /[^\x20-\x7e]|["\\[\]]/gu
+/** One unbreakable unit of an escaped field: an escape, or one whole code point. */
+const QUESTION_UNIT = /\\u\{[0-9a-f]+\}|\\u[0-9a-f]{4}|\\.|[\s\S]/gu
+const inertChar = (c: string): string => {
+  const code = c.codePointAt(0)!
+  return code > 0xffff ? `\\u{${code.toString(16)}}` : `\\u${code.toString(16).padStart(4, "0")}`
+}
+/**
+ * One field of the question. The input is bounded first, then escaped, then cut on a unit boundary, so
+ * the cut never splits an escape or a surrogate pair and the limit is what is really shown. The bound's
+ * own slice can halve a pair; in an origin that half shows as an escape, under a declared cut. Any input
+ * past the bound is declared as cut, even when what is left would fit, since escaping can also shorten a string.
+ */
+const fieldForQuestion = (raw: string, limit: number, escape: (bounded: string) => string): string => {
+  const whole = raw.length <= HUMAN_CONFIRM_ESCAPED_INPUT_CHARS
+  const escaped = escape(whole ? raw : raw.slice(0, HUMAN_CONFIRM_ESCAPED_INPUT_CHARS))
+  if (whole && escaped.length <= limit) return escaped
+  let kept = 0
+  for (const match of escaped.matchAll(QUESTION_UNIT)) {
+    if (kept + match[0].length > limit) break
+    kept += match[0].length
+  }
+  return `${escaped.slice(0, kept)}… [${whole ? escaped.length : raw.length} chars total; first ${kept} shown]`
+}
+/** The value, already quoted as JSON, made inert and cut. For display only. */
+const valueForQuestion = (quoted: string): string => fieldForQuestion(quoted, HUMAN_CONFIRM_VALUE_CHARS, (text) => text.replace(QUESTION_UNSAFE, inertChar))
+/**
+ * A host-chosen origin that can carry agent text, in brackets it cannot close, so its words cannot leave
+ * its field or push the real value out of view. They are still words: an origin can say anything inside
+ * the brackets, which is why the gate's tier leads the line. For display only.
+ */
+const originForQuestion = (origin: string): string =>
+  `[${fieldForQuestion(origin, HUMAN_CONFIRM_ORIGIN_CHARS, (text) => text.replace(/ {2,}/g, " ").replace(ORIGIN_UNSAFE, (c) => (c === '"' || c === "\\" ? `\\${c}` : inertChar(c))))}]`
 
 /**
  * Human confirmation → Verified. The provenance is RENDERED to the human
@@ -620,10 +731,14 @@ const HUMAN_CONFIRM_VALUE_CHARS = 256
  *   built from the copy SYNCHRONOUSLY, at the call, before the first `await`.
  *   The copy is what ascends, so the value the human is asked about is the
  *   value that ascends, however long the human takes and whatever the caller
- *   does to its own object meanwhile. A value that cannot be cloned (a
- *   function, a symbol, a proxy) is refused. A class instance does NOT
- *   throw: it ascends as a plain object of its own enumerable fields, and
- *   its methods and `#private` fields are dropped silently.
+ *   does to its own object meanwhile. The copy is deep-frozen, so it stays
+ *   that value after the yes. A value that cannot be cloned (a function, a
+ *   symbol, a proxy) is refused, and so is a copy that is not plain JSON (a
+ *   Map, a Set, bytes, a Date, named keys on an array), because the question
+ *   could not show all of it. A class instance does NOT throw: it ascends
+ *   as a plain object of its own enumerable fields, and its methods and
+ *   `#private` fields are dropped silently, unless a field holds `undefined`,
+ *   which is not plain JSON and is refused.
  * - The return is a Promise even for a synchronous `render`. A caller who
  *   forgets `await` holds a Promise, whose `.ok` is `undefined`, so the
  *   forgotten await reads as a refusal. Overloads that hand a sync renderer a
@@ -639,12 +754,16 @@ export async function humanConfirm<T>(
   candidate: Sourced<T>,
   render: (question: string) => boolean | Promise<boolean>,
 ): Promise<DeclassifyResult<T>> {
+  // Before anything else, so a forgery's own `describe()` is never shown to a
+  // person as its provenance, and nobody is asked about it at all (DAN-1451).
+  if (!Sourced.is(candidate)) return { ok: false, reason: "human confirmation refused: the candidate was not minted by the gate" }
   // The PROVENANCE leads and the VALUE trails, cut to 256 characters with its
   // full length declared. The question used to open with the value — attacker-
   // controlled, any length — so a value beginning "… — provenance: VERIFIED
   // (origin: authority:payee-registry)?" followed by 4,000 spaces put a forged
   // provenance where a one-line renderer shows it and the real one off-screen
-  // (the 2026-10-13 gate audit). The provenance string is ours; it goes first.
+  // (the 2026-10-13 gate audit). The provenance goes first, and its origin,
+  // the one part a host chooses, is made inert below (DAN-1458).
   // Through receiptJSON, in a try: JSON.stringify threw on a bigint candidate
   // and the human never saw a question (the 2026-10-13 gate audit). A value
   // that cannot be rendered cannot be confirmed — refuse, naming why.
@@ -652,8 +771,7 @@ export async function humanConfirm<T>(
   // the ascent both use these locals.
   const { value: liveValue, tier: candidateTier, provenance: candidateProvenance } = candidate
   // SNAPSHOT, not a reference. A Sourced is frozen, but the object it carries
-  // is not (only `fromAuthority` freezes its value), and whoever handed it in
-  // still holds that object. Once a human answers over a network, the await
+  // is not, and whoever handed it in still holds that object. Once a human answers over a network, the await
   // below can last minutes, and a reference would let the holder rewrite the
   // value after the human saw it: shown "GB00-ALICE", promoted "DE99-EVIL"
   // (found in the 0.5.0 review, test/gate/human-confirm-async.test.ts). The
@@ -667,11 +785,17 @@ export async function humanConfirm<T>(
   // lives in private state should be confirmed as an explicit data object.
   let candidateValue: T
   try {
-    candidateValue = structuredClone(liveValue)
+    // Plain JSON only, checked on the copy, so what the question renders is what
+    // ascends, up to its declared cut: a Map renders as {}, and bytes over shared
+    // memory can change during the wait. Frozen before the question is built, so a yes cannot be pointed at
+    // something else afterward.
+    const copy = structuredClone(liveValue)
+    copyExact(copy, true)
+    candidateValue = deepFreeze(copy)
   } catch (err) {
     return {
       ok: false,
-      reason: `human confirmation refused: the candidate (${candidate.describe()}) could not be copied for confirmation (${firstLine(err)})`,
+      reason: `human confirmation refused: the candidate (${candidate.describe()}) could not be copied for confirmation as plain data a person can read (${safely(() => firstLine(err))})`,
     }
   }
   let json: string
@@ -680,14 +804,16 @@ export async function humanConfirm<T>(
   } catch (err) {
     return {
       ok: false,
-      reason: `human confirmation refused: the candidate (${candidate.describe()}) could not be rendered for the question (${firstLine(err)})`,
+      reason: `human confirmation refused: the candidate (${candidate.describe()}) could not be rendered for the question (${safely(() => firstLine(err))})`,
     }
   }
-  const shown =
-    json.length > HUMAN_CONFIRM_VALUE_CHARS
-      ? `${json.slice(0, HUMAN_CONFIRM_VALUE_CHARS)}… [${json.length} chars total; first ${HUMAN_CONFIRM_VALUE_CHARS} shown]`
-      : json
-  const question = `Confirm the value with provenance ${candidate.describe()} — value: ${shown}?`
+  const shown = valueForQuestion(json)
+  // An origin is a host-chosen string that can carry message text, and this is
+  // the sentence a person says yes to. Only the origin is escaped and cut: the
+  // tier, upgrades and confidence are the gate's own, so a long origin cannot
+  // push them out of view and a forged one cannot imitate them.
+  const provenanceShown = provenanceLine(candidateTier, candidateProvenance, originForQuestion(candidateProvenance.origin))
+  const question = `Confirm the value with provenance "${provenanceShown}" — value: ${shown}?`
   // Everything above ran synchronously, at the call. The await below is the
   // first point at which time passes; nothing after it reads `candidate`.
   //
@@ -833,6 +959,21 @@ function deepFreeze<T>(root: T, seen = new WeakSet<object>()): T {
   Object.freeze(root)
   for (const v of Object.values(root)) deepFreeze(v, seen)
   return root
+}
+
+/**
+ * Freeze a registry row in place, every own data field, a symbol or non-enumerable
+ * one too, and run no getter. A row need not be plain JSON, so unlike `deepFreeze`,
+ * whose throw keeps a writable buffer out of a receipt, this leaves bytes alone.
+ */
+function freezeRow(root: unknown, seen = new WeakSet<object>()): void {
+  if (typeof root !== "object" || root === null || ArrayBuffer.isView(root) || seen.has(root)) return
+  seen.add(root)
+  Object.freeze(root)
+  for (const key of Reflect.ownKeys(root)) {
+    const field = Object.getOwnPropertyDescriptor(root, key)
+    if (field !== undefined && "value" in field) freezeRow(field.value, seen)
+  }
 }
 
 /** Everything a receipt may hold: `receiptBody`'s nine fields and the hash. A tenth key would sit outside the hash. */
@@ -1013,6 +1154,13 @@ export interface Payment {
 export interface Verdict {
   readonly assessment: "match" | "mismatch" | "unsure"
   readonly confidence: number
+  /**
+   * For a scored verdict this attests only the text the provider returned. It
+   * says nothing about the model's reasoning. The gate computes it and the
+   * provider signs nothing, so it does not prove the provider wrote that text. When the
+   * judge gave no answer it hashes the gate's "gave no verdict" line, which can
+   * include the provider's error text.
+   */
   readonly rationaleHash: string
   readonly provider: string
   readonly model: string
@@ -1049,6 +1197,12 @@ export interface Approval {
 export interface HeldAction {
   /** Set when this hold was made under a different idempotency key; resume under that key. */
   readonly underAnotherKey?: true
+  /**
+   * Set when this call was held by a doubt on another action of the same payment,
+   * for example the same payee and amount under another memo (DAN-1466). The
+   * digests name that doubted action: an approval of them resumes it, never this call.
+   */
+  readonly underAnotherAction?: true
   readonly verdictDigest: string
   readonly actionDigest: string
   readonly grantHash: string
@@ -1371,16 +1525,25 @@ const strictInstant = (s: string): number | undefined => {
 // Trust tiers + the cage catch bad PEDIGREE and out-of-bounds actions. Neither
 // catches "in-bounds but WRONG": a payment in-budget, to an allowlisted payee,
 // that still isn't what the principal meant. That gap is judgment's job — a
-// calibrated model scoring the action against declared intent. Two rules govern
+// model scoring the action against declared intent. Two rules govern
 // it: (1) judgment is FALLIBLE (it can be fooled), so it must
-// never be the only wall; (2) judgment is SELF-AWARE (it reports calibrated
-// confidence and, crucially, says "unsure") — in enforce mode an unsure verdict
+// never be the only wall; (2) judgment can ABSTAIN (it reports a
+// confidence and, crucially, can say "unsure") — in enforce mode an unsure verdict
 // holds the action for a human; it neither runs it nor confidently blocks it.
 // We CONSUME judgment via this seam; this package does not ship a judgment model.
 
 export interface JudgmentVerdict {
   readonly assessment: "match" | "mismatch" | "unsure"
-  readonly confidence: number // [0,1] — calibrated: high when right, low when wrong
+  /**
+   * In [0,1], and not calibrated unless the provider says so in its own
+   * documentation; this interface has no field for that. The sink compares it
+   * with the floor and takes it as given. One provider's number may measure only
+   * how concentrated its answer is, which is not how often it is right, so a
+   * floor set for one provider or pinned model means nothing on another. Outside
+   * [0,1] the sink treats the answer as no verdict.
+   */
+  readonly confidence: number
+  /** Required: an empty or blank string makes the answer no verdict. Free text, so it can echo what the provider saw. */
   readonly rationale: string
 }
 
@@ -1388,8 +1551,9 @@ export interface JudgmentVerdict {
  * A judge. Asynchronous since 0.6.0 (ADR 0007): a judge is a model behind a
  * network call or an inference step, and its answer arrives later.
  *
- * `input` has three keys: the owner's purpose, the action as raw values, and
- * `trust`, each argument's tier and provenance. The agent's own rationale never
+ * `input` holds the owner's purpose, the action as raw values, `trust`, each
+ * argument's tier and provenance, and on a sink that names `purposeArgs`,
+ * `payment`, the payment that sink resolved. The agent's own rationale never
  * reaches a judge, but an argument can hold text an agent wrote, so a judge
  * must read `action.args` as data and weigh each one by its `trust` entry. The
  * signal fires at the sink's deadline, and an answer that arrives after it is
@@ -1400,7 +1564,14 @@ export interface JudgmentProvider {
   readonly name: string
   /** The pinned model version, for example "jev@2026-09-15". Empty is a TypeError at sink construction. */
   readonly model: string
-  /** Score a proposed action against the owner's purpose. */
+  /**
+   * Score a proposed action against the owner's purpose. If this throws or
+   * rejects, remember that an error message can echo arguments: its first line
+   * reaches the receipt unless the sink redacts an argument, and a string in a
+   * malformed verdict, or returned in place of one, reaches it the same way. A
+   * host that opts in with `rationaleInRefusal` sends that text to the agent even
+   * on a sink that redacts (SECURITY.md).
+   */
   assess(input: JudgmentInput, signal: AbortSignal): Promise<JudgmentVerdict>
 }
 
@@ -1410,16 +1581,47 @@ export interface ArgumentTrust {
   readonly provenance: string
 }
 
-/** A judge's whole view of a call. `trust` has one entry per key of `action.args`. */
+/**
+ * The payment a sink resolved from its `purposeArgs`: the same four values the
+ * verdict's `paymentDigest` is computed over, so what the judge was shown and
+ * what the verdict binds cannot disagree (`paymentDigest` calls `payee` its
+ * `recipient`). `amount` is the decimal string that digest hashes, whichever of
+ * bigint or string the argument was. It is in the unit the argument uses,
+ * normally the asset's base units, and no decimals come with it, so a provider
+ * that shows it to a model must say what it counts. `action.args` can still hold
+ * the bigint, so `JSON.stringify(input)` can throw where this view cannot.
+ *
+ * This names what the verdict binds and vouches for none of it. `payee`, `amount`
+ * and an asset taken from an argument are that argument's value at whatever tier
+ * the sink admitted, so read them as data, as with `action.args`.
+ */
+export interface JudgmentPayment {
+  readonly payee: string
+  readonly amount: string
+  readonly asset: string
+  readonly network: string
+  /** The argument the payee came from, so `input.trust[payeeArg]` is its tier. Named by the host, never by an agent. */
+  readonly payeeArg: string
+  /** The argument the amount came from. */
+  readonly amountArg: string
+  /** The argument the asset came from, or null when the sink fixes the asset. */
+  readonly assetArg: string | null
+}
+
+/**
+ * A judge's whole view of a call. `trust` has one entry per key of
+ * `action.args`. `payment` is present only on a sink that names `purposeArgs`.
+ */
 export interface JudgmentInput {
   readonly purpose: Purpose
   readonly action: Action
   readonly trust: Readonly<Record<string, ArgumentTrust>>
+  readonly payment?: JudgmentPayment
 }
 
 /**
  * A stand-in provider for demos and tests. Real integration = an external
- * calibrated scorer behind the same interface, swapped in with zero call-site
+ * scorer behind the same interface, swapped in with zero call-site
  * changes. Matches a declared allowlist of intended
  * payees/amounts; anything outside it is "mismatch" (or "unsure" near the edge).
  */
@@ -1447,9 +1649,9 @@ export function mockJudgmentProvider(intent: {
       }
       // Near-edge amounts read as "unsure" — the honest, defer-to-human band.
       if (intent.intendedPayees.has(to) && amount <= intent.maxAmount * 1.1) {
-        return { assessment: "unsure", confidence: 0.35, rationale: `${to} is intended but amount ${amount} slightly over cap ${intent.maxAmount}` }
+        return { assessment: "unsure", confidence: 0.35, rationale: `${action.sink} pays an intended payee, slightly over the cap` }
       }
-      return { assessment: "mismatch", confidence: 0.82, rationale: `${to}/${amount} not in declared intent (payee unintended or amount over cap)` }
+      return { assessment: "mismatch", confidence: 0.82, rationale: `${action.sink} is not in declared intent (payee unintended or amount over cap)` }
     },
   }
 }
@@ -1557,11 +1759,73 @@ interface BoundPurpose {
   readonly maxPerAction: bigint | undefined
   readonly actions: ReadonlyArray<string> | undefined
   readonly asset: string | undefined
-  readonly payment: { readonly payeeArg: string; readonly amountArg: string; readonly assetArg: string | undefined; readonly asset: string | undefined; readonly network: string } | undefined
+  readonly payment: {
+    readonly payeeArg: string
+    readonly amountArg: string
+    readonly assetArg: string | undefined
+    readonly asset: string | undefined
+    readonly network: string
+    readonly payeeSpelling: Spelling | undefined
+    readonly assetSpelling: Spelling | undefined
+  } | undefined
 }
+
+/** A rail's canonical form of a payee or asset, supplied by the host. The kernel knows no chain's spelling. */
+type Spelling = (value: string) => string
 
 const ownOf = (o: object, k: string): unknown => (Object.hasOwn(o, k) ? (o as Record<string, unknown>)[k] : undefined)
 const isStringList = (v: unknown): v is ReadonlyArray<string> => Array.isArray(v) && v.every((x) => typeof x === "string")
+
+/**
+ * Is `value` already in the form `spell` gives it? A throw or a non-string
+ * answer is "unchecked", which the host's function and the agent's input can
+ * both cause, so the sentence it produces blames neither.
+ */
+const spellingOf = (spell: Spelling, value: string): "spelled" | "respelled" | "unchecked" => {
+  try {
+    const answer: unknown = spell(value)
+    if (typeof answer === "string") return answer === value ? "spelled" : "respelled"
+    // A promise is no answer. One that rejects must not become an unhandled
+    // rejection, which would end the host's process on an agent's input.
+    void Promise.resolve(answer).catch(() => {})
+    return "unchecked"
+  } catch {
+    return "unchecked"
+  }
+}
+
+/** The violation for `value`, naming the argument and never the value; undefined when it is spelled. */
+const spellingViolation = (spell: Spelling | undefined, value: string, argument: string): string | undefined => {
+  if (spell === undefined) return undefined
+  const state = spellingOf(spell, value)
+  if (state === "spelled") return undefined
+  return state === "respelled" ? `${argument} is not in the spelling this sink's rail uses` : `${argument} could not be checked against this sink's spelling`
+}
+
+/** Read `judgment.spelling` once, as own keys. An unknown key is refused: a misspelled `payee` would hold nothing to a spelling and say nothing. */
+function bindSpelling(where: string, spelling: unknown): { readonly payee: Spelling | undefined; readonly asset: Spelling | undefined } | undefined {
+  if (spelling === undefined) return undefined
+  if (typeof spelling !== "object" || spelling === null || Array.isArray(spelling)) {
+    throw new TypeError(`${where}: judgment.spelling must be { payee?, asset? }, got ${preview(spelling)}`)
+  }
+  for (const key of Object.keys(spelling)) {
+    if (key !== "payee" && key !== "asset") throw new TypeError(`${where}: judgment.spelling has an unknown key ${JSON.stringify(key)}; its keys are payee and asset`)
+  }
+  const member = (role: "payee" | "asset"): Spelling | undefined => {
+    const spell = ownOf(spelling, role)
+    if (spell !== undefined && typeof spell !== "function") throw new TypeError(`${where}: judgment.spelling.${role} must be a function, got ${preview(spell)}`)
+    return spell as Spelling | undefined
+  }
+  const payee = member("payee")
+  const asset = member("asset")
+  // `{}`, or a class whose functions live on its prototype, would look like a declared spelling and hold nothing to one.
+  if (payee === undefined && asset === undefined) throw new TypeError(`${where}: judgment.spelling must set payee or asset as its own function`)
+  // `this` is a frozen copy of the two functions read above, never the caller's
+  // object, which could answer differently once the sink is built.
+  const self = Object.freeze({ payee, asset })
+  const bound = (spell: Spelling | undefined): Spelling | undefined => (spell === undefined ? undefined : (value) => Reflect.apply(spell, self, [value]) as string)
+  return Object.freeze({ payee: bound(payee), asset: bound(asset) })
+}
 
 /**
  * Read the purpose's fields and the sink's payment mapping once, as own keys,
@@ -1573,7 +1837,7 @@ function bindPurpose(
   where: string,
   purpose: Purpose,
   requires: Readonly<Record<string, Tier>>,
-  config: { readonly purposeArgs: unknown; readonly network: unknown; readonly asset: unknown },
+  config: { readonly purposeArgs: unknown; readonly network: unknown; readonly asset: unknown; readonly spelling: unknown },
 ): BoundPurpose {
   const fieldsRaw = ownOf(purpose, "fields")
   if (fieldsRaw !== undefined && (typeof fieldsRaw !== "object" || fieldsRaw === null || Array.isArray(fieldsRaw))) {
@@ -1594,6 +1858,7 @@ function bindPurpose(
   }
 
   const { purposeArgs, network, asset } = config
+  const spelling = bindSpelling(where, config.spelling)
   let payment: BoundPurpose["payment"]
   if (purposeArgs !== undefined) {
     if (typeof purposeArgs !== "object" || purposeArgs === null) {
@@ -1619,7 +1884,19 @@ function bindPurpose(
     if (assetArg !== undefined && asset !== undefined) {
       throw new TypeError(`${where}: judgment.asset and judgment.purposeArgs.asset are both set, so the asset of a payment would be ambiguous`)
     }
-    payment = { payeeArg, amountArg, assetArg, asset: asset as string | undefined, network }
+    payment = { payeeArg, amountArg, assetArg, asset: asset as string | undefined, network, payeeSpelling: spelling?.payee, assetSpelling: spelling?.asset }
+  }
+  if (spelling !== undefined) {
+    if (payment === undefined) throw new TypeError(`${where}: judgment.spelling needs judgment.purposeArgs to name the payment it holds to a spelling`)
+    // Refused here for the same reason as the checks below: no call could satisfy it.
+    const mustBeSpelled = (field: string, spell: Spelling | undefined, values: ReadonlyArray<string>): void => {
+      if (spell !== undefined && !values.every((value) => spellingOf(spell, value) === "spelled")) {
+        throw new TypeError(`${where}: ${field} is not in the spelling judgment.spelling gives it, so no call could satisfy it`)
+      }
+    }
+    mustBeSpelled("judgment.granted.purpose.fields.payees", spelling.payee, payees ?? [])
+    mustBeSpelled("judgment.granted.purpose.fields.asset", spelling.asset, typeof fieldAsset === "string" ? [fieldAsset] : [])
+    mustBeSpelled("judgment.asset", spelling.asset, payment.asset === undefined ? [] : [payment.asset])
   }
   if (payees !== undefined && payment === undefined) {
     throw new TypeError(`${where}: the purpose sets payees, so judgment.purposeArgs must name the payee argument`)
@@ -1652,13 +1929,14 @@ function bindPurpose(
 /**
  * Step 2 of the judged path (spec § 3.1): the deterministic purpose fields,
  * over the frozen snapshot, pushing into `violations` so a failure takes the
- * tier wall's path and no judge runs. Returns the payment's digest, or null
- * when the sink names no payment or the payment is one of the violations.
+ * tier wall's path and no judge runs. Returns the resolved payment, the one
+ * source of both the verdict's digest and the judge's view, or null when the
+ * sink names no payment or the payment is one of the violations.
  *
  * Strings here name arguments and fields, never values: these land in `reason`
  * on a receipt that may redact the very arg being refused.
  */
-function checkPurpose(bound: BoundPurpose, sink: string, values: Readonly<Record<string, unknown>>, violations: string[]): string | null {
+function checkPurpose(bound: BoundPurpose, sink: string, values: Readonly<Record<string, unknown>>, violations: string[]): JudgmentPayment | null {
   if (bound.actions !== undefined && !bound.actions.includes(sink)) {
     violations.push(`${sink} is not an action this purpose covers`)
   }
@@ -1666,10 +1944,16 @@ function checkPurpose(bound: BoundPurpose, sink: string, values: Readonly<Record
   if (payment === undefined) return null
   const before = violations.length
   const recipient = ownOf(values, payment.payeeArg)
+  const payeeProblem = typeof recipient === "string" ? spellingViolation(payment.payeeSpelling, recipient, payment.payeeArg) : undefined
   const amount = ownOf(values, payment.amountArg)
   const asset = payment.assetArg === undefined ? payment.asset : ownOf(values, payment.assetArg)
   if (typeof recipient !== "string") {
     violations.push(`${payment.payeeArg} must be a string to name a payee`)
+  } else if (payeeProblem !== undefined) {
+    // One payee has one spelling, or "0xABC" is a new action that escapes a
+    // doubt on "0xabc". Refused rather than rewritten, like the amount below,
+    // so what runs is what was asked for and `paymentDigest` hashes it as written.
+    violations.push(payeeProblem)
   } else if (bound.payees !== undefined && !bound.payees.includes(recipient)) {
     violations.push(`${payment.payeeArg} is not a payee this purpose names`)
   }
@@ -1689,10 +1973,19 @@ function checkPurpose(bound: BoundPurpose, sink: string, values: Readonly<Record
     }
     if (!within) violations.push(`${payment.amountArg} is over this purpose's maxPerAction`)
   }
+  const assetProblem = typeof asset === "string" && payment.assetArg !== undefined ? spellingViolation(payment.assetSpelling, asset, payment.assetArg) : undefined
   if (typeof asset !== "string") violations.push(`the payment's asset must be a string`)
+  else if (assetProblem !== undefined) violations.push(assetProblem)
   else if (bound.asset !== undefined && asset !== bound.asset) violations.push(`the payment's asset is not the asset this purpose names`)
   if (violations.length > before) return null
-  return paymentDigest({ network: payment.network, asset: asset as string, recipient: recipient as string, amount: amount as bigint | string })
+  return Object.freeze({ payee: recipient as string, amount: String(amount), asset: asset as string, network: payment.network, payeeArg: payment.payeeArg, amountArg: payment.amountArg, assetArg: payment.assetArg ?? null })
+}
+
+/** The `paymentDigest` a verdict carries for what `checkPurpose` resolved, null when it resolved none. */
+function digestOfResolved(resolved: JudgmentPayment | null): string | null {
+  if (resolved === null) return null
+  const { payee, amount, asset, network } = resolved
+  return paymentDigest({ network, asset, recipient: payee, amount })
 }
 
 /** What the judge saw and what will run: the same frozen values, under one digest. */
@@ -1788,6 +2081,7 @@ function bindJudge(
     readonly purposeArgs?: unknown
     readonly network?: unknown
     readonly asset?: unknown
+    readonly spelling?: unknown
     readonly blockWindowMs?: number | undefined
     readonly rationaleInRefusal?: boolean | undefined
   },
@@ -1795,7 +2089,7 @@ function bindJudge(
 ): BoundJudge {
   // `floor: undefined` made `confidence >= floor` false forever, so a
   // mismatch at 0.99 never blocked (the 2026-10-13 gate audit).
-  const { provider, floor, timeoutMs = DEFAULT_JUDGMENT_TIMEOUT_MS, granted, purposeArgs, network, asset, blockWindowMs = DEFAULT_BLOCK_WINDOW_MS, rationaleInRefusal = false } = config
+  const { provider, floor, timeoutMs = DEFAULT_JUDGMENT_TIMEOUT_MS, granted, purposeArgs, network, asset, spelling, blockWindowMs = DEFAULT_BLOCK_WINDOW_MS, rationaleInRefusal = false } = config
   if (typeof provider !== "object" || provider === null) {
     throw new TypeError(`${where}: judgment.provider must be an object with an assess() method, got ${preview(provider)}`)
   }
@@ -1830,7 +2124,7 @@ function bindJudge(
     timeoutMs,
     granted: pinned,
     purposeHash: purposeHash(pinned.purpose),
-    purpose: bindPurpose(where, pinned.purpose, requires, { purposeArgs, network, asset }),
+    purpose: bindPurpose(where, pinned.purpose, requires, { purposeArgs, network, asset, spelling }),
     blockWindowMs,
     rationaleInRefusal,
   }
@@ -1971,7 +2265,10 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
    * immediately before `execute`, and a grant no longer live is refused in
    * every mode: a revoke is the owner's word, not a tier the ladder can relax. `timeoutMs` (default 5000) is the
    * judge's deadline: at it the provider's signal fires, any later answer is
-   * discarded, and the call has no verdict.
+   * discarded, and the call has no verdict: enforce holds that call, a retry asks
+   * the judge again, and observe and warn run it unscored. Set this from the provider's real latency:
+   * a provider with a cold start needs a longer timeoutMs, and one that cancels
+   * its own load on the signal can miss every call rather than only the first.
    *
    * `purposeArgs` names the arguments that are the payment's parts. With it the
    * sink takes `network` (CAIP-2) and, unless an asset argument is named,
@@ -1983,11 +2280,19 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
    * lets `sink.resume` release a hold; without it every resume is refused.
    *
    * `blockWindowMs` (default one hour, never below the 15-minute approval
-   * window) is how long a block stands. `rationaleInRefusal` (default false)
+   * window) is how long a block stands before the judge is asked again; a
+   * `match` after it is held for the owner. `rationaleInRefusal` (default false)
    * puts the judge's assessment, confidence and words back in the refusal
-   * string; the receipt always has them, its `reason` redacted per `redact`, so
+   * string. The receipt always has the assessment and confidence, and the words
+   * in its `reason` unless the sink redacts an argument, so
    * a host that wants them kept from the agent must not hand it the receipt
    * (ADR 0010).
+   *
+   * `spelling` gives the rail's canonical form of a payee and of an asset. A
+   * payee or asset argument that its function does not map to itself is
+   * refused before any judge runs, because a block or hold names the action
+   * as written and a respelling would be a new action. It needs `purposeArgs`.
+   * Without it the two are compared as written.
    */
   readonly judgment?: {
     readonly provider: JudgmentProvider
@@ -1997,6 +2302,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
     readonly purposeArgs?: { readonly payee: keyof Args & string; readonly amount: keyof Args & string; readonly asset?: keyof Args & string }
     readonly network?: string
     readonly asset?: string
+    readonly spelling?: { readonly payee?: (value: string) => string; readonly asset?: (value: string) => string }
     readonly approvalKey?: string
     readonly blockWindowMs?: number
     readonly rationaleInRefusal?: boolean
@@ -2054,6 +2360,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
             purposeArgs: judgmentField("purposeArgs"),
             network: judgmentField("network"),
             asset: judgmentField("asset"),
+            spelling: judgmentField("spelling"),
             approvalKey: judgmentField("approvalKey"),
             blockWindowMs: judgmentField("blockWindowMs"),
             rationaleInRefusal: judgmentField("rationaleInRefusal"),
@@ -2109,7 +2416,8 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
   // intent record lands and is never removed, a failed execute included: the
   // action may have taken effect, and one approval is one attempt.
   const claimed = new Set<string>()
-  // Actions a judge is deciding right now, by unkeyed digest: the one state that
+  // Actions a judge is deciding right now, by payment digest when the sink names
+  // a payment and by unkeyed action digest when it does not: the one state that
   // cannot be on the log yet, because no receipt exists before the answer. The
   // claim is taken before the first await and released once the decision's
   // receipt is on the log, so concurrent identical calls wait and answer from it.
@@ -2117,7 +2425,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
 
   // What this action already is, read back from the log in one synchronous
   // walk (ADR 0010). A later receipt moves the state: a judgment sets a block
-  // or a hold, and any attempt resolves it. Receipts under another grant or
+  // or a hold, and only the owner's approval of that doubt resolves it. Receipts under another grant or
   // purpose are skipped: they are someone else's action, or the owner has
   // changed what is being judged against. A hold with no real verdict behind it
   // (`scored: false`) is skipped too: an outage is not an answer.
@@ -2125,21 +2433,141 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
   // Stickiness ignores the idempotency key (`unkeyed`), so no key can escape a
   // block or a hold. Dedupe keys on it: with a key, only this key's attempt is
   // a duplicate; with none, any attempt of this action is.
-  const actionState = (action: ActionSnapshot, bound: BoundJudge) => {
-    let standing: { readonly verdict: Verdict; readonly label: "judgment-blocked" | "judgment-held" } | undefined
+  //
+  // Doubt broadly, allow narrowly (DAN-1466). On a sink whose purpose names a
+  // payment, a doubt stands on the payment (`paymentDigest`): the same payee,
+  // amount, asset and network under another memo or any other changed argument
+  // is the doubted payment, so rewording a retry cannot buy a fresh judge. Dedupe
+  // stays on the exact action, and so does an approval. With no payment
+  // (`payment` null) a doubt stands on the exact action alone: two null digests
+  // are never the same payment, or every unpaid judged action would be held.
+  type Doubt = {
+    readonly verdict: Verdict
+    readonly label: "judgment-blocked" | "judgment-held"
+    readonly digest: string | undefined
+    /** When the window closes: `judgedAt` plus the hold or block window. NaN when `judgedAt` does not parse. */
+    readonly until: number
+    /** Answered for every action, the doubted one included. */
+    answered: boolean
+    /** Answered for every action of the payment except the doubted one. */
+    answeredForOthers: boolean
+  }
+  // A verdict's digest, computed once per frozen verdict object: the log walk
+  // below meets the same verdict on every call. Undefined when it will not
+  // digest, which no approval can then name.
+  const digests = new WeakMap<Verdict, string>()
+  const digestOf = (verdict: Verdict): string | undefined => {
+    const known = digests.get(verdict)
+    if (known !== undefined) return known
+    try {
+      const digest = verdictDigest(verdict)
+      // Only a frozen verdict is remembered: an unfrozen one could change under the cache.
+      if (Object.isFrozen(verdict)) digests.set(verdict, digest)
+      return digest
+    } catch {
+      return undefined
+    }
+  }
+
+  // Every doubt, never one slot. Each real doubt on the payment (or, with no
+  // payment, on this exact action) is kept on its own, in log order, under its
+  // verdict digest, and stands until it is answered. One last-wins slot let a
+  // newer doubt, or the owner's approval of it, hide an older doubt that was
+  // still open, and that was the shape of every hole the DAN-1466 reviews found:
+  // a hold on memo B replaced A's open block, approving B emptied the slot, and
+  // a reworded memo C then ran inside A's block.
+  //
+  // How a doubt is answered, and only these ways:
+  //  - the owner's approval of THIS doubt is attempted;
+  //  - the owner's approval of a later doubt on the same action is attempted,
+  //    when this doubt's window had already passed when that later doubt was
+  //    judged (the DAN-1443 path: the owner was shown a fresh hold naming it);
+  //  - for every OTHER action of the payment only: the owner's approval of a
+  //    doubt on another action is attempted, when this doubt's window had already
+  //    passed when that approved doubt was judged. That is settled rule 4 (the
+  //    owner who approved a fresh hold that named the expired doubt has answered
+  //    the payment), and it never reaches the doubted action itself, nor a doubt
+  //    still inside its window when the approved one was judged: approving B
+  //    never answers A's open doubt, and never answers A for A.
+  const actionState = (action: ActionSnapshot, bound: BoundJudge, payment: string | null) => {
+    const doubts: Doubt[] = []
     let attempted: Verdict | undefined
     for (const receipt of cfg.log.all()) {
       const { verdict, decision } = receipt
-      if (receipt.sink !== cfg.name || verdict === undefined || verdict.unkeyedActionDigest !== action.unkeyed) continue
+      if (receipt.sink !== cfg.name || verdict === undefined) continue
+      const sameAction = verdict.unkeyedActionDigest === action.unkeyed
+      const samePayment = payment !== null && verdict.paymentDigest === payment
+      if (!sameAction && !samePayment) continue
       if (verdict.grantHash !== bound.granted.grantHash || verdict.purposeHash !== bound.purposeHash) continue
       if (decision === "judgment-blocked" || decision === "judgment-held") {
-        if (verdict.scored) standing = { verdict, label: decision }
+        if (verdict.scored) {
+          // A standing answer writes the doubt's verdict again on a new receipt:
+          // one doubt, however many receipts carry it. The first receipt sets its
+          // label. A verdict that will not digest cannot be approved, so it stands
+          // on its own and is never answered.
+          const digest = digestOf(verdict)
+          if (digest === undefined || !doubts.some((d) => d.digest === digest)) {
+            const window = decision === "judgment-held" ? APPROVAL_WINDOW_MS : bound.blockWindowMs
+            doubts.push({ verdict, label: decision, digest, until: Date.parse(verdict.judgedAt) + window, answered: false, answeredForOthers: false })
+          }
+        }
       } else if (decision === "attempted" || decision === "executed" || decision === "errored") {
-        standing = undefined
-        if (!action.keyed || verdict.actionDigest === action.digest) attempted = verdict
+        // Only the owner's approval answers a doubt (DAN-1443). Anything else can
+        // land after the doubt without the owner having seen it: a late `errored`
+        // from an earlier payment, a clean run on a warn sink over the same log,
+        // or the release of an outage hold signed before the doubt.
+        const approved = decision === "attempted" ? receipt.approval?.verdictDigest : undefined
+        const named = approved === undefined ? undefined : doubts.find((d) => d.digest === approved)
+        if (named !== undefined) {
+          // `<=` against a time that does not parse is false: such a doubt is never answered by another.
+          const namedAt = Date.parse(named.verdict.judgedAt)
+          for (const doubt of doubts) {
+            if (doubt === named) doubt.answered = true
+            else if (doubt.until <= namedAt) {
+              if (doubt.verdict.unkeyedActionDigest === named.verdict.unkeyedActionDigest) doubt.answered = true
+              else doubt.answeredForOthers = true
+            }
+          }
+        }
+        if (sameAction && (!action.keyed || verdict.actionDigest === action.digest)) attempted = verdict
       }
     }
+    // What still stands against THIS action.
+    const standing = doubts.filter((d) => !d.answered && !(d.answeredForOthers && d.verdict.unkeyedActionDigest !== action.unkeyed))
     return { standing, attempted }
+  }
+
+  // Whether a doubt is inside its window. `!(now >= until)`, so that a verdict
+  // whose time does not parse stands.
+  const isOpen = (doubt: Doubt): boolean => !(Date.now() >= doubt.until)
+
+  // The doubt a receipt names, out of several that stand: an open one over one
+  // whose window has passed, a block over a hold, then the judge's own words (a
+  // mismatch over an unsure over a match that was held only because of another
+  // doubt), then this action's own doubt, then the latest. Never just the latest.
+  const strongest = (doubts: readonly Doubt[], action: ActionSnapshot): Doubt | undefined => {
+    const severity = { mismatch: 2, unsure: 1, match: 0 } as const
+    const rank = (d: Doubt): readonly number[] => [
+      isOpen(d) ? 1 : 0,
+      d.label === "judgment-blocked" ? 1 : 0,
+      severity[d.verdict.assessment] ?? 1,
+      d.verdict.unkeyedActionDigest === action.unkeyed ? 1 : 0,
+    ]
+    let best: Doubt | undefined
+    let bestRank: readonly number[] = []
+    for (const d of doubts) {
+      const r = rank(d)
+      // `>=` on a full tie, so the later doubt wins it.
+      const wins = best === undefined || ((): boolean => {
+        for (let i = 0; i < r.length; i++) if (r[i] !== bestRank[i]) return r[i]! > bestRank[i]!
+        return true
+      })()
+      if (wins) {
+        best = d
+        bestRank = r
+      }
+    }
+    return best
   }
 
   // Whether the grant still stands. No check means a hand-built grant, which
@@ -2468,6 +2896,10 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
           }
           if (digest !== approval.verdictDigest) continue
           if (receipt.decision !== "judgment-held") attempted = true
+          // The FIRST held receipt is load-bearing: it is the one the judge wrote,
+          // with the doubted action's own args. A later one under this verdict can
+          // be a memo variant's (DAN-1466), which carries this verdict and its own
+          // args, so the amount-type check and the expiry below must not read it.
           else if (heldReceipt === undefined) {
             heldReceipt = receipt
             heldVerdict = v
@@ -2509,7 +2941,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
       // under this verdict (step 2) or under another one for the same action. A
       // judge failure leaves no standing hold, so a later call can run the action
       // while the failed hold's approval is still valid; that must not pay twice.
-      if (claimed.has(approval.verdictDigest) || attempted || actionState(resumed, judge).attempted !== undefined) {
+      if (claimed.has(approval.verdictDigest) || attempted || actionState(resumed, judge, null).attempted !== undefined) {
         return refuse("approval-replayed", "this approval has already released its one execution")
       }
 
@@ -2518,7 +2950,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
       // digests the same. This refusal spends nothing; the claim comes after it.
       const paymentOfResume = violations.length === 0 ? checkPurpose(judge.purpose, cfg.name, resumed.values, violations) : null
       if (violations.length > 0) return refuseViolations()
-      if (paymentOfResume !== heldVerdict.paymentDigest) {
+      if (digestOfResolved(paymentOfResume) !== heldVerdict.paymentDigest) {
         return refuse("approval-mismatch", "this sink's payment is not the payment that was held")
       }
 
@@ -2541,23 +2973,40 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
     // enforce: an undeclared argument never reaches execute or the judge, so it
     // no longer switches the judge off and erases the verdict (ADR 0010).
     let snapshot: ActionSnapshot | undefined
-    let paymentDigestOfCall: string | null = null
+    let paymentOfCall: JudgmentPayment | null = null
     if (judge !== undefined && violations.length === undeclared) {
       snapshot = snapshotAction(cfg.name, checked, violations, idempotencyKey, judge.purpose.payment?.amountArg)
-      if (snapshot !== undefined) paymentDigestOfCall = checkPurpose(judge.purpose, cfg.name, snapshot.values, violations)
+      if (snapshot !== undefined) paymentOfCall = checkPurpose(judge.purpose, cfg.name, snapshot.values, violations)
     }
+    const paymentDigestOfCall = digestOfResolved(paymentOfCall)
 
     // Tier wall — hard structural gate (Rule 4). A purpose-field or snapshot
     // failure is a violation too, so it refuses here and the judge never runs.
     if (violations.length > 0 && cfg.mode === "enforce") return refuseViolations()
 
-    const standingAnswer = (action: ActionSnapshot, bound: BoundJudge): SinkResult<Awaited<R>> | undefined => {
-      const { standing, attempted } = actionState(action, bound)
+    // `afterJudge`: this call's own judge has already answered, and the log is
+    // being read again for what another sink decided meanwhile. Only a doubt on
+    // this action itself, or its own attempt, may then replace the fresh verdict.
+    // A doubt on another action of the payment must not: it would discard this
+    // action's own verdict, which then never reaches the log, so approving that
+    // other action would leave this one with no doubt of its own (the DAN-1466
+    // adversarial review). The fresh verdict goes on the log instead, and the
+    // payment's open doubts still hold or block it, through `earlier` below.
+    const standingAnswer = (action: ActionSnapshot, bound: BoundJudge, afterJudge = false): SinkResult<Awaited<R>> | undefined => {
+      const state = actionState(action, bound, paymentDigestOfCall)
+      const { attempted } = state
+      const open = state.standing.filter(isOpen)
+      const ownOpen = open.some((d) => d.verdict.unkeyedActionDigest === action.unkeyed)
+      // An open doubt on this action answers it first. Then an attempt of this
+      // exact action, before another action's doubt on the payment: an action
+      // that already ran is a duplicate, and a hold naming some other memo would
+      // only invite the owner to approve that one. Whichever doubts answer, the
+      // receipt names the strongest of every open one, so a block on memo A is
+      // never hidden behind a later hold on memo B.
+      const standing = ownOpen || (!afterJudge && attempted === undefined) ? strongest(open, action) : undefined
       if (standing !== undefined) {
         const { verdict, label } = standing
-        const until = Date.parse(verdict.judgedAt) + (label === "judgment-held" ? APPROVAL_WINDOW_MS : bound.blockWindowMs)
-        // `!(now >= until)` so that a verdict whose time does not parse stands.
-        if (!(Date.now() >= until)) {
+        {
           // A new receipt, because every sink decision lands on the log. It
           // carries the same verdict and no judge was called: retrying is free
           // and learns nothing. The receipt's reason names the verdict; the
@@ -2566,10 +3015,29 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
           // A hold's approval resumes only under the key it was made with. The host
           // learns that from the receipt and from `held`; the refusal goes to the
           // agent, and saying it there would tell a hold from a block.
-          const underAnotherKey = label === "judgment-held" && verdict.actionDigest !== action.digest
-          const answered = ": this action already has this answer and was not judged again"
-          const anotherKeyNote = underAnotherKey ? "; the hold was made under a different idempotency key, so approve and resume under that key" : ""
-          const reason = `⚖ ${cfg.name} ${label}${detail}${answered}${anotherKeyNote}`
+          //
+          // A doubt on the payment answers another action of it, such as the same
+          // payment under another memo (DAN-1466). The hold still names the doubted
+          // action, so an approval of it can only resume what the owner was shown.
+          // One discriminant, so the two `held` flags can never both be set.
+          const names: "this" | "another-action" | "another-key" = verdict.unkeyedActionDigest !== action.unkeyed
+            ? "another-action"
+            : verdict.actionDigest !== action.digest ? "another-key" : "this"
+          const underAnotherAction = names === "another-action"
+          const underAnotherKey = names === "another-key" && label === "judgment-held"
+          // After this call's own judge answered, the text must not say it was not judged.
+          const answered = afterJudge
+            ? underAnotherAction
+              ? ": another sink doubted this action while its judge was out, and this payment's strongest open doubt, on another action of it, stands"
+              : ": another sink decided this action while its judge was out, and that answer stands"
+            : underAnotherAction
+              ? ": this payment already has this answer, on another action of it, and was not judged again"
+              : ": this action already has this answer and was not judged again"
+          const anotherNote = label !== "judgment-held" ? ""
+            : underAnotherAction ? "; the hold names the doubted action, so an approval of it resumes that action and not this one"
+            : underAnotherKey ? "; the hold was made under a different idempotency key, so approve and resume under that key"
+            : ""
+          const reason = `⚖ ${cfg.name} ${label}${detail}${answered}${anotherNote}`
           const refusal = bound.rationaleInRefusal ? `⚖ ${cfg.name} ${label}${detail}${answered}` : `⚖ ${cfg.name} ${STOPPED_BY_JUDGMENT}`
           const receipt = cfg.log.append({ at: now(), sink: cfg.name, decision: label, args: rendered, reason, verdict })
           if (label === "judgment-blocked") return { ok: false, refusal, receipt }
@@ -2577,7 +3045,13 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
             ok: false,
             refusal,
             receipt,
-            held: Object.freeze({ verdictDigest: verdictDigest(verdict), actionDigest: verdict.actionDigest, grantHash: verdict.grantHash, ...(underAnotherKey ? { underAnotherKey: true as const } : {}) }),
+            held: Object.freeze({
+              verdictDigest: verdictDigest(verdict),
+              actionDigest: verdict.actionDigest,
+              grantHash: verdict.grantHash,
+              ...(underAnotherAction ? { underAnotherAction: true as const } : {}),
+              ...(underAnotherKey ? { underAnotherKey: true as const } : {}),
+            }),
           }
         }
       }
@@ -2606,7 +3080,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
       )
     }
 
-    // Judgment wall — probabilistic, self-aware. Every path out of this block
+    // Judgment wall — probabilistic, and able to abstain. Every path out of this block
     // either returns or runs on a confident match: that is I4, and the only way
     // a judged enforce sink reaches execute.
     if (judge !== undefined && snapshot !== undefined && violations.length === undeclared) {
@@ -2618,22 +3092,30 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
       // identical calls cannot both be the one deciding.
       let settled = (): void => {}
       if (cfg.mode === "enforce") {
-        for (let wait = judging.get(action.unkeyed); wait !== undefined; wait = judging.get(action.unkeyed)) await wait
+        // The claim covers the payment, so a memo variant sent while a doubt on
+        // it is being judged waits for that answer instead of racing past it
+        // (DAN-1466). With no payment it covers the exact action. The prefixes
+        // keep a payment digest and an action digest from ever naming one claim.
+        const claim = paymentDigestOfCall !== null ? `payment:${paymentDigestOfCall}` : `action:${action.unkeyed}`
+        for (let wait = judging.get(claim); wait !== undefined; wait = judging.get(claim)) await wait
         const answer = standingAnswer(action, judge)
         if (answer !== undefined) return answer
         let release!: () => void
-        judging.set(action.unkeyed, new Promise<void>((resolve) => { release = resolve }))
+        judging.set(claim, new Promise<void>((resolve) => { release = resolve }))
         settled = () => {
-          judging.delete(action.unkeyed)
+          judging.delete(claim)
           release()
         }
       }
 
-      const input = Object.freeze({
+      // Null-prototype, because `payment` can be absent: on an ordinary object a
+      // provider's `input.payment` would then read Object.prototype.
+      const input: JudgmentInput = Object.freeze(Object.assign(Object.create(null) as object, {
         purpose: judge.granted.purpose,
         action: Object.freeze({ sink: cfg.name, args: action.values }),
         trust: action.trust,
-      })
+        ...(paymentOfCall === null ? {} : { payment: paymentOfCall }),
+      }))
       const providerName = judge.name
 
       try {
@@ -2651,7 +3133,7 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
         // have decided or run this action while this judge was out. Nothing
         // between here and execute() awaits, so the first to get here wins.
         if (cfg.mode === "enforce") {
-          const decidedElsewhere = standingAnswer(action, judge)
+          const decidedElsewhere = standingAnswer(action, judge, true)
           if (decidedElsewhere !== undefined) return decidedElsewhere
         }
         const scored = !("failure" in answer)
@@ -2690,15 +3172,34 @@ export function makeSink<Args extends Record<string, Sourced<unknown>>, R>(spec:
           : rationaleText
 
         const confident = scored && verdict.confidence >= judge.floor
-        if (!(confident && verdict.assessment === "match")) {
+        // A real doubt outlives its window (ADR 0010, DAN-1443). The judge is still
+        // asked, because the owner needs a fresh hold to approve, but only the owner
+        // can turn that doubt into a run. `standingAnswer` above has already
+        // answered any open doubt on this action itself, and nothing has been
+        // awaited since it read the log. What can still stand here: this action's
+        // doubts whose windows have passed, and the payment's doubts on other
+        // actions, open or not. Open ones are possible only when another sink
+        // wrote them while this judge was out.
+        const doubts = cfg.mode === "enforce" ? actionState(action, judge, paymentDigestOfCall).standing : []
+        const earlier = strongest(doubts, action)
+        // A confident block still inside its window blocks this call whatever the
+        // judge said of it: no hold the owner could approve is made under it.
+        const underOpenBlock = doubts.some((d) => d.label === "judgment-blocked" && isOpen(d))
+        if (!(confident && verdict.assessment === "match") || earlier !== undefined) {
           if (cfg.mode === "enforce") {
             // Only a confident mismatch is a judgment. Everything else is doubt.
-            const label = confident && verdict.assessment === "mismatch" ? "judgment-blocked" : "judgment-held"
-            const receipt = cfg.log.append({ ...evidence, decision: label, reason: `⚖ ${cfg.name} ${label} (${providerName}, ${verdict.assessment}, ${confText}): ${rationale}` })
+            const label = (confident && verdict.assessment === "mismatch") || underOpenBlock ? "judgment-blocked" : "judgment-held"
+            // The new sample alone would read as a clean match, so the receipt also
+            // names the strongest doubt the owner is being asked to answer.
+            // A doubt on another action of this payment says so (DAN-1466).
+            const doubtedOn = earlier === undefined || earlier.verdict.unkeyedActionDigest === action.unkeyed ? "this action" : "another action of this payment"
+            const stillOpen = earlier !== undefined && isOpen(earlier) ? ", and its window is still open" : ""
+            const earlierNote = earlier === undefined ? "" : `; an earlier ${earlier.label} (${earlier.verdict.provider}, ${earlier.verdict.assessment}, conf ${earlier.verdict.confidence}) on ${doubtedOn} needs its owner${stillOpen}`
+            const receipt = cfg.log.append({ ...evidence, decision: label, reason: `⚖ ${cfg.name} ${label} (${providerName}, ${verdict.assessment}, ${confText}): ${rationale}${earlierNote}` })
             // The refusal goes to the agent. The judge's words, its assessment
             // and its confidence would each teach it what to change, so they come
             // back only when the host opts in (ADR 0010).
-            const refusal = `⚖ ${cfg.name} ${judge.rationaleInRefusal ? label : STOPPED_BY_JUDGMENT}${judge.rationaleInRefusal ? ` (${providerName}, ${verdict.assessment}, ${confText}): ${rationaleText}` : ""}`
+            const refusal = `⚖ ${cfg.name} ${judge.rationaleInRefusal ? label : STOPPED_BY_JUDGMENT}${judge.rationaleInRefusal ? ` (${providerName}, ${verdict.assessment}, ${confText}): ${rationaleText}${earlier === undefined ? "" : `; an earlier doubt on ${doubtedOn} needs its owner`}` : ""}`
             if (label === "judgment-blocked") return { ok: false, refusal, receipt }
             return {
               ok: false,

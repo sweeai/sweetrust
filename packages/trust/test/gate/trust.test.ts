@@ -145,12 +145,14 @@ describe("forgery resistance", () => {
 
 // ── The audited declassifier trio (§5) ───────────────────────────────────────
 
+const hostKey = (key: string) => Sourced.fromAuthority(key, "purchase-orders")
+
 describe("declassifiers", () => {
   const registry = new Map([["Acme Corp", Sourced.fromAuthority("ACME-8817", "payee-registry")]])
 
   test("allowlisted: registry match → Verified, with the ascent on the audit chain", () => {
     const claim = Sourced.fromLLM("ACME-8817", "ExtractInvoice", [Sourced.fromChannel("…", "email-inbound")])
-    const r = allowlisted(claim, registry, "Acme Corp", "payee-registry")
+    const r = allowlisted(claim, registry, hostKey("Acme Corp"), "payee-registry")
     expect(r.ok).toBe(true)
     if (r.ok) {
       expect(r.value.tier).toBe("verified")
@@ -211,7 +213,7 @@ describe("declassifiers", () => {
       ["non-enumerable", hidden],
     ] as const) {
       const candidate = Sourced.fromLLM(evil as unknown as { iban: string }, "ExtractInvoice", [])
-      const r = allowlisted(candidate, iban, "Acme Corp", "payee-registry")
+      const r = allowlisted(candidate, iban, hostKey("Acme Corp"), "payee-registry")
       expect(r.ok, label).toBe(true)
       if (r.ok) {
         // The promoted value IS the registry's object — identity, not equality.
@@ -230,22 +232,22 @@ describe("declassifiers", () => {
 
     // A declassifier that throws has returned no verdict, and every caller
     // reads an exception as transient rather than as a refusal.
-    expect(() => allowlisted(candidate, iban, "Acme Corp", "payee-registry")).not.toThrow()
-    const r = allowlisted(candidate, iban, "Acme Corp", "payee-registry")
+    expect(() => allowlisted(candidate, iban, hostKey("Acme Corp"), "payee-registry")).not.toThrow()
+    const r = allowlisted(candidate, iban, hostKey("Acme Corp"), "payee-registry")
     expect(r.ok).toBe(false)
     if (!r.ok) expect(r.reason).toContain("could not be serialized")
   })
 
   test("allowlisted: key absent from the registry → refusal naming the registry", () => {
     const claim = Sourced.fromLLM("MULE-6660", "ExtractInvoice", [])
-    const r = allowlisted(claim, registry, "Mule Corp", "payee-registry")
+    const r = allowlisted(claim, registry, hostKey("Mule Corp"), "payee-registry")
     expect(r.ok).toBe(false)
     if (!r.ok) expect(r.reason).toContain("not in payee-registry")
   })
 
   test("allowlisted: key present but record disagrees (the poisoned invoice) → refusal", () => {
     const claim = Sourced.fromLLM("MULE-6660", "ExtractInvoice", [])
-    const r = allowlisted(claim, registry, "Acme Corp", "payee-registry")
+    const r = allowlisted(claim, registry, hostKey("Acme Corp"), "payee-registry")
     expect(r.ok).toBe(false)
     if (!r.ok) expect(r.reason).toContain("does NOT match")
   })

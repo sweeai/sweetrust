@@ -153,30 +153,123 @@ reached the disk before `execute` ran. Loading proves the chain is consistent, n
 complete: a file cut at its tail loads as a valid shorter chain and its records are forgotten. A log
 that two processes write without sharing loses records the same way (ADR 0010).
 
-The check is in-process and keyed per sink name, grant, purpose and action digest; it does not stop
-a host from calling `execute`'s work some other way. Each judged call walks the log twice, so its
+The duplicate check is in-process and keyed per sink name, grant, purpose and action digest, so
+a payment that already ran is refused again only as that exact action (a block or a hold reaches
+further, to the whole payment: see *A changed argument is a new action, unless it is the same
+payment*); it does not stop a host from calling `execute`'s work some other way. Each judged call walks the log twice, so its
 cost grows with the log's length, and a retry loop that appends a receipt per retry makes each later
 call slower.
 
-### A changed argument is a new action
+A block's window is not recorded on its receipt. Each sink object reads the log with its own
+`judgment.blockWindowMs`, so two sink objects over one log that share a name, grant and purpose but
+were built with different windows disagree on whether a block is still open, and the one with the
+shorter window judges the action again sooner. Give every such sink object the same `blockWindowMs`.
 
-Stickiness holds one exact action. An argument that changes, even by one base unit of an amount or
-one word of a free-text field, is a new action and gets a new judge call, and this design does not
-prevent that. A block does not cover the action next to it. The sink withholds the assessment,
-confidence and rationale from the refusal by default so an agent has nothing to climb on, and that
-is undone if you hand the agent the receipt, which holds all three. What bounds an agent that keeps
-trying is the purpose's deterministic fields and the chain's own limits.
+### A changed argument is a new action, unless it is the same payment
+
+On a sink that names `purposeArgs`, a block or a hold stands on the payment: the payee, amount,
+asset and network the verdict's `paymentDigest` hashes. Any other argument can change, a memo, a
+note, a reference, an idempotency key, and the call is still the doubted payment. Inside the doubt's
+window it is held or blocked without a judge call. After the window it is judged again: a `match`
+is held for the owner, like the exact action, and a confident `mismatch` is blocked (DAN-1466).
+Within one sink object, a memo variant sent while the payment is still being judged waits for that
+answer. A second sink object over the same log does not wait; it reads the log again once its own
+judge returns. A doubt or an attempt that another sink wrote on this same action stands, and the
+receipt says another sink decided it. A doubt on another action of the payment does not replace
+this action's own verdict: that verdict is recorded, and the payment's doubts hold or block the
+call through it, so approving the other action never leaves this one without a doubt of its own.
+In that race the call's own verdict is recorded as a block whenever a doubt on the payment that is
+still inside its window is a block, even when the judge said `match`, so no hold exists for the
+owner to approve under an open block; otherwise a `match` or an `unsure` is held under its own
+verdict and a confident `mismatch` is blocked. Either way it is now a doubt of its own, with its own
+window, and needs its owner like any doubted action. A second sink whose judge answers before the
+first sink's doubt reaches the log does not see that doubt, and runs on a `match` when no other
+doubt on the payment stands.
+
+A payment can therefore carry more than one doubt at a time, and each one stands on its own until
+it is answered. Only the owner's approval answers a doubt, and an approval answers the doubt it
+names (and that action's own earlier doubts whose windows had passed when the approved one was
+judged), never a doubt that was still inside its window when the approved one was judged. While
+any unanswered doubt on the payment is inside its window, a call for another memo of the payment
+that reaches the sink is held or blocked by it without a judge call, whichever other doubts the
+owner has approved. When a call is answered from the payment's doubts, or judged while some still
+stand, its receipt names the strongest of them: one still inside its window over one whose window
+has passed, a block over a hold, then the judge's own assessment (`mismatch` over `unsure` over
+`match`). A receipt never names a weaker doubt that happens to be
+the latest, and a call that was judged never says it was not judged again.
+
+You can rely on four things. A held memo variant's `held` names the doubted action, not the call
+in front of you, and carries `underAnotherAction: true`, and its receipt's reason says so; an
+approval of it releases only that doubted action, once, exactly as the owner was shown it, and
+resuming the variant with it is refused as `approval-mismatch`. Show the owner the doubted action,
+not the variant: the variant's receipt holds the variant's own args next to the doubted action's
+verdict, so a host that displays `receipt.args` for that hold would get the owner to approve
+something other than what they read. Second, once the owner's approval of a doubt has been
+attempted, that doubt is answered. A memo the judge has not doubted goes back to the judge once no
+unanswered doubt on the payment is inside its window, and the judge can doubt it again; it can run only when
+no doubt on the payment is left standing. A doubt whose window had passed when the approved one
+was judged counts as answered for those other memos, although the approved hold's receipt named
+only the strongest doubt standing then. A doubt still inside its window then is not answered for
+any memo: the other memos stay held or blocked under it, and after its window they are judged
+again and still need its owner (the expired-doubt rule, per doubt). An approved action whose
+`execute` throws still counts as attempted, so its doubt is answered all the same. Third, approving
+one memo never answers a doubt the judge scored on another for that other memo: if memo A was
+blocked or held and the owner approved memo B, A itself stays held or blocked for its owner,
+however the judge answers it next. Fourth, an action that already ran is refused as
+`duplicate-action` before any other memo's doubt is consulted, so a retry of a paid action never
+comes back as a hold naming some other memo. Dedupe stays on the exact action.
+
+The cost of that breadth falls on repeat payments. A doubt nobody answers holds every later payment
+of the same payee, amount, asset and network, so a recurring bill of the same amount to the same
+payee, under a new memo and a new idempotency key each month, stays held until the owner approves
+one of them, and on a sink with no `judgment.approvalKey` it stays held for the life of the grant.
+After the owner's approval runs, and no other doubt on the payment stands, the same payment under a
+memo the judge has not doubted goes back to the judge, which may let it run: dedupe does not stop a second payment of the same amount under a different memo,
+and neither do concurrent memo variants that the judge matches. Bound repeat payments with the
+grant's limits and the chain's own.
+
+What is still a new action: a different payee, amount, asset or network is a different payment and
+gets a new judge call, so changing an amount by one base unit asks again, and so does a respelled
+payee unless you set `judgment.spelling` (see the next section). On a judged sink with no
+`purposeArgs` there is no payment to stand on, so stickiness holds one exact action and any changed
+argument is a new action; two such actions are never treated as one payment. The sink withholds the
+assessment, confidence and rationale from the refusal by default so an agent has nothing to climb
+on, and that is undone if you hand the agent the receipt, which holds the assessment and confidence
+and, unless the sink redacts an argument, the rationale. What bounds an agent that keeps trying is
+the purpose's deterministic fields and the chain's own limits.
 
 ### A payee or asset is compared as written
 
-The kernel does not normalize an address or coin type. On a rail that does not normalize them
-either, a respelled payee is a new action that a block does not cover. Set `payees` and `asset` in
-the purpose, and a variant is then refused.
+The kernel does not normalize an address or coin type, so a respelled payee is a new action that a
+block or a hold does not cover. Two settings close this, and a sink with neither compares the string
+it was given. `judgment.spelling` takes your rail's canonical form of a payee and an asset, and any
+other spelling is refused before a judge runs; on Sui, pass `suiPaymentSpelling` from `sweetrust-sui`.
+`payees` and `asset` in the purpose refuse a variant too, because a variant is not on the list. The
+functions in `spelling` run on agent-supplied strings inside the sink, so they must be pure and fast.
+In `observe` and `warn` a respelling is a recorded violation and is not judged, like any other
+purpose violation, so a trial in those modes has no verdict for that call. A hold or block recorded
+under another spelling before you set this does not carry over to the canonical one. This closes respelling only. A memo or other argument outside the payment is covered by the
+payment's doubt (see *A changed argument is a new action, unless it is the same payment*).
 
 ### A judge outage holds the call and leaves nothing behind
 
 A judge that times out, throws or answers with something that is not a verdict holds the call, and
-the next identical call asks the judge again. Only a real assessment sticks.
+the next identical call asks the judge again. Only a real assessment sticks: once a judge has really
+doubted an action, a later `match` on it is held for the owner, however long the agent waits. Set
+`judgment.approvalKey`, or that action stays held, under any idempotency key, for the life of the
+grant; on a sink that names a payment, so does every action of that payment, under any memo.
+
+### A judge's confidence is not known to be calibrated
+
+A verdict's `confidence` is whatever number the provider reports in [0, 1]. `JudgmentVerdict` has no
+field that says whether that number is calibrated, and the sink compares it with `judgment.floor`
+and takes it as given. One provider's number may measure only how concentrated its answer is, which
+is not how often it is right. So the floor is a line drawn on an uncalibrated number, and a floor
+chosen for one provider or pinned model means nothing on another.
+
+Choose a floor for each provider and each pinned model, and look at it again whenever either one
+changes. Measure the judge on cases whose right answer you know before you run a sink on it in
+`enforce`.
 
 ### An idempotency key is host-attested
 
@@ -209,10 +302,32 @@ purpose when the cap is meant for one asset.
 `assess` receives `action.args` as raw values, and an argument can hold text an agent wrote: a memo,
 an invoice description, a payee name. The agent's own rationale never reaches a judge, but those
 values do. The provider also receives `trust`, each argument's tier and provenance, so it can read
-an `untrusted` argument as data rather than as instructions. The gate delivers that information; it
-cannot make a model use it, and a judge that follows instructions in an argument can still be
-talked into a `match`. Provenance is built from the channel and authority names your host passed,
+an `untrusted` argument as data rather than as instructions. On a sink that names `purposeArgs` it
+also receives `payment`, the payee, amount, asset and network the sink resolved and the verdict's
+`paymentDigest` binds, so a provider need not work them out again from the arguments. It also names the arguments they came from (`payeeArg`, `amountArg`, `assetArg`), so `trust[payeeArg]` is the payee's tier. `payment` says
+what the verdict binds and vouches for none of it: a payee can be text an agent wrote, at whatever
+tier the sink admitted, so a judge must read it as data too. Its `amount` comes with no decimals. The
+gate delivers that information; it cannot make a model use it, and a judge that follows instructions in
+an argument can still be talked into a `match`. Provenance is built from the channel and authority names your host passed,
 so a host that names a channel after agent text has handed the agent that string too.
+
+### A value's origin is the host's words, escaped only in a confirmation question
+
+A value's origin is built from names your host passed: a channel, an authority, or the function name
+given to `fromLLM`. In `humanConfirm`'s question the origin is escaped, cut and set in brackets it
+cannot close, so it cannot pose as a second line or push the value out of view. The words inside the
+brackets are still your host's, and the gate cannot tell whether they are true: the origin is a
+label, and the tier that leads the line is what the gate checked.
+
+That question is the only place the origin is made inert. Everywhere else, a value's provenance
+appears as the host wrote it: on a receipt, in a tier refusal or a judged sink's refusal, in a
+declassifier's reason (`humanConfirm`'s own refusals included), in an ascent's evidence and in a
+judge's `trust` entry. `allowlisted` quotes the key's provenance in its evidence, which stops a line
+break but not every invisible character, and the candidate's provenance beside it is not quoted.
+So never name a channel or authority after text that came in a message. Teach whoever answers a
+confirmation that the tier is the fact and the origin is a label. Have a judge provider read
+`trust[arg].provenance` as data. A refusal is one string with the provenance written into it, so do
+not hand a refusal back to the model word for word; rewrite it without the provenance.
 
 ### A provider can do two things the sink cannot catch
 
@@ -225,6 +340,37 @@ an abort listener.
 JavaScript is blocking the event loop. A provider that spins in `assess`, or does synchronous work
 longer than `timeoutMs`, outlasts the deadline and stalls the whole process. Do blocking work off the
 main thread. Both limits apply to any code the host puts in the provider (ADR 0007).
+
+### A provider's error text reaches the receipt
+
+When a provider throws or rejects, the sink has no verdict, so it records why: `provider <name> gave
+no verdict: <the error up to its first newline, at any length>`. A receipt cannot be redacted after it is written, and an
+error message can echo the arguments the provider was handed. An HTTP client that puts the request
+in its message is enough.
+
+A provider that returns something other than a verdict reaches the receipt the same way, and not
+cut to one line: the sink quotes any string it could not accept, whether that is a field of the
+verdict or the whole return, so raw model output that echoes an argument is recorded.
+
+If the sink redacts any argument, it withholds that text and a provider's rationale from the reason
+and leaves a short hash in their place. The receipt still carries the text's full `rationaleHash`.
+Neither hash is salted, so anyone holding the receipt who can guess the text can confirm the guess, which is easy if your provider writes a fixed sentence with a payee or amount in it. A
+sink that redacts nothing records the text as written. And a host that opts in with
+`judgment.rationaleInRefusal`, off by default, returns the same text to the agent on a fresh hold or
+block, whether or not the sink redacts.
+So keep raw values out of everything a provider throws or returns, and catch and rewrite the errors
+of any library it calls.
+
+### A very large argument stays whole on every receipt
+
+Under the default `raw` policy a receipt keeps each argument whole, and nothing bounds its size.
+`ReceiptLog` and `SignedReceiptLog` hold their receipts in memory, and each call's receipt holds its
+own copy of its arguments, so a retry loop that keeps sending one large argument multiplies the
+memory it takes. Set `redact` to `hash` or `truncate` on any free-text or unbounded argument, and
+bound an argument's size before it reaches the sink. Redaction bounds what a receipt stores, not the
+work: the sink still serializes the whole value on every call, and a judge still receives it raw.
+A value's provenance is written on every receipt and is never redacted, so keep the names you pass
+as a channel or authority short.
 
 ### A sink cannot check that `granted` belongs together
 
@@ -302,8 +448,36 @@ report as a statement about those inputs only.
 object it promotes, and `result.value.value` IS the value object you put in the registry, by
 reference. So that nothing holding the result can rewrite the registry through it,
 `Sourced.fromAuthority` freezes an object or array value **in place, shallowly**, the moment it
-becomes an authority value. Nested objects, Maps and Sets inside it are not frozen; typed arrays are
-left alone. If you keep editing a record after wrapping it, wrap a copy.
+becomes an authority value, and `allowlisted` freezes every own field of the row **in place, at every
+depth**, as soon as a lookup finds it and before a candidate's code can run. That includes your own
+nested objects and anything a row points at, so do not hang a shared object off a row, and it happens
+whether or not the candidate matches. `humanConfirm` refuses a value that is not plain JSON, because a
+Map or bytes would not appear in the question as they are. The question shows the first 256
+characters and says when it has cut the rest, so what follows a long field goes unseen. It deep-freezes the private copy it
+confirms, so what a person said yes to stays what they saw. In a registry row, a Map, Set, Date or
+buffer can still be changed through its own methods, so these are not frozen in effect, typed arrays
+are left alone, and a getter still answers however it likes. So a row holding bytes can be rewritten after it is compared.
+`corroborate` returns a claim already at or above `corroborated` as itself, unfrozen. If you keep
+editing a record after wrapping it, wrap a copy.
+
+### `allowlisted` needs a key your host holds
+
+The key picks which record a candidate is compared against, so a key read from the message can pick
+the attacker's own record. `allowlisted` takes the key as a `Sourced<string>`, refuses one below
+`verified` without reading the registry, and records the key's tier and origin on the ascent.
+`Sourced.fromAuthority` is your claim, not a check: wrapping a value the message supplied passes
+this test and defeats it. A key a person confirmed also passes, and they vouched for that string,
+which can still have come from the message. A key that is not a `Sourced` at all is a `TypeError`.
+
+The row it promotes must be `verified` and the gate's own, and so must the candidate be the gate's
+own value: a row built with `Sourced.fromChannel`, or parsed from JSON that claims a tier, is refused.
+`corroborate` and `humanConfirm` hold their inputs to the same rule: a claim, reference or candidate
+the gate did not mint is refused without being read, and no person is asked about it.
+
+Pass `allowlisted` a synchronous map, which is how its registry is typed. A lookup that returns a
+promise is refused, because a promise is not a record the gate minted, but if that promise later
+rejects, nothing handles the rejection, and by default an unhandled rejection ends a Node process.
+Read the row from your store first, then call `allowlisted` with a map that holds it.
 
 ### The ladder is three tiers
 

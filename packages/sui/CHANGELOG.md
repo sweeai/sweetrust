@@ -14,7 +14,7 @@ from `library` or `nobody` to `chain` when a Sui primitive with a public package
 
 ## [0.1.0] — Unreleased
 
-The first release. Not yet on npm. It needs `sweetrust` 0.6.0, and its first public receipt format
+The first release. Not yet on npm. It needs `sweetrust` 0.7.0, because 0.6.0 ignores `judgment.spelling`, and its first public receipt format
 is receipt@2, so no consumer of receipt@1 exists. Out of 0.1, so you can plan around it: app-bound
 allowances (`allowance::propose_for_app`, the slot a Sui agent product with a public package fills
 later, which is where recipients and a per-payment cap can move on chain); reserve-then-commit
@@ -22,6 +22,68 @@ spends (Sui settles each spend, so `spend` is one step); and mainnet spends (the
 on mainnet; this package has spent only on testnet). Tested against `@mysten/sui` 2.35.0 only.
 
 ### Security
+
+- **A spend's amount past u256 can no longer stall your process.** `spend` used to format and write out
+  the amount before refusing it, and an agent's amount far past u256 never returned. Now an amount
+  whose size is past u256's maximum (`U256_MAX`, 2^256 − 1), positive or negative, is refused at
+  once as `invalid-amount` with one fixed sentence, and the receipt's `amount` and `amountText` are `null`. With an authorization
+  presented it is `not-authorized` and is never digested, and a genuine token presented with it is
+  not consumed, so it still pays the payment it approved. Amounts up to u256 read as before (DAN-1463).
+- **A hand-built handle whose asset the Sui SDK cannot parse as a coin type is rejected at intake.**
+  `spend`, `revoke` and `remaining` throw a `TypeError` naming `allowance.asset is not a coin type`
+  before any chain read, instead of the SDK's raw `Invalid struct tag` from inside the send. Calls
+  that used to answer with such a handle now throw, as any malformed handle does: `remaining` used to
+  return a status, `revoke` a `not-submitted` or `errored` receipt, and `spend` an `invalid-amount`,
+  `wrong-network` or `not-authorized` receipt. A handle from `open` is unaffected (DAN-1463).
+- **A limit past u256 can no longer stall your process either.** A receipt writes each limit out, and
+  a `lifetimeCap`, `rate.amount` or `perSpendMax` far past u256 never finished formatting.
+  On a hand-built handle, such a limit (positive or negative) now makes `spend`, `revoke` and
+  `remaining` throw a `TypeError` naming the field and u256, before any chain read; `open` never
+  returns such a handle. For `remaining` this changes one answer: it used to hang only when the
+  allowance could not be read or was not found, and returned a status when it was found, because it
+  then reads the chain's limits rather than the handle's. At `open`, a grant with one is still refused as a result,
+  by whichever check fails first, exactly as before (`invalid-limit` for an oversized cap or rate,
+  `limit-unheld` for `perSpendMax`, `unbounded-time` for a cap with no expiry and no rate), and the value reads
+  as "an amount past u256 (not written out)" in the sentence and the limit lines.
+  Limits up to u256 read exactly as before (DAN-1469).
+- **A coin type the Sui SDK rewrites without complaint, but that is not a valid type, is now
+  rejected at intake too.** The SDK's normalizer pads and returns strings such as `0xzz::a::B`,
+  `0x2::sui::SUI<>`, `0x2::a::B!` or `" 0x2::sui::SUI "` as if they were canonical, so a hand-built
+  handle carrying one reached the chain: `spend` could read the allowance and execute a transaction,
+  or come back `not-submitted`. Now `spend`, `revoke` and `remaining` throw the same `TypeError`
+  naming `allowance.asset is not a coin type` before any chain read, and `open` throws its existing
+  `is not a Move type` error before sending. For such an asset this throw now comes before the
+  `wrong-network` check, so with a malformed asset on another network `spend`, `revoke` and `open`
+  throw instead of returning a `wrong-network` receipt (`remaining` already threw). The check is the Sui SDK's `isValidStructTag`, the same one
+  `suiPaymentSpelling` uses, and it is stricter than Move in one way: it refuses an identifier that
+  starts with `_`, so `0xabc::_coin::C` is now refused at `open`, and a handle on such a coin can no
+  longer be spent, revoked or read here (revoke it with your own transaction). No live coin with
+  such a name was found. Other coin types behave as before, and an MVR name such as
+  `@org/app::coin::COIN` is not refused here; only `suiPaymentSpelling` refuses those (DAN-1470).
+- **A handle naming a different coin from its allowance is refused before anything is sent.** `spend`
+  and `revoke` now read the allowance object and compare its type with the handle's `asset`. Before,
+  a hand-built handle saying `0x3::evil::EVIL` or `0x2::coin::COIN` on a SUI allowance built, signed
+  and sent a transaction: Sui would refuse it only after gas was spent, and the receipt named a coin
+  that never moved. Now such a call returns a `refused` receipt with the new `RefusalCode`
+  `asset-mismatch`, held by `library`, whose `why` names both coin types; an object that is not an
+  allowance at all is refused the same way. If an exhaustive `switch` over `RefusalCode` is in your
+  code, add the new member. The read costs one extra object read per `spend` and `revoke`, after
+  every local check and the network check. It fails closed: an allowance that cannot be read is
+  refused as `not-submitted`, and one that is not found as `allowance-not-found`, both before
+  anything is built (before, they came back with the same codes after a failed build). An asset
+  that is or contains an MVR name (`@org/app::coin::COIN`) is not compared and behaves as before;
+  see `SECURITY.md` (DAN-1480).
+- **A revoke is no longer stopped by a handle that names the wrong coin.** Revoke is the owner's
+  kill switch and moves nothing, so when its handle's `asset` differs from the coin the allowance
+  object holds, `revoke` now revokes that allowance under the coin type it just read from the chain,
+  instead of refusing as `asset-mismatch`. An object's type never changes, so nothing can swap it
+  between the read and the send, and Sui still refuses a revoke whose `AllowanceCap` is not this
+  allowance's. The receipt's `asset` is the coin the chain holds, its `limits` is empty because the
+  handle's limits describe another coin, and its summary names both coin types, on every outcome.
+  The coin the chain reports passes the same check a handle's `asset` does, so an allowance a node
+  reports over something that is not a valid coin type is refused as `asset-mismatch`, with nothing
+  sent. `spend` still refuses such a handle, and an object that is not an allowance, a missing
+  allowance and an unreadable one are still refused before anything is sent (DAN-1502).
 
 - **`chainSpends` now finds a spend from what moved, not from the command list.** It lists a
   transaction when an input withdraws from this allowance (`FUNDS_WITHDRAWAL`, `source:
@@ -35,6 +97,18 @@ on mainnet; this package has spent only on testnet). Tested against `@mysten/sui
   cannot read as "no spends". `chainSpends` trusts its indexer; see `SECURITY.md`.
 
 ### Added
+
+- **`suiPaymentSpelling`, Sui's canonical form of an address and a coin type.** Pass it as a judged
+  sink's `judgment.spelling` so a respelled payee is refused before a judge runs. A sink's `asset`
+  and a purpose's `payees` must then be in the long form it returns, and something that is not an
+  address or a resolved coin type is refused too. A coin type over 1,024 characters or 16 sets of
+  type arguments is refused before it is parsed, because the parser runs on agent input (DAN-1457). The same limits apply to `open` and to the
+  asset on any handle passed to `spend`, `revoke` or `remaining`. `open` also refuses a type that grows past them once normalized, so it
+  cannot issue a handle it could not then revoke, and a handle's ids are bounded the same way (DAN-1458).
+
+- **`spend` refuses a recipient that is not in canonical form**, as `invalid-address`, and the refusal
+  names the canonical spelling. It used to normalize silently, so a respelled payee could be paid
+  from a sink that had not set `judgment.spelling` (DAN-1458).
 
 - **Each spend is authorized by a one-shot token (ADR 0010, DAN-1406).** `spend` takes
   `authorization`, the `SpendAuthorization` a sink hands its `execute`, and every receipt@2 repeats

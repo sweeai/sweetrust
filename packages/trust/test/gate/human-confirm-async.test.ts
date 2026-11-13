@@ -43,7 +43,7 @@ describe("humanConfirm — an async human", () => {
     expect(r.ok).toBe(false)
     if (r.ok) return
     expect(r.reason).toContain("declined")
-    expect(r.reason).toContain("UNTRUSTED (origin: channel:email-inbound")
+    expect(r.reason).toContain("UNTRUSTED (origin: [channel:email-inbound")
   })
 
   it("an `async` function renderer works the same as a Promise-returning one", async () => {
@@ -114,7 +114,7 @@ describe("humanConfirm — the shape", () => {
       return later(false)
     })
     // No await yet: the renderer has already been handed the question.
-    expect(asked).toContain("UNTRUSTED (origin: channel:email-inbound")
+    expect(asked).toContain("UNTRUSTED (origin: [channel:email-inbound")
     expect(asked).toContain('"ACME-8817"')
   })
 
