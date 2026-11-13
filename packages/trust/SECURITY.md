@@ -160,6 +160,11 @@ payment*); it does not stop a host from calling `execute`'s work some other way.
 cost grows with the log's length, and a retry loop that appends a receipt per retry makes each later
 call slower.
 
+A block's window is not recorded on its receipt. Each sink object reads the log with its own
+`judgment.blockWindowMs`, so two sink objects over one log that share a name, grant and purpose but
+were built with different windows disagree on whether a block is still open, and the one with the
+shorter window judges the action again sooner. Give every such sink object the same `blockWindowMs`.
+
 ### A changed argument is a new action, unless it is the same payment
 
 On a sink that names `purposeArgs`, a block or a hold stands on the payment: the payee, amount,
@@ -254,6 +259,18 @@ doubted an action, a later `match` on it is held for the owner, however long the
 `judgment.approvalKey`, or that action stays held, under any idempotency key, for the life of the
 grant; on a sink that names a payment, so does every action of that payment, under any memo.
 
+### A judge's confidence is not known to be calibrated
+
+A verdict's `confidence` is whatever number the provider reports in [0, 1]. `JudgmentVerdict` has no
+field that says whether that number is calibrated, and the sink compares it with `judgment.floor`
+and takes it as given. One provider's number may measure only how concentrated its answer is, which
+is not how often it is right. So the floor is a line drawn on an uncalibrated number, and a floor
+chosen for one provider or pinned model means nothing on another.
+
+Choose a floor for each provider and each pinned model, and look at it again whenever either one
+changes. Measure the judge on cases whose right answer you know before you run a sink on it in
+`enforce`.
+
 ### An idempotency key is host-attested
 
 `{ idempotencyKey }` is how a host says "this is a second, intended payment", so it must come from the
@@ -294,6 +311,24 @@ gate delivers that information; it cannot make a model use it, and a judge that 
 an argument can still be talked into a `match`. Provenance is built from the channel and authority names your host passed,
 so a host that names a channel after agent text has handed the agent that string too.
 
+### A value's origin is the host's words, escaped only in a confirmation question
+
+A value's origin is built from names your host passed: a channel, an authority, or the function name
+given to `fromLLM`. In `humanConfirm`'s question the origin is escaped, cut and set in brackets it
+cannot close, so it cannot pose as a second line or push the value out of view. The words inside the
+brackets are still your host's, and the gate cannot tell whether they are true: the origin is a
+label, and the tier that leads the line is what the gate checked.
+
+That question is the only place the origin is made inert. Everywhere else, a value's provenance
+appears as the host wrote it: on a receipt, in a tier refusal or a judged sink's refusal, in a
+declassifier's reason (`humanConfirm`'s own refusals included), in an ascent's evidence and in a
+judge's `trust` entry. `allowlisted` quotes the key's provenance in its evidence, which stops a line
+break but not every invisible character, and the candidate's provenance beside it is not quoted.
+So never name a channel or authority after text that came in a message. Teach whoever answers a
+confirmation that the tier is the fact and the origin is a label. Have a judge provider read
+`trust[arg].provenance` as data. A refusal is one string with the provenance written into it, so do
+not hand a refusal back to the model word for word; rewrite it without the provenance.
+
 ### A provider can do two things the sink cannot catch
 
 **An abort listener that throws.** At the deadline the sink calls `controller.abort()`. Node reports
@@ -325,6 +360,17 @@ sink that redacts nothing records the text as written. And a host that opts in w
 block, whether or not the sink redacts.
 So keep raw values out of everything a provider throws or returns, and catch and rewrite the errors
 of any library it calls.
+
+### A very large argument stays whole on every receipt
+
+Under the default `raw` policy a receipt keeps each argument whole, and nothing bounds its size.
+`ReceiptLog` and `SignedReceiptLog` hold their receipts in memory, and each call's receipt holds its
+own copy of its arguments, so a retry loop that keeps sending one large argument multiplies the
+memory it takes. Set `redact` to `hash` or `truncate` on any free-text or unbounded argument, and
+bound an argument's size before it reaches the sink. Redaction bounds what a receipt stores, not the
+work: the sink still serializes the whole value on every call, and a judge still receives it raw.
+A value's provenance is written on every receipt and is never redacted, so keep the names you pass
+as a channel or authority short.
 
 ### A sink cannot check that `granted` belongs together
 
@@ -427,6 +473,11 @@ The row it promotes must be `verified` and the gate's own, and so must the candi
 own value: a row built with `Sourced.fromChannel`, or parsed from JSON that claims a tier, is refused.
 `corroborate` and `humanConfirm` hold their inputs to the same rule: a claim, reference or candidate
 the gate did not mint is refused without being read, and no person is asked about it.
+
+Pass `allowlisted` a synchronous map, which is how its registry is typed. A lookup that returns a
+promise is refused, because a promise is not a record the gate minted, but if that promise later
+rejects, nothing handles the rejection, and by default an unhandled rejection ends a Node process.
+Read the row from your store first, then call `allowlisted` with a map that holds it.
 
 ### The ladder is three tiers
 

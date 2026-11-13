@@ -24,9 +24,9 @@ on mainnet; this package has spent only on testnet). Tested against `@mysten/sui
 ### Security
 
 - **A spend's amount past u256 can no longer stall your process.** `spend` used to format and write out
-  the amount before refusing it, and an agent's `1n << 1073741000n` never returned. Now an amount
-  whose size is past u256, positive or negative, is refused at once as `invalid-amount` with one
-  fixed sentence, and the receipt's `amount` and `amountText` are `null`. With an authorization
+  the amount before refusing it, and an agent's amount far past u256 never returned. Now an amount
+  whose size is past u256's maximum (`U256_MAX`, 2^256 − 1), positive or negative, is refused at
+  once as `invalid-amount` with one fixed sentence, and the receipt's `amount` and `amountText` are `null`. With an authorization
   presented it is `not-authorized` and is never digested, and a genuine token presented with it is
   not consumed, so it still pays the payment it approved. Amounts up to u256 read as before (DAN-1463).
 - **A hand-built handle whose asset the Sui SDK cannot parse as a coin type is rejected at intake.**
@@ -36,7 +36,7 @@ on mainnet; this package has spent only on testnet). Tested against `@mysten/sui
   return a status, `revoke` a `not-submitted` or `errored` receipt, and `spend` an `invalid-amount`,
   `wrong-network` or `not-authorized` receipt. A handle from `open` is unaffected (DAN-1463).
 - **A limit past u256 can no longer stall your process either.** A receipt writes each limit out, and
-  a `lifetimeCap`, `rate.amount` or `perSpendMax` of `1n << 1073741000n` never finished formatting.
+  a `lifetimeCap`, `rate.amount` or `perSpendMax` far past u256 never finished formatting.
   On a hand-built handle, such a limit (positive or negative) now makes `spend`, `revoke` and
   `remaining` throw a `TypeError` naming the field and u256, before any chain read; `open` never
   returns such a handle. For `remaining` this changes one answer: it used to hang only when the
