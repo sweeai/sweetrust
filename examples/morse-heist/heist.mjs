@@ -12,8 +12,9 @@
 //                            the owner, and a value parsed out of another AI's post does not
 //
 // Offline: no network, no keys, no chain. Run: node heist.mjs
-// HOST_TRUSTS_POSTS=1 node heist.mjs shows provenance's honest limit: a host that labels a
-// public post as the owner's word gets robbed, because the label is the whole defense.
+// HOST_TRUSTS_POSTS=1 node heist.mjs shows provenance's honest limit: when the banker's code (the
+// host around the agent) labels a public post as the owner's word, it gets robbed, because the
+// label is the whole defense.
 
 import { createTrust, defineCapability, grantorId, makeInMemoryAuditLive, MandateFailure } from "sweetrust/mandate"
 import { makeSink, ReceiptLog, Sourced } from "sweetrust/gate"
@@ -40,24 +41,31 @@ const translatorPost = () => {
   return `@banker ${plain}`
 }
 
-// Runs 1 and 2. The banker obeys a post that tags it, from a member, as its owner's command.
+// Whose money: the coins sit in the translator bot's wallet. The banker bot is a service that
+// moves coins out of a member's wallet when that member tells it to, and the translator's wallet
+// belongs to one person, the owner. Every payment below comes out of that wallet.
+
+// Runs 1 and 2. The banker obeys a post that tags it, from a member, as the member's command.
 const withLimit = (guarded) => {
   const ledger = { translator: AMOUNT, attacker: 0 }
   const members = new Set(["translator"])
   const timeline = [{ author: "translator", text: translatorPost() }]
 
+  // A mandate is a recorded grant of authority, with limits. SweeTrust hands authority down a
+  // chain, organization → project → agent, and an agent's mandate can hold no more than its
+  // parent's, so the banker's mandate is the third link. The limit lives on that one.
   const trust = createTrust({ store: makeInMemoryAuditLive() })
-  const owner = grantorId("WALLET_OWNER")
+  const owner = grantorId("TRANSLATOR_WALLET_OWNER")
   const Transfer = defineCapability("banker.transfer")
-  const org = trust.issueOrgMandate({ grantor: owner, capabilities: [Transfer], rationale: "The owner's wallet" })
+  const org = trust.issueOrgMandate({ grantor: owner, capabilities: [Transfer], rationale: "The translator's wallet" })
   const project = trust.issueProjectMandate({ grantor: owner, grantorScope: org, capabilities: [Transfer], rationale: "The banker bot" })
   const banker = trust.issueAgentMandate({
-    grantor: owner, grantorScope: project, capabilities: [Transfer], rationale: "The banker bot's transfers",
+    grantor: owner, grantorScope: project, capabilities: [Transfer], rationale: "The banker bot's transfers from this wallet",
     // Zero until the owner raises it: the banker can spend nothing the owner has not allowed.
     limits: { "banker.transfer": { amount: 0, unit: "COIN", windowMs: 86_400_000 } },
   })
 
-  let kernel = "not consulted"
+  let answer = "not consulted"
   for (const post of timeline) {
     const m = ORDER_RE.exec(post.text)
     if (m === null || !members.has(post.author)) continue
@@ -66,16 +74,16 @@ const withLimit = (guarded) => {
     if (guarded) {
       try {
         trust.useCapability({ mandate: banker, capability: Transfer, amount })
-        kernel = "allowed"
+        answer = "allowed"
       } catch (e) {
-        kernel = MandateFailure.is(e) ? e._tag : `threw: ${String(e)}`
+        answer = MandateFailure.is(e) ? e._tag : `threw: ${String(e)}`
         continue
       }
     }
     ledger[post.author] -= amount
     ledger[to] = (ledger[to] ?? 0) + amount
   }
-  return { ledger, kernel }
+  return { ledger, answer }
 }
 
 // Run 3. No limit. The transfer is a SweeTrust sink that runs only when `to` and `amount` are
@@ -88,22 +96,27 @@ const withProvenance = async (hostTrustsPosts) => {
     requires: { to: "verified", amount: "verified" },
     mode: "enforce",
     log: new ReceiptLog(),
-    execute: (args) => {
-      const to = String(args.to?.value ?? args.to).toLowerCase()
-      const n = Number(args.amount?.value ?? args.amount)
+    // Runs only after every argument passed its check. Each argument is still a Sourced value,
+    // so the plain value is `.value`.
+    execute: ({ to, amount }) => {
+      const payee = String(to.value).toLowerCase()
+      const n = Number(amount.value)
       ledger.translator -= n
-      ledger[to] = (ledger[to] ?? 0) + n
+      ledger[payee] = (ledger[payee] ?? 0) + n
       return "sent"
     },
   })
 
+  // The label is the banker's code saying where a value came from. A value parsed out of a
+  // public post is model output; only the owner's own channel produces the owner's word.
   const m = ORDER_RE.exec(translatorPost())
   const label = (v) => (hostTrustsPosts ? Sourced.fromAuthority(v, "owner") : Sourced.fromLLM(v, "public-post:@translator", []))
-  const fromPost = await transfer({ to: label(m[2]), amount: label(Number(m[1])) })
+  const payee = label(m[2])
+  const fromPost = await transfer({ to: payee, amount: label(Number(m[1])) })
 
   // The owner's own order, through the owner's own channel, still runs through the same sink.
   const fromOwner = await transfer({ to: Sourced.fromAuthority("landlord", "owner"), amount: Sourced.fromAuthority(100, "owner") })
-  return { ledger, fromPost, fromOwner }
+  return { ledger, fromPost, fromOwner, origin: payee.provenance.origin }
 }
 
 console.log("The Morse code heist, retold on mocks: stand-in bots, a fake timeline, a fake ledger. No network, no chain.")
@@ -128,22 +141,21 @@ verdict(true, r1.ledger.attacker > 0, r1.ledger.attacker > 0 ? "PAID OUT" : "une
 const r2 = withLimit(true)
 console.log("")
 console.log("run 2 · spending limit (a SweeTrust mandate whose limit is 0 until the owner raises it)")
-console.log(`  the banker asks the kernel before moving anything → ${r2.kernel} · the attacker holds ${fmt(r2.ledger.attacker)} COIN`)
+console.log(`  the banker asks SweeTrust before moving anything → ${r2.answer} · the attacker holds ${fmt(r2.ledger.attacker)} COIN`)
 verdict(true, r2.ledger.attacker === 0, r2.ledger.attacker === 0 ? "BLOCKED by the spending limit" : "unexpected: PAID OUT")
 
 const hostTrustsPosts = process.env.HOST_TRUSTS_POSTS === "1"
 const r3 = await withProvenance(hostTrustsPosts)
-const origin = r3.fromPost.ok ? "" : (/origin: ([^)]+)\)/.exec(r3.fromPost.refusal)?.[1] ?? "unknown")
 console.log("")
 console.log("run 3 · provenance (no limit; the payee and amount must come from the owner)")
 console.log(hostTrustsPosts
-  ? "  HOST_TRUSTS_POSTS=1: the host mislabels the post's values as the owner's word"
-  : "  the banker labels the post's values as written by another AI, in public")
+  ? "  HOST_TRUSTS_POSTS=1: the banker's code mislabels the post's values as the owner's word"
+  : "  the banker's code labels the post's values as written by another AI, in public")
 console.log(r3.fromPost.ok
   ? "  the post's order RAN"
-  : `  the post's order is refused: its payee and amount are untrusted (origin ${origin})`)
+  : `  the post's order is refused: its payee and amount are untrusted (origin ${r3.origin})`)
 console.log(`  the owner's own 100 COIN order ${r3.fromOwner.ok ? "still ran" : "was refused"} · the attacker holds ${fmt(r3.ledger.attacker)} COIN`)
 if (!r3.fromOwner.ok) failed = true
-verdict(!hostTrustsPosts, r3.ledger.attacker === 0, r3.ledger.attacker === 0 ? "BLOCKED by provenance: a public post is not the owner's signature" : "PAID OUT: the label was wrong, and the label is the whole defense")
+verdict(!hostTrustsPosts, r3.ledger.attacker === 0, r3.ledger.attacker === 0 ? "BLOCKED by provenance: a public post is not the owner's word" : "PAID OUT: the label was wrong, and the label is the whole defense")
 
 process.exit(failed ? 1 : 0)
