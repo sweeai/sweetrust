@@ -6,9 +6,14 @@
 #
 # Trusted publishing (OIDC): no npm token exists anywhere. npmjs.com trusts exactly this
 # workflow file for sweetrust-sui (package settings → Trusted Publisher → GitHub Actions,
-# repository sweeai/sweetrust, workflow release-sui.yml). That setting lives on the package's
-# own settings page, so the name is first claimed by a code-less placeholder;
-# RELEASING.md § Releasing `sweetrust-sui` has the steps.
+# repository sweeai/sweetrust, workflow release-sui.yml).
+#
+# STAGED, not published: this run puts the version on npm in a state nobody can install, and a
+# maintainer approves it with 2FA (`npm stage approve`, or npmjs.com → Staged Packages). A
+# compromised workflow or a stolen tag can stage, but only a person can release. npm's own
+# advice for trust relationships: "only enable npm stage publish … and disable npm publish"
+# (`npm help stage`, npm 11.19.1). The trusted publisher therefore has "Allow npm publish"
+# unticked. RELEASING.md § Releasing `sweetrust-sui` has the steps.
 #
 # Actions are pinned to full commit SHAs, as in ci.yml.
 
@@ -51,19 +56,19 @@ jobs:
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0, reads packageManager
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          # Trusted publishing needs Node ≥ 22.14 and npm ≥ 11.5.1.
+          # Staged publishing needs Node ≥ 22.14 and npm ≥ 11.15.0 (docs.npmjs.com/staged-publishing).
           node-version: "24.x"
           check-latest: true
           registry-url: "https://registry.npmjs.org"
           cache: pnpm
 
-      - name: npm can do trusted publishing (≥ 11.5.1)
+      - name: npm can stage (≥ 11.15.0)
         run: |
           v=$(npm --version)
           node -e '
-            const [a, b, c] = process.argv[1].split(".").map(Number)
-            const ok = a > 11 || (a === 11 && (b > 5 || (b === 5 && c >= 1)))
-            if (!ok) { console.error(`npm ${process.argv[1]} < 11.5.1`); process.exit(1) }
+            const [a, b] = process.argv[1].split(".").map(Number)
+            const ok = a > 11 || (a === 11 && b >= 15)
+            if (!ok) { console.error(`npm ${process.argv[1]} < 11.15.0`); process.exit(1) }
             console.log(`npm ${process.argv[1]}`)' "$v"
 
       # A tag that disagrees with package.json would publish a version nobody tagged.
@@ -81,7 +86,9 @@ jobs:
       # The adapter's README gate compiles against the kernel's dist/, so build the kernel first.
       - run: pnpm --filter ./packages/trust build
 
-      # prepublishOnly re-runs build → test → typecheck before anything is uploaded.
-      - name: publish
+      # prepublishOnly re-runs build → test → typecheck before anything is uploaded (stage runs
+      # the same lifecycle; checked with --dry-run on npm 11.19.1). Nothing installable exists
+      # until a maintainer approves the staged version.
+      - name: stage for approval
         working-directory: packages/sui
-        run: npm publish --provenance --access public
+        run: npm stage publish --provenance --access public
