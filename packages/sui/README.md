@@ -252,7 +252,7 @@ Without keys the testnet suite is skipped, and it says so in a banner on every r
 
 ## Status
 
-**0.1.0, unreleased.** Not on npm. Plain allowances only: the app-bound path (`allowance::propose_for_app`) is the slot a Sui agent product with a public package fills later. `CHANGELOG.md` ships in the tarball.
+**v0.1.0 is current**, the first release, and it needs `sweetrust` 0.7.x. Plain allowances only: the app-bound path (`allowance::propose_for_app`) is the slot a Sui agent product with a public package fills later. `CHANGELOG.md` ships in the tarball.
 
 ## License
 
