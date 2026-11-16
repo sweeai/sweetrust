@@ -73,3 +73,9 @@ jobs:
             }'
       - if: matrix.typecheck
         run: pnpm typecheck
+      # The examples install sweetrust from npm, as a stranger would, so this checks the
+      # published release, not this commit. The script exits 1 when a run ends differently
+      # from what its README says.
+      - name: examples/morse-heist runs against the published sweetrust
+        working-directory: examples/morse-heist
+        run: npm install --no-audit --no-fund && npm start

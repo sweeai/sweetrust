@@ -72,6 +72,8 @@ console.log(report.valid) // true. Editing a kept record turns it false.
 
 Save it as `demo.ts` and run `node demo.ts` on Node 22.18 or later.
 
+**A longer story:** [`examples/morse-heist`](examples/morse-heist) retells a real attack, in which one AI agent was tricked into paying out by another AI agent's public post. It runs the attack three times, with no guard, with a spending limit and with provenance, in one command and offline.
+
 ## What's inside
 
 **`sweetrust/gate` enforces.** Every value carries a trust tier (`untrusted`, `corroborated`, `verified`) and its full provenance. Taint is not automatic: `Sourced.fromLLM` is always `untrusted`, and anything computed from a `.value` is plain until you wrap it. Three functions called declassifiers are the only way to raise an existing value's trust: `allowlisted` checks a registry you control, `corroborate` requires independent sources to agree, and `humanConfirm` asks a person. Trusted host code mints verified values with `Sourced.fromAuthority`.
