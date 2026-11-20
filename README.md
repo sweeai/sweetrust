@@ -72,7 +72,7 @@ console.log(report.valid) // true. Editing a kept record turns it false.
 
 Save it as `demo.ts` and run `node demo.ts` on Node 22.18 or later.
 
-**A longer story:** [`examples/morse-heist`](examples/morse-heist) retells a real attack, in which one AI agent was tricked into paying out by another AI agent's public post. It runs the attack three times, with no guard, with a spending limit and with provenance, in one command and offline.
+**A longer story:** [`examples/morse-heist`](examples/morse-heist) retells a real attack, in which one AI agent was tricked into paying out by another AI agent's public post. It runs the attack three times, with no guard, with a spending limit and with provenance, in one command, and offline once installed.
 
 ## What's inside
 

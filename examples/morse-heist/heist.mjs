@@ -24,7 +24,8 @@ const MORSE = {
   N: "-.", O: "---", P: ".--.", Q: "--.-", R: ".-.", S: "...", T: "-", U: "..-", V: "...-", W: ".--", X: "-..-", Y: "-.--", Z: "--..",
   0: "-----", 1: ".----", 2: "..---", 3: "...--", 4: "....-", 5: ".....", 6: "-....", 7: "--...", 8: "---..", 9: "----.",
 }
-const encode = (s) => s.toUpperCase().split(" ").map((w) => [...w].map((c) => MORSE[c]).join(" ")).join(" / ")
+const code = (c) => MORSE[c] ?? (() => { throw new Error(`no Morse code for ${JSON.stringify(c)}`) })()
+const encode = (s) => s.toUpperCase().split(" ").map((w) => [...w].map(code).join(" ")).join(" / ")
 const decode = (m) => m.split(" / ").map((w) => w.split(" ").map((c) => Object.keys(MORSE).find((k) => MORSE[k] === c) ?? "?").join("")).join(" ")
 
 const AMOUNT = 3_000_000_000
@@ -142,7 +143,9 @@ const r2 = withLimit(true)
 console.log("")
 console.log("run 2 · spending limit (a SweeTrust mandate whose limit is 0 until the owner raises it)")
 console.log(`  the banker asks SweeTrust before moving anything → ${r2.answer} · the attacker holds ${fmt(r2.ledger.attacker)} COIN`)
-verdict(true, r2.ledger.attacker === 0, r2.ledger.attacker === 0 ? "BLOCKED by the spending limit" : "unexpected: PAID OUT")
+// Blocked for the stated reason, not for any reason: the refusal must be the limit's own.
+const limitHeld = r2.ledger.attacker === 0 && r2.answer === "MandateLimitExceeded"
+verdict(true, limitHeld, limitHeld ? "BLOCKED by the spending limit" : r2.ledger.attacker === 0 ? `unexpected: refused for another reason (${r2.answer})` : "unexpected: PAID OUT")
 
 const hostTrustsPosts = process.env.HOST_TRUSTS_POSTS === "1"
 const r3 = await withProvenance(hostTrustsPosts)
@@ -156,6 +159,9 @@ console.log(r3.fromPost.ok
   : `  the post's order is refused: its payee and amount are untrusted (origin ${r3.origin})`)
 console.log(`  the owner's own 100 COIN order ${r3.fromOwner.ok ? "still ran" : "was refused"} · the attacker holds ${fmt(r3.ledger.attacker)} COIN`)
 if (!r3.fromOwner.ok) failed = true
-verdict(!hostTrustsPosts, r3.ledger.attacker === 0, r3.ledger.attacker === 0 ? "BLOCKED by provenance: a public post is not the owner's word" : "PAID OUT: the label was wrong, and the label is the whole defense")
+// Blocked for the stated reason: both arguments refused because their tier is untrusted.
+const refusedAsUntrusted = !r3.fromPost.ok && ["to", "amount"].every((k) => r3.fromPost.refusal.includes(`${k} requires verified but is UNTRUSTED`))
+const provenanceHeld = r3.ledger.attacker === 0 && (hostTrustsPosts || refusedAsUntrusted)
+verdict(!hostTrustsPosts, provenanceHeld, provenanceHeld ? "BLOCKED by provenance: a public post is not the owner's word" : r3.ledger.attacker === 0 ? "unexpected: refused for another reason" : "PAID OUT: the label was wrong, and the label is the whole defense")
 
 process.exit(failed ? 1 : 0)
