@@ -11,7 +11,7 @@ verified_by: "pnpm -C packages/sui test (test/receipts.test.ts: every verdict's 
 # ADR 0003: one delegated-allowance interface, a conformance suite, and one reference adapter (Sui)
 
 **Status:** Accepted, 2026-11-06, on Danny's three rulings (below). The draft of 2026-10-14 asked six questions; each is answered at the end.
-**Implementation:** in progress. `packages/sui` (`sweetrust-sui` 0.1.0, unreleased) implements the interface for Sui and passes the conformance suite on testnet. Publishing it is a separate word.
+**Implementation:** in progress. `packages/sui` implements the interface for Sui and passes the conformance suite on testnet; `sweetrust-sui` 0.1.0 is its first release.
 **Force:** the `enforces` declaration is held to evidence. Every limit it labels `chain` has a recorded Sui refusal (`packages/sui/test/conformance/fixture.test.ts` fails if one is missing), and every limit it labels `nobody` is refused at `open()` (`packages/sui/test/receipts.test.ts`).
 **Date:** 2026-10-14 (draft) · 2026-11-06 (accepted) · **Ticket:** DAN-1259 · **Extends:** ADR 0001 (authority is in-process possession) and the `SECURITY.md` boundary that money limits are not the kernel's job.
 

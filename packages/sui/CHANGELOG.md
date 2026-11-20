@@ -12,10 +12,10 @@ from `library` or `nobody` to `chain` when a Sui primitive with a public package
 `why` sentences are written for people and may be reworded in any release: match on `code` and
 `native`, never on `why`.
 
-## [0.1.0] — Unreleased
+## [0.1.0] — 2026-11-15
 
-The first release. Not yet on npm. It needs `sweetrust` 0.7.0, because 0.6.0 ignores `judgment.spelling`, and its first public receipt format
-is receipt@2, so no consumer of receipt@1 exists. Out of 0.1, so you can plan around it: app-bound
+The first release. It needs `sweetrust` 0.7.0, because 0.6.0 ignores `judgment.spelling`, and its
+first public receipt format is receipt@2, so no consumer of receipt@1 exists. Out of 0.1, so you can plan around it: app-bound
 allowances (`allowance::propose_for_app`, the slot a Sui agent product with a public package fills
 later, which is where recipients and a per-payment cap can move on chain); reserve-then-commit
 spends (Sui settles each spend, so `spend` is one step); and mainnet spends (the module is present
@@ -216,3 +216,5 @@ on mainnet; this package has spent only on testnet). Tested against `@mysten/sui
 - **A `Scale` binds to a coin type** (R9). `defineScale({ coinType })` names the asset; the adapter
   applies a scale only to that coin, shows any other asset in base units, and refuses an unbound
   scale when the adapter is constructed. The README's example binds `testUSD` to SUI.
+
+[0.1.0]: https://github.com/sweeai/sweetrust/releases/tag/sweetrust-sui@0.1.0
