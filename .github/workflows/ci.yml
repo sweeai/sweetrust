@@ -75,13 +75,16 @@ jobs:
         run: pnpm typecheck
       # The examples install sweetrust from npm, as a stranger would, so this checks the
       # published release, not this commit. Each script exits non-zero when a run ends
-      # differently from what its README says (or a control fails).
+      # differently from what its README says (or a control fails). The two TypeScript examples
+      # need Node >= 22.18, so they run on the legs that run the typecheck.
       - name: examples/morse-heist runs against the published sweetrust
         working-directory: examples/morse-heist
         run: npm install --no-audit --no-fund && npm start
-      - name: examples/spending-cap runs against the published sweetrust
+      - if: matrix.typecheck
+        name: examples/spending-cap runs against the published sweetrust
         working-directory: examples/spending-cap
         run: npm install --no-audit --no-fund && npm start
-      - name: examples/allow-list-and-records runs against the published sweetrust
+      - if: matrix.typecheck
+        name: examples/allow-list-and-records runs against the published sweetrust
         working-directory: examples/allow-list-and-records
         run: npm install --no-audit --no-fund && npm start

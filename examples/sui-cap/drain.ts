@@ -143,7 +143,20 @@ async function housekeeping(say: (s: string) => void): Promise<string[]> {
   const m = await balanceOf(ATTACKER)
   const coins: { objectId: string }[] = (await client.listCoins({ owner: ATTACKER, coinType: SUI_T })).objects
   const fromBalance = m.address > MERCHANT_RESERVE + 1_000_000n ? m.address - MERCHANT_RESERVE : 0n
-  if (coins.length > 0 || fromBalance > 0n) {
+  if (m.address < SWEEP_GAS_BUDGET && coins.length > 0) {
+    // A fresh attacker address holds only the loose coin it was paid in and has no address balance to pay gas from,
+    // so that coin pays the gas itself and what is left goes home with it.
+    const t0 = now()
+    const tx = new Transaction()
+    tx.setSender(ATTACKER)
+    tx.setGasBudget(SWEEP_GAS_BUDGET)
+    tx.transferObjects([tx.gas], tx.pure.address(OWNER))
+    try {
+      const r = await run1(tx, attacker)
+      say(`  sweep   attacker's loose coin → wallet (the coin paid its own gas): ${fmt(m.coin)} ${r.ok ? "returned" : `FAILED (${oneLine(r.error)})`}  ${scan(r.digest)}  (${ms(t0)})`)
+      notes.push(`sweep ${r.ok ? "ok" : "failed"}`)
+    } catch (e) { say(`  sweep   FAILED (${oneLine(e)})`); notes.push("sweep failed") }
+  } else if (coins.length > 0 || fromBalance > 0n) {
     const t0 = now()
     const tx = new Transaction()
     tx.setSender(ATTACKER)
@@ -280,7 +293,10 @@ try {
       const sum = ok.reduce((s, x) => s + BigInt(x.amount ?? 0), 0n)
       indexer = `the chain's own indexer lists ${spends.length} spend attempts: ${ok.length} succeeded (${fmt(sum)}), ${spends.length - ok.length} failed`
       if (sum !== lost) demoError(`the indexer says ${fmt(sum)} left the allowance but the wallet's balance fell by ${fmt(lost)}`)
-    } catch (e) { indexer = `the chain's indexer could not be read (${oneLine(e)}); the balances above are what is real` }
+    } catch (e) {
+      if (e instanceof DemoError) throw e // a real mismatch is the demo failing, not an indexer that could not be read
+      indexer = `the chain's indexer could not be read (${oneLine(e)}); the balances above are what is real`
+    }
   }
   log()
   log(`  audit · ${indexer || "the chain's indexer had not caught up; the balances are what is real"}`)

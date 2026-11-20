@@ -6,24 +6,26 @@ The same "send everything" attack as [`spending-cap`](../spending-cap), but the 
 
 ## Run it
 
-You need three testnet keys and a funded owner wallet. From an empty folder, on Node 22.18 or later:
+You need three testnet keys, and two of them funded: the owner wallet and the agent's key (it pays gas for every spend it signs). From an empty folder, on Node 22.18 or later:
 
 ```bash
 npm i sweetrust@0.7.0 sweetrust-sui@0.1.0 @mysten/sui@^2.35.0
 curl -fsSLO https://raw.githubusercontent.com/sweeai/sweetrust/main/examples/sui-cap/drain.ts
 curl -fsSLO https://raw.githubusercontent.com/sweeai/sweetrust/main/examples/sui-cap/make-keys.ts
-node make-keys.ts      # writes keys.json (testnet only) and prints the owner address
+node make-keys.ts      # writes keys.json (testnet only) and prints the two addresses to fund
 ```
 
-Fund the printed owner address at <https://faucet.sui.io> (choose Testnet), then:
+Fund both printed addresses with the Sui CLI (`sui client faucet --address <address>`) or at <https://faucet.sui.io> (choose Testnet), then:
 
 ```bash
 node drain.ts --rehearse
 ```
 
-From a clone of this repository: `cd examples/sui-cap && npm install && node make-keys.ts`, fund, then `node drain.ts --rehearse`. A run takes about 10 seconds and costs a few thousandths of a testnet SUI in gas.
+From a clone of this repository: `cd examples/sui-cap && npm install && node make-keys.ts`, fund both, then `node drain.ts --rehearse`. A run takes about 15 seconds and costs a few thousandths of a testnet SUI in gas.
 
 `--rehearse` is the same run followed by a cleanup (revoke the allowance, sweep the attacker's SUI back), so the next run starts where this one did. `--sweep` is the cleanup alone. Set `SWEETRUST_SUI_TESTNET_KEYS` to use a keys file elsewhere.
+
+**About the keys.** `keys.json` holds three secret keys in plain text. Keep it out of any git repository (this repository's `.gitignore` covers it; a folder you made yourself has none), and never point `SWEETRUST_SUI_TESTNET_KEYS` at a key that holds real funds. The script checks it is talking to the testnet before it signs, and the checks should never be your only protection.
 
 ## What is real and what is a stand-in
 
@@ -43,7 +45,7 @@ From a clone of this repository: `cd examples/sui-cap && npm install && node mak
 ATTACK 9 · sui drain · BLOCKED by the chain
 ```
 
-Each step also prints a transaction digest and a suiscan link. Your amounts differ with your balance.
+Each step also prints a transaction digest and a suiscan link. Your amounts differ with your balance. With `--rehearse`, the cleanup lines (revoke, sweep) print just before the verdict.
 
 ## What it does not do
 
