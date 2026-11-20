@@ -137,6 +137,7 @@ An unjudged sink does not consult a mandate, and a judged sink checks only that 
 | Document | Read it for |
 |---|---|
 | [Package reference](packages/trust/README.md) | The full API, with runnable examples |
+| [Examples](examples) | Runnable: a spending cap, an allow list with a records check, and the cap held by Sui itself on testnet |
 | [Architecture](packages/trust/ARCHITECTURE.md) | How the three modules fit together |
 | [Decision records](packages/trust/docs/adr) | Why the design is what it is |
 | [Changelog](packages/trust/CHANGELOG.md) | What changed, and how to upgrade |

@@ -1,0 +1,4 @@
+# Its own ignore rules, as each package here carries (see the root .gitignore).
+# No lockfile on purpose: the example and its CI step use the newest published release in its range.
+node_modules
+package-lock.json
