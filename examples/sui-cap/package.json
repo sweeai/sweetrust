@@ -1,0 +1,18 @@
+{
+  "name": "sweetrust-example-sui-cap",
+  "private": true,
+  "description": "The same cap held by Sui itself (0x2::allowance) on a real testnet wallet, driven through sweetrust-sui.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "start": "node drain.ts"
+  },
+  "dependencies": {
+    "sweetrust": "^0.7.0",
+    "sweetrust-sui": "^0.1.0",
+    "@mysten/sui": "^2.35.0"
+  }
+}

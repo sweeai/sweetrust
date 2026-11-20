@@ -1,0 +1,16 @@
+{
+  "name": "sweetrust-example-allow-list-and-records",
+  "private": true,
+  "description": "Three layers for one payment: a spending cap, an allow list of payees, and a records check against the owner's invoices.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "start": "node layers.ts"
+  },
+  "dependencies": {
+    "sweetrust": "^0.7.0"
+  }
+}

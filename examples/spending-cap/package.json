@@ -1,0 +1,16 @@
+{
+  "name": "sweetrust-example-spending-cap",
+  "private": true,
+  "description": "A prompt-injected agent is told to send everything: a sweetrust spending cap refuses all but $20 of a $50,000 wallet.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "start": "node drain.ts"
+  },
+  "dependencies": {
+    "sweetrust": "^0.7.0"
+  }
+}
