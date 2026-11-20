@@ -1,0 +1,16 @@
+{
+  "name": "sweetrust-example-morse-heist",
+  "private": true,
+  "description": "The Morse code heist, retold on mocks three times: no guard, a spending limit, provenance.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=20.19"
+  },
+  "scripts": {
+    "start": "node heist.mjs"
+  },
+  "dependencies": {
+    "sweetrust": "^0.7.0"
+  }
+}
