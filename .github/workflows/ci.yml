@@ -74,7 +74,11 @@ jobs:
       - if: matrix.typecheck
         run: pnpm typecheck
       # The examples install sweetrust from npm, as a stranger would, so this checks the
-      # published release, not this commit. The scripts exit 2 when a control fails.
+      # published release, not this commit. Each script exits non-zero when a run ends
+      # differently from what its README says (or a control fails).
+      - name: examples/morse-heist runs against the published sweetrust
+        working-directory: examples/morse-heist
+        run: npm install --no-audit --no-fund && npm start
       - name: examples/spending-cap runs against the published sweetrust
         working-directory: examples/spending-cap
         run: npm install --no-audit --no-fund && npm start
