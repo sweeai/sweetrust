@@ -1,11 +1,38 @@
-# Publishes `sweetrust` to npm when a `v*` tag is pushed, with npm provenance.
+# Stages `sweetrust` on npm when a `v*` tag is pushed, with npm provenance. Nothing is
+# installable until a maintainer approves the staged version.
 #
-# Trusted publishing (OIDC): no npm token exists anywhere, not in this repo's
-# secrets and not on a laptop. npmjs.com trusts exactly this workflow file in
-# this repository (package settings → Trusted Publisher → GitHub Actions,
-# repository sweeai/sweetrust, workflow release.yml). GitHub mints a short-lived
-# identity token for this run; npm exchanges it for a one-time publish right and
-# signs a provenance statement linking the tarball to the commit that built it.
+# Two jobs, so the job that can ask for the registry login token runs no dependency code:
+#   build  installs dependencies, runs the package's gates, packs the tarball and records its
+#          integrity. It has no id-token permission and no environment.
+#   stage  downloads that tarball, checks it is the same file the build job packed (this catches
+#          a mix-up between the jobs, not a compromised build: the build job writes both the
+#          file and its recorded integrity), and stages it
+#          with npm. It installs nothing and checks out nothing. It runs in the `release`
+#          environment and is the only job with id-token: write.
+#
+# Two approvals stand between a tag and a release:
+#   1. The `release` environment, which lives in the repository's settings, not in this file
+#      (RELEASING.md § One-time setup). Once it exists with a required reviewer, the stage job
+#      waits at "Waiting for review" until the reviewer approves the run on GitHub, the
+#      environment accepts only the tag patterns `v*` and `sweetrust-sui@*` as the run's ref,
+#      and administrators cannot bypass it. A job that names an environment the repository lacks
+#      runs unprotected. It binds only runs of this file as written: a tag on a commit that
+#      edits this file can drop the environment and skip this approval, so it stops a mistaken
+#      or unexpected run, not a determined one.
+#   2. Staging. `npm stage publish` uploads the tarball in a state nobody can install; a
+#      maintainer approves it with 2FA on npmjs.com → Staged Packages (or `npm stage approve`).
+#      This is the approval that holds even if someone with push access edits the workflow.
+# A compromised workflow or a stolen tag can stage, but only a person can release. npm's own
+# advice for trust relationships: "only enable npm stage publish … and disable npm publish"
+# (`npm help stage`).
+#
+# Trusted publishing (OIDC): no npm token exists anywhere, not in this repo's secrets and not
+# on a laptop. npmjs.com trusts exactly this workflow file in this repository (package
+# settings → Trusted Publisher → GitHub Actions, repository sweeai/sweetrust, workflow
+# release.yml, environment release, "Allow npm publish" unticked). GitHub mints a short-lived
+# identity token for the stage job; npm exchanges it for a staging right and signs a
+# provenance statement linking the tarball to the commit that built it. RELEASING.md has the
+# steps.
 #
 # Actions are pinned to full commit SHAs, as in ci.yml.
 
@@ -14,55 +41,60 @@ name: release
 on:
   push:
     tags: ["v*"]
-  # Re-run a publish for an existing tag (for example, after the npm side was
-  # configured). The workflow file on the default branch runs; it checks out the tag.
+  # Re-stage an existing tag (for example, after the npm side was configured). Run it with
+  # the tag itself selected as the ref, never main: the environment (once configured)
+  # refuses any other ref, and the first step of the build job, which is code, refuses a ref that
+  # is not the tag named in the input.
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing tag to publish, e.g. v0.5.0"
+        description: "Existing tag to stage, e.g. v0.5.0 (select the same tag as the ref)"
         required: true
 
-# id-token: write lets this run ask GitHub for the OIDC token npm verifies.
-# Nothing here writes to the repository.
-permissions:
-  contents: read
-  id-token: write
+# No permission by default. Each job below grants itself what it needs.
+permissions: {}
 
-# Never two publishes at once, and never cancel one halfway.
+# Never two releases at once, and never cancel one halfway. A run waiting for review holds the
+# group, so the next release queues behind it.
 concurrency:
   group: release
   cancel-in-progress: false
 
 jobs:
-  publish:
+  build:
+    name: build and pack
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # Read-only, and no id-token: nothing that runs here can ask for the registry login token.
+    permissions:
+      contents: read
     env:
       TAG: ${{ inputs.tag || github.ref_name }}
+    outputs:
+      integrity: ${{ steps.pack.outputs.integrity }}
     steps:
+      # The stage job's environment approves a ref. A dispatch whose ref is one tag and whose
+      # input is another would stage code the approver never saw named, so the two must agree.
+      - name: the run is on the tag it stages
+        run: |
+          if [ "$GITHUB_REF_TYPE" != "tag" ] || [ "$GITHUB_REF_NAME" != "$TAG" ]; then
+            echo "this run is on $GITHUB_REF_TYPE $GITHUB_REF_NAME, but the tag to stage is $TAG" >&2
+            exit 1
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.tag || github.ref }}
           persist-credentials: false
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0, reads packageManager
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          # Trusted publishing needs Node ≥ 22.14 and npm ≥ 11.5.1.
           node-version: "24.x"
           check-latest: true
-          registry-url: "https://registry.npmjs.org"
-          cache: pnpm
+          # No dependency cache on a release job: a tag run could restore a cache that another
+          # run wrote, and what goes into the tarball must come from the lockfile alone. Set
+          # explicitly, because setup-node turns caching on by itself for some packageManager values.
+          package-manager-cache: false
 
-      - name: npm can do trusted publishing (≥ 11.5.1)
-        run: |
-          v=$(npm --version)
-          node -e '
-            const [a, b, c] = process.argv[1].split(".").map(Number)
-            const ok = a > 11 || (a === 11 && (b > 5 || (b === 5 && c >= 1)))
-            if (!ok) { console.error(`npm ${process.argv[1]} < 11.5.1`); process.exit(1) }
-            console.log(`npm ${process.argv[1]}`)' "$v"
-
-      # A tag that disagrees with package.json would publish a version nobody tagged.
+      # A tag that disagrees with package.json would stage a version nobody tagged.
       - name: tag matches package.json
         run: |
           v=$(node -p 'require("./packages/trust/package.json").version')
@@ -70,11 +102,108 @@ jobs:
             echo "tag $TAG does not match package.json version v$v" >&2
             exit 1
           fi
-          echo "publishing sweetrust@$v from $TAG"
+          echo "building sweetrust@$v from $TAG"
 
       - run: pnpm install --frozen-lockfile
 
-      # prepublishOnly re-runs build → test → typecheck before anything is uploaded.
-      - name: publish
+      # Staging a tarball file does not run prepublishOnly, so run the package's own gate list
+      # here: build → test → typecheck. A failure stops the release before anything is packed.
+      - name: gates
         working-directory: packages/trust
-        run: npm publish --provenance --access public
+        run: pnpm run prepublishOnly
+
+      - name: pack
+        id: pack
+        working-directory: packages/trust
+        run: |
+          out="$RUNNER_TEMP/tarball"
+          mkdir -p "$out"
+          npm pack --json --pack-destination "$out" > "$RUNNER_TEMP/pack.json"
+          node -e '
+            const [p] = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"))
+            console.log(`file=${p.filename}`)
+            console.log(`integrity=${p.integrity}`)' "$RUNNER_TEMP/pack.json" >> "$GITHUB_OUTPUT"
+
+      # What a maintainer compares against what npm shows for the staged version.
+      - name: record what was packed
+        env:
+          FILE: ${{ steps.pack.outputs.file }}
+          INTEGRITY: ${{ steps.pack.outputs.integrity }}
+        run: |
+          {
+            echo "### sweetrust $TAG"
+            echo
+            echo "- tarball: \`$FILE\`"
+            echo "- integrity: \`$INTEGRITY\`"
+            echo "- commit: \`$GITHUB_SHA\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: tarball
+          path: ${{ runner.temp }}/tarball/*.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+  stage:
+    name: stage for approval
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Once the environment is configured, waits here for the required reviewer: no step runs, and
+    # no OIDC token exists, until the reviewer approves.
+    environment: release
+    # id-token: write lets this job ask GitHub for the OIDC token npm verifies. It is the only
+    # permission here: no checkout, no dependency install, nothing writes to the repository.
+    permissions:
+      id-token: write
+    env:
+      EXPECTED_INTEGRITY: ${{ needs.build.outputs.integrity }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: tarball
+          path: tarball
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          # Staged publishing needs Node ≥ 22.14 and npm ≥ 11.15.0 (docs.npmjs.com/staged-publishing).
+          node-version: "24.x"
+          check-latest: true
+          registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
+
+      - name: npm can stage (≥ 11.15.0)
+        run: |
+          v=$(npm --version)
+          node -e '
+            const [a, b] = process.argv[1].split(".").map(Number)
+            const ok = a > 11 || (a === 11 && b >= 15)
+            if (!ok) { console.error(`npm ${process.argv[1]} < 11.15.0`); process.exit(1) }
+            console.log(`npm ${process.argv[1]}`)' "$v"
+
+      # The check and the staging are one step, so the file that was checked is the file that
+      # is staged. The name of the file comes from the build job and is only ever quoted.
+      - name: stage for approval
+        run: |
+          set -eu
+          set -- ./tarball/*.tgz
+          if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
+            echo "expected exactly one tarball, found $#" >&2
+            exit 1
+          fi
+          # npm reads a bare "tarball/x.tgz" as the GitHub shorthand user/repo and would fetch a
+          # repository instead of this file. A path that starts with ./ is a file.
+          case "$1" in
+            ./tarball/*.tgz) ;;
+            *) echo "not a local tarball path: $1" >&2; exit 1 ;;
+          esac
+          actual="sha512-$(openssl dgst -sha512 -binary "$1" | base64 | tr -d '\n')"
+          if [ "$actual" != "$EXPECTED_INTEGRITY" ]; then
+            echo "the tarball is not the one the build job packed" >&2
+            echo "  build job recorded: $EXPECTED_INTEGRITY" >&2
+            echo "  this job received:  $actual" >&2
+            exit 1
+          fi
+          echo "staging $1 ($actual)"
+          # A tarball's own publishConfig can set npm options; the command line wins.
+          npm stage publish "$1" --provenance --access public --registry=https://registry.npmjs.org/ --ignore-scripts

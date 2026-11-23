@@ -1,0 +1,44 @@
+# Lints every workflow in this repository on each pull request with zizmor, a static
+# analyzer for unsafe GitHub Actions settings (excess permissions, template injection,
+# unpinned actions, cache poisoning, dangerous triggers). A finding fails this check. The check
+# blocks a merge only where the repository's rules require it, and a pull request can edit this
+# file, so it catches accidents and reviewers who skip workflow diffs, not a determined editor.
+#
+# Both the action and the scanner are pinned. The action is pinned to a full commit SHA, as in
+# ci.yml. The scanner's exact version is set below; the action's script installs that version
+# with `pip download --require-hashes` from a lockfile that lives in the action's own tree
+# (read at the pinned commit), so a newer zizmor never changes what runs here until this file
+# changes.
+#
+# Findings appear as annotations on the pull request. The SARIF upload to the security tab is
+# off, which keeps this job at read-only permissions.
+
+name: zizmor
+
+on:
+  pull_request:
+
+# No permission by default. The one job below asks for a read-only token.
+permissions: {}
+
+# A newer push to a pull request cancels its older run.
+concurrency:
+  group: zizmor-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  zizmor:
+    name: lint workflows
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: zizmorcore/zizmor-action@45d7276c9ca790aabd705e31ca99c6185c3e76dd # v0.8.1
+        with:
+          version: "1.32.0"
+          advanced-security: false
+          annotations: true
