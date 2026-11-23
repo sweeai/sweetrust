@@ -334,9 +334,11 @@ const pay = makeSink({ name: "pay", requires: { to: "verified" }, mode: "enforce
 
 // …session runs. Publish log.exportJSONL() + the PUBLIC key, and seal log.head()
 // in an on-chain memo. A stranger verifies:
+const anchor = parseAnchorMemo(memoFromChain)
+if (anchor === null) throw new Error("that memo is not an anchor: refusing to verify without one")
 const report = verifySignedChain(parseJSONL(file), {
   trustedSignerPublicKeyHex: publishedKey,
-  anchor: parseAnchorMemo(memoFromChain) ?? undefined,
+  anchor,
 })
 ```
 
