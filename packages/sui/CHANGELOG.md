@@ -12,6 +12,18 @@ from `library` or `nobody` to `chain` when a Sui primitive with a public package
 `why` sentences are written for people and may be reworded in any release: match on `code` and
 `native`, never on `why`.
 
+## Unreleased
+
+### Fixed
+
+- Correction to a sentence in the 0.1.0 notes below. They say a thrown submit "is never reported as a
+  refusal, so a retry cannot pay twice or open a second allowance". That is stronger than the code
+  supports. After a lost payment the outcome is unknown, and a look-up that finds nothing does not
+  prove the payment will never land: on the address-balance gas path a signed transaction is bounded
+  only by an epoch range, so it may stay valid for about a day or two (reasoned from the SDK and
+  Sui's epoch length, not yet tested on a live network). Look the digest up before retrying, and
+  treat "not found" as "unknown". This note supersedes that sentence.
+
 ## [0.1.0] — 2026-11-15
 
 The first release. It needs `sweetrust` 0.7.0, because 0.6.0 ignores `judgment.spelling`, and its
