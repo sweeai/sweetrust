@@ -14,6 +14,30 @@ from `library` or `nobody` to `chain` when a Sui primitive with a public package
 
 ## Unreleased
 
+### Changed
+
+- **`spend` and `remaining` refuse a handle whose `limits` (or `limits.rate`) is not plain data.** The
+  released 0.1.0 read each limit by name, so it read, and enforced, a limit held on a prototype, behind a
+  getter, in a non-enumerable property or in a class instance. Such a handle now makes them throw a
+  `TypeError` that names the field, before anything is sent. Each limit is read once the ordinary way,
+  first, in the order 0.1.0 read it, and must equal the plain-data copy, or the
+  handle is refused (a Proxy that hides or changes a key is refused this way, and so is an `Object.prototype` polluted
+  with a limit the object does not hold itself). The values used are the ones that first read returned, so a Proxy that faithfully forwards its reads
+  is read like plain data. `limits: []` is refused too: 0.1.0 read an empty array as no limits, so `spend`
+  paid any address. A plain object made in another realm
+  (a `vm` context) is refused too, since its prototype is not this realm's `Object.prototype`. The refusal
+  is deliberate: a recipient list or `perSpendMax` that is dropped, and not enforced, would let `spend` pay
+  any address. Handles `open()` returns, and handles saved as JSON and loaded back, are plain data and are
+  unaffected.
+- **`revoke` no longer reads the handle's `limits` at all, and its receipt no longer lists limit lines.**
+  A revoke deletes the allowance object, and Sui refuses every later spend against it whatever limits it
+  held, so the limits only ever fed its receipt lines. `revoke` now reads only the handle's identity
+  fields (network, asset, allowance id, cap id, funder, spender), with the same strict intake as before, and
+  revokes whatever `limits` holds. An executed revoke's receipt has `limits: []`, and its summary says the
+  revoke did not read them. Before, a revoke threw on any `limits` its strict intake refused, and an executed
+  one listed each limit the handle carried as `revoked`, unless the handle named another coin, when it
+  listed none; no receipt carries `revoked` now.
+
 ### Fixed
 
 - Correction to a sentence in the 0.1.0 notes below. They say a thrown submit "is never reported as a
@@ -23,6 +47,15 @@ from `library` or `nobody` to `chain` when a Sui primitive with a public package
   only by an epoch range, so it may stay valid for about a day or two (reasoned from the SDK and
   Sui's epoch length, not yet tested on a live network). Look the digest up before retrying, and
   treat "not found" as "unknown". This note supersedes that sentence.
+- **A handle you saved as JSON and loaded back now works for `revoke`, `spend` and `remaining`.** Before, a
+  loaded handle held its `lifetimeCap` and `rate.amount` as strings and its `start` and `expiry` as the strings
+  `toISOString` writes, and all three verbs threw a `TypeError` naming the first such field before sending anything, so the
+  funder's `revoke` depended on fields it only writes into a receipt line. Write the handle with a
+  bigint-to-string replacer and read it with plain `JSON.parse`; no reviver is needed. For `spend` and `remaining`, a handle from `open()` (bigints and `Date`s) is
+  read as before, and a limit in neither that form nor the JSON one (a decimal string of base units for
+  `lifetimeCap`, `rate.amount` and `perSpendMax`, a time in the form `Date.prototype.toISOString` writes for `start` and `expiry`) is still refused with a `TypeError` that names the field, and nothing is sent (`revoke` does not
+  read limits, see Changed). A JSON number is refused too, because `JSON.parse` may already have rounded it,
+  and so is a time of day past 23:59:59 (`T24:00:00Z` would roll into the next day). `open()` still takes only a bigint and a `Date`.
 
 ## [0.1.0] — 2026-11-15
 

@@ -158,8 +158,10 @@ export interface Refusal {
  * - `unchecked`: not evaluated, because an earlier check refused first,
  *   nothing was sent, or the chain could not be read.
  * - `unheld`: nobody can hold it, so the open was refused.
- * - `revoked`: an executed revoke deleted the allowance. Only that receipt
- *   carries it; a read that finds nothing is `unchecked`.
+ * - `revoked`: an executed revoke deleted the allowance. The Sui adapter no
+ *   longer writes it: `revoke` does not read the handle's limits, so its
+ *   receipt has no limit lines (DAN-1593). It stays in the type so receipts
+ *   written before then still type-check.
  */
 export type LimitVerdict = "held" | "within" | "outside" | "unchecked" | "unheld" | "revoked"
 

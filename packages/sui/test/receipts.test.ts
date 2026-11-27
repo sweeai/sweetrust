@@ -360,14 +360,14 @@ describe("spend(): rejected before execution", () => {
 // ── revoke() ─────────────────────────────────────────────────────────────────
 
 describe("revoke()", () => {
-  it("consumes the AllowanceCap and marks every limit revoked", async () => {
+  it("consumes the AllowanceCap; the receipt lists no limit lines, because revoke does not read the handle's limits", async () => {
     const chain = mockChain(allowanceState({ funder: P, spender: A, rate: windowed(0n, null) }), 0n)
     chain.script.push({ kind: "executed", digest: DIGEST(3), timestampMs: ANCHOR, after: null })
     const r = await adapter(chain).revoke({ signer: principal, allowance: handle({ rate: RATE, recipients: [MERCHANT] }) })
     expect(targetsOf(chain.executed[0].bytes)).toEqual(["0x2::allowance::revoke"])
     expect(r).toMatchObject({ verb: "revoke", verdict: "executed", digest: signedDigest(chain), refusal: null })
-    expect(r.limits.map((l) => [l.limit, l.heldBy, l.verdict])).toEqual([["rate", "chain", "revoked"], ["recipients", "library", "revoked"]])
-    expect(r.summary).toContain("Sui refuses every later spend against it")
+    expect(r.limits).toEqual([])
+    expect(r.summary).toContain("Sui refuses every later spend against it from any client, whatever limits it held, and revoke does not read the handle's limits.")
   })
 })
 

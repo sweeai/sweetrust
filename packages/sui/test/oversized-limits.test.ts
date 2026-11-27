@@ -1,8 +1,9 @@
 /**
  * A limit past u256 (DAN-1469). Formatting `1n << 1073741000n` never finishes,
  * so a limit that size must never reach `scale.format` or a template string.
- * On a hand-built handle it is a programmer error, thrown at intake before any
- * chain read; at `open()` it stays a refusal, with today's code, and the value
+ * On a hand-built handle it is a programmer error for spend and remaining, thrown
+ * at intake before any chain read; revoke never reads the limits, so it revokes
+ * and writes no limit lines. At `open()` it stays a refusal, with today's code, and the value
  * is named by one fixed phrase. Each test answering at all is part of the proof:
  * the huge cases would otherwise hang the worker.
  */
@@ -10,7 +11,7 @@ import { describe, expect, it, vi } from "vitest"
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519"
 import { normalizeSuiAddress } from "@mysten/sui/utils"
 import { defineScale, suiAllowances, type AllowanceLimits, type DelegatedAllowance, type SuiAllowance } from "../src/index.ts"
-import { ALLOWANCE_ID, CAP_ID, allowanceState, mockChain, type MockChain } from "./helpers/mock-chain.ts"
+import { ALLOWANCE_ID, CAP_ID, DIGEST, allowanceState, mockChain, type MockChain } from "./helpers/mock-chain.ts"
 
 const principal = Ed25519Keypair.generate()
 const agent = Ed25519Keypair.generate()
@@ -45,7 +46,7 @@ describe("a hand-built handle with a limit past u256 is a programmer error, thro
   for (const field of ["lifetimeCap", "rate.amount", "perSpendMax"] as const) {
     it.each([
       ["huge", HUGE], ["huge negative", -HUGE], ["just past u256", JUST_PAST], ["just past -u256", -JUST_PAST],
-    ] as const)(`${field} %s: spend, revoke and remaining throw a TypeError naming the field and u256, before any chain read`, async (_label, v) => {
+    ] as const)(`${field} %s: spend and remaining throw a TypeError naming the field and u256, before any chain read; revoke revokes with no limit lines`, async (_label, v) => {
       const chain = mockChain(allowanceState({ funder: P, spender: A }), 0n)
       const core = chain.client.core as unknown as Record<string, (...a: Array<unknown>) => unknown>
       const spies = Object.keys(core).map((k) => vi.spyOn(core, k))
@@ -53,7 +54,6 @@ describe("a hand-built handle with a limit past u256 is a programmer error, thro
       const a = adapter(chain)
       for (const call of [
         () => a.spend({ signer: agent, allowance: bad, amount: 1n, recipient: MERCHANT }),
-        () => a.revoke({ signer: principal, allowance: bad }),
         () => a.remaining({ allowance: bad }),
       ]) {
         const err = await call().then(() => null, (e: unknown) => e)
@@ -65,6 +65,10 @@ describe("a hand-built handle with a limit past u256 is a programmer error, thro
       }
       expect(spies.reduce((n, s) => n + s.mock.calls.length, 0)).toBe(0)
       expect(chain.executed).toHaveLength(0)
+      chain.script.push({ kind: "executed", digest: DIGEST(1), timestampMs: 0, after: null })
+      const revoked = await a.revoke({ signer: principal, allowance: bad })
+      expect(revoked.verdict).toBe("executed")
+      expect(revoked.limits).toEqual([])
     })
   }
 
