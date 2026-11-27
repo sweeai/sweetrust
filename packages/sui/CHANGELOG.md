@@ -56,6 +56,17 @@ from `library` or `nobody` to `chain` when a Sui primitive with a public package
   `lifetimeCap`, `rate.amount` and `perSpendMax`, a time in the form `Date.prototype.toISOString` writes for `start` and `expiry`) is still refused with a `TypeError` that names the field, and nothing is sent (`revoke` does not
   read limits, see Changed). A JSON number is refused too, because `JSON.parse` may already have rounded it,
   and so is a time of day past 23:59:59 (`T24:00:00Z` would roll into the next day). `open()` still takes only a bigint and a `Date`.
+- **A spend receipt no longer says Sui checked a limit when the allowance could not be read after the
+  spend.** Before, an executed spend whose read of the allowance afterwards returned no decoded allowance,
+  for whatever reason, marked each chain-held limit `within` with "Sui checked it" and the handle's value.
+  Each such line is now `unchecked`: its reason says that Sui enforced whatever limits the allowance holds,
+  that sweetrust-sui could not re-read the allowance to say which or at what value, and that the value shown
+  is the handle's. A spend Sui refused on chain keeps its verdicts. When Sui's abort names a limit and the
+  allowance cannot be read after the refusal, the reasons now say that the values shown are the handle's,
+  and that the receipt cannot confirm whether Sui checked the other limits. On a spend Sui refused, a chain-held
+  line is `outside` only when Sui's abort names that limit and the handle carries it; if the handle does
+  not carry it, no limit line is `outside`, and the refusal (its `code` and `why`) names the limit. A "holds no the lifetime cap" slip in an `unchecked`
+  reason is also fixed.
 
 ## [0.1.0] — 2026-11-15
 

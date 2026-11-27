@@ -1173,7 +1173,7 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
       if (holder(l) !== "chain" || st === null) return null
       const missing = l === "lifetimeCap" ? st.lifetimeCap === null : l === "rate" ? st.rate === null : l === "start" ? st.startMs === null : l === "expiry" ? st.expiryMs === null : false
       if (!missing) return null
-      return line(l, "none on chain", "chain", "unchecked", `Not checked by Sui: the handle passed to spend() says ${limitValue(l, h.limits, scale)}, but allowance ${h.allowanceId} on chain holds no ${limitWords(l)}, so Sui checked none.`)
+      return line(l, "none on chain", "chain", "unchecked", `Not checked by Sui: the handle passed to spend() says ${limitValue(l, h.limits, scale)}, but allowance ${h.allowanceId} on chain holds no ${limitWords(l).replace(/^the /, "")}, so Sui checked none.`)
     }
     const notSent = (code: RefusalCode, why: string, own: Partial<Record<LimitName, LimitLine>> = {}): AllowanceReceipt =>
       finish(receiptOf({
@@ -1305,10 +1305,14 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
     if (out.kind === "executed") {
       const lines = present.map((l) => {
         if (l === "recipients") return recipientsWithin()
-        const absent = absentOnChain(l, facts === null ? null : facts.state)
+        // The read after the spend returned no decoded allowance, for whatever reason. The spend executed, so Sui
+        // enforced whatever limits the allowance holds, but which ones and at what values cannot be
+        // reported, and the handle's value is not the chain's, so the line is `unchecked` and says why.
+        if (facts === null) return line(l, limitValue(l, h.limits, scale), holder(l), "unchecked", `Not re-read: the spend executed, so Sui enforced whatever limits this allowance holds, but sweetrust-sui could not re-read the allowance after the spend, so it cannot say whether Sui holds this limit or at what value. The value shown is the handle's, not the chain's.`)
+        const absent = absentOnChain(l, facts.state)
         if (absent !== null) return absent
-        const { value, flag } = heldValue(l, facts === null ? null : facts.state)
-        return line(l, value, holder(l), "within", (facts === null ? "Sui checked it: the spend executed." : chainWithinWhy(l, facts)) + flag)
+        const { value, flag } = heldValue(l, facts.state)
+        return line(l, value, holder(l), "within", chainWithinWhy(l, facts) + flag)
       })
       return finish(receiptOf({
         ...base, recipient, verdict: "executed", digest: out.digest, ...at, limits: lines, refusal: null,
@@ -1328,7 +1332,7 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
       code = failed === "lifetimeCap" ? "lifetime-cap-exceeded" : failed === "rate" ? "rate-exceeded" : failed === "start" ? "not-started" : "expired"
     } else if (failed !== null) {
       code = failed === "lifetimeCap" ? "lifetime-cap-exceeded" : failed === "rate" ? "rate-exceeded" : failed === "start" ? "not-started" : "expired"
-      why = `Refused by Sui validators (allowance::${native?.abortName}): this spend was outside ${limitWords(failed)}. sweetrust-sui could not read the allowance afterwards, so the numbers are not shown; the digest has them.`
+      why = `Refused by Sui validators (allowance::${native?.abortName}): this spend was outside ${limitWords(failed)}. sweetrust-sui could not read the allowance afterwards, so each value on this receipt's limit lines is the handle's, not read from chain; the digest has the chain's.`
     } else if (native?.abortName === "ENotSpender") {
       code = "not-spender"
       why = `Refused by Sui validators (allowance::ENotSpender): the transaction was signed by ${normAddr(signer.toSuiAddress())}, and only the allowance's spender ${h.spender} may spend from it.`
@@ -1344,7 +1348,11 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
       const idx = CHAIN_CHECK_ORDER.indexOf(l)
       if (failed !== null && l === failed) return line(l, value, "chain", "outside", why + flag)
       if (failed !== null && idx < failedAt && facts !== null) return line(l, value, "chain", "within", chainWithinWhy(l, facts) + flag)
-      if (failed !== null) return line(l, value, "chain", "unchecked", `Not evaluated: Sui checks the start, the expiry, the lifetime cap and then the rate, and stops at the first that fails; ${limitWords(failed)} failed first.` + flag)
+      if (failed !== null) {
+        return line(l, value, "chain", "unchecked", facts === null
+          ? `Not confirmed: Sui checks the start, the expiry, the lifetime cap and then the rate, and stops at the first that fails; ${limitWords(failed)} failed, and sweetrust-sui could not read the allowance after the refusal, so this receipt cannot confirm whether Sui checked this limit. The value shown is the handle's, not the chain's.`
+          : `Not evaluated: Sui checks the start, the expiry, the lifetime cap and then the rate, and stops at the first that fails; ${limitWords(failed)} failed first.` + flag)
+      }
       return line(l, value, "chain", "unchecked", `Not evaluated: Sui refused the transaction before its limit checks${native === null ? "" : `, on ${native.abortName}`}.` + flag)
     })
     return finish(receiptOf({

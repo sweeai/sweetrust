@@ -971,8 +971,164 @@ describe("no host-supplied or chain-supplied oddity can lose a receipt after a s
     const r = await adapter(chain).spend({ signer: agent, allowance: handle({ lifetimeCap: testUSD.of(100), rate: RATE }), amount: testUSD.of(1), recipient: MERCHANT })
     expect(r.verdict).toBe("executed")
     expect(lineOf(r, "lifetimeCap")).toMatchObject({ value: "none on chain", heldBy: "chain", verdict: "unchecked" })
-    expect(lineOf(r, "lifetimeCap").why).toContain("holds no")
+    expect(lineOf(r, "lifetimeCap").why).toContain("holds no lifetime cap, so Sui checked none.")
+    expect(lineOf(r, "lifetimeCap").why).not.toContain("holds no the")
     expect(lineOf(r, "lifetimeCap").why).not.toContain("0.00 testUSD cap")
+  })
+
+  describe("a read after an executed spend that finds nothing (DAN-1594)", () => {
+    const START = ANCHOR - DAY
+    const EXPIRY = ANCHOR + DAY
+    const onChain = () => allowanceState({ funder: P, spender: A, lifetimeCap: testUSD.of(100), rate: windowed(0n, null), startMs: BigInt(START), expiryMs: BigInt(EXPIRY) })
+    const claims = () => handle({ lifetimeCap: testUSD.of(100), rate: RATE, start: new Date(START), expiry: new Date(EXPIRY), recipients: [MERCHANT] })
+    const coreOf = (chain: MockChain) => chain.client.core as unknown as Record<string, unknown>
+    const spendOnce = async (chain: MockChain): Promise<AllowanceReceipt> => {
+      chain.script.push({ kind: "executed", digest: DIGEST(1), timestampMs: ANCHOR, after: onChain() })
+      return adapter(chain).spend({ signer: agent, allowance: claims(), amount: testUSD.of(1), recipient: MERCHANT })
+    }
+    /** No chain-held line may say Sui checked a limit when nothing could be re-read; each says it could not. */
+    const expectNothingChecked = (r: AllowanceReceipt): void => {
+      expect(r.verdict).toBe("executed")
+      for (const name of ["lifetimeCap", "rate", "start", "expiry"]) {
+        const l = lineOf(r, name)
+        expect(l).toMatchObject({ heldBy: "chain", verdict: "unchecked" })
+        expect(l.verdict).not.toBe("within")
+        expect(l.why).not.toContain("Sui checked it")
+        expect(l.why).toContain("could not re-read the allowance after the spend")
+        // The spend executed, so Sui did enforce whatever limits the allowance holds: never say it did not.
+        expect(l.why).not.toContain("Not checked by Sui")
+        expect(l.why).toContain("Sui enforced whatever limits this allowance holds")
+      }
+      // The library's own check of the payee is unaffected by what the chain read says.
+      expect(lineOf(r, "recipients")).toMatchObject({ heldBy: "library", verdict: "within" })
+    }
+
+    it("a read that finds nothing leaves every chain-held limit unchecked, never within", async () => {
+      const chain = mockChain(onChain(), BigInt(ANCHOR))
+      chain.script.push({ kind: "executed", digest: DIGEST(1), timestampMs: ANCHOR, after: null })
+      expectNothingChecked(await adapter(chain).spend({ signer: agent, allowance: claims(), amount: testUSD.of(1), recipient: MERCHANT }))
+    })
+
+    it("a read that throws leaves every chain-held limit unchecked, never within", async () => {
+      const chain = mockChain(onChain(), BigInt(ANCHOR))
+      const real = coreOf(chain).getObjects as (a: { objectIds: Array<string> }) => Promise<unknown>
+      // The reads before the send work; once the transaction has been signed, reading the allowance fails.
+      coreOf(chain).getObjects = async (a: { objectIds: Array<string> }) => {
+        if (chain.executed.length > 0 && a.objectIds[0] === ALLOWANCE_ID) throw new Error("rpc down")
+        return real(a)
+      }
+      expectNothingChecked(await spendOnce(chain))
+    }, 15_000)
+
+    it("a read that never catches up with the transaction leaves every chain-held limit unchecked, never within", async () => {
+      const chain = mockChain(onChain(), BigInt(ANCHOR))
+      const realWait = coreOf(chain).waitForTransaction as (a: { digest: string }) => Promise<{ Transaction: { effects: Record<string, unknown> } }>
+      // The transaction says it wrote version 99 of the allowance; the mock fullnode only ever shows version 10.
+      coreOf(chain).waitForTransaction = async (a: { digest: string }) => {
+        const res = await realWait(a)
+        return { ...res, Transaction: { ...res.Transaction, effects: { ...res.Transaction.effects, changedObjects: [{ objectId: ALLOWANCE_ID, outputVersion: "99" }] } } }
+      }
+      expectNothingChecked(await spendOnce(chain))
+    }, 15_000)
+
+    it("content that does not decode leaves every chain-held limit unchecked, never within", async () => {
+      const chain = mockChain(onChain(), BigInt(ANCHOR))
+      const real = coreOf(chain).getObjects as (a: { objectIds: Array<string> }) => Promise<{ objects: Array<unknown> }>
+      let garbled = 0
+      // The reads before the send work; once the transaction has been signed, the allowance comes back with bytes that are not an Allowance.
+      coreOf(chain).getObjects = async (a: { objectIds: Array<string> }) => {
+        const res = await real(a)
+        if (chain.executed.length === 0 || a.objectIds[0] !== ALLOWANCE_ID) return res
+        garbled++
+        return { objects: res.objects.map((o) => (o instanceof Error ? o : { ...(o as object), content: new Uint8Array([1, 2, 3]) })) }
+      }
+      expectNothingChecked(await spendOnce(chain))
+      expect(garbled).toBeGreaterThan(0)
+    })
+
+    it("a limit the handle claims but the chain lacks, with a re-read that fails, is unchecked and not called absent: nothing could be read to say so", async () => {
+      // The chain holds only a cap and a rate; the handle also claims a start and an expiry. The read after the spend
+      // finds nothing, so "none on chain" (a fact about the object) cannot be said, and Sui's checks are not claimed either.
+      const lacks = allowanceState({ funder: P, spender: A, lifetimeCap: testUSD.of(100), rate: windowed(0n, null) })
+      const chain = mockChain(lacks, BigInt(ANCHOR))
+      chain.script.push({ kind: "executed", digest: DIGEST(1), timestampMs: ANCHOR, after: null })
+      const r = await adapter(chain).spend({ signer: agent, allowance: claims(), amount: testUSD.of(1), recipient: MERCHANT })
+      expectNothingChecked(r)
+      for (const name of ["start", "expiry"]) {
+        const l = lineOf(r, name)
+        expect(l.value).not.toBe("none on chain")
+        expect(l.why).not.toContain("holds no")
+        expect(l.why).toContain("cannot say whether Sui holds this limit or at what value")
+        expect(l.why).toContain("The value shown is the handle's, not the chain's.")
+      }
+    })
+
+    it("REGRESSION GUARD, passes before this change too, not fix proof: with a working read the handle's disagreement with the chain is still flagged, and the chain's value is shown", async () => {
+      const chain = mockChain(onChain(), BigInt(ANCHOR))
+      chain.script.push({ kind: "executed", digest: DIGEST(1), timestampMs: ANCHOR, after: { ...onChain(), currentSpend: testUSD.of(1), rate: windowed(testUSD.of(1), ANCHOR) } })
+      const r = await adapter(chain).spend({ signer: agent, allowance: handle({ lifetimeCap: testUSD.of(10), rate: RATE }), amount: testUSD.of(1), recipient: MERCHANT })
+      expect(r.verdict).toBe("executed")
+      const cap = lineOf(r, "lifetimeCap")
+      expect(cap).toMatchObject({ heldBy: "chain", verdict: "within" })
+      expect(cap.why).toContain("Sui checked it")
+      expect(cap.why).toContain("the handle passed to spend() said 10.00 testUSD in total")
+      expect(cap.why).toContain("the chain's value shown here is authoritative")
+    })
+  })
+
+  describe("a spend Sui refused on chain, with a read afterwards that fails (DAN-1594)", () => {
+    const START = ANCHOR - DAY
+    const EXPIRY = ANCHOR + DAY
+    const onChain = () => allowanceState({ funder: P, spender: A, lifetimeCap: testUSD.of(100), rate: windowed(0n, null), startMs: BigInt(START), expiryMs: BigInt(EXPIRY) })
+    const coreOf = (chain: MockChain) => chain.client.core as unknown as Record<string, unknown>
+    /** Sui aborts with `abortName`, and every read of the allowance after the transaction throws. */
+    const refusedUnread = async (abortName: string, errorCode: number, limits: Parameters<typeof handle>[0]): Promise<AllowanceReceipt> => {
+      const chain = mockChain(onChain(), BigInt(ANCHOR))
+      const real = coreOf(chain).getObjects as (a: { objectIds: Array<string> }) => Promise<unknown>
+      coreOf(chain).getObjects = async (a: { objectIds: Array<string> }) => {
+        if (chain.executed.length > 0 && a.objectIds[0] === ALLOWANCE_ID) throw new Error("rpc down")
+        return real(a)
+      }
+      chain.script.push({ kind: "abort", digest: DIGEST(2), timestampMs: ANCHOR, abortName, errorCode })
+      const r = await adapter(chain).spend({ signer: agent, allowance: handle(limits), amount: testUSD.of(1), recipient: MERCHANT })
+      expect(chain.executed).toHaveLength(1)
+      expect(r.verdict).toBe("refused")
+      return r
+    }
+    const ALL = { lifetimeCap: testUSD.of(100), rate: RATE, start: new Date(START), expiry: new Date(EXPIRY) }
+
+    it("the limit the abort names is outside, with the handle's value and a reason that says so", async () => {
+      const r = await refusedUnread("EExceedsLifetimeCap", 3, ALL)
+      expect(r.refusal?.code).toBe("lifetime-cap-exceeded")
+      const cap = lineOf(r, "lifetimeCap")
+      expect(cap).toMatchObject({ heldBy: "chain", verdict: "outside", value: "100.00 testUSD in total" })
+      expect(cap.why).toContain("each value on this receipt's limit lines is the handle's, not read from chain")
+      expect(cap.why).not.toContain("the numbers are not shown")
+      expect(r.limits.filter((l) => l.verdict === "outside").map((l) => l.limit)).toEqual(["lifetimeCap"])
+    }, 15_000)
+
+    it("the limits Sui reached before the failing one, and the one after, are unchecked: the receipt cannot confirm Sui checked them", async () => {
+      const r = await refusedUnread("EExceedsLifetimeCap", 3, ALL)
+      // Sui checks start and expiry before the cap (it reached and passed them) and the rate after (it never got there).
+      for (const name of ["start", "expiry", "rate"]) {
+        const l = lineOf(r, name)
+        expect(l).toMatchObject({ heldBy: "chain", verdict: "unchecked" })
+        expect(l.why).toContain("could not read the allowance after the refusal, so this receipt cannot confirm whether Sui checked this limit")
+        expect(l.why).toContain("The value shown is the handle's, not the chain's.")
+        expect(l.why).not.toMatch(/^Not evaluated/)
+      }
+    }, 15_000)
+
+    it("REGRESSION GUARD, passes before this change too, not fix proof: an abort naming a limit the handle does not carry leaves no outside line; the refusal's code and why name it", async () => {
+      const { expiry: _none, ...noExpiry } = ALL
+      const r = await refusedUnread("EExpired", 2, noExpiry)
+      expect(r.refusal?.code).toBe("expired")
+      expect(r.refusal?.why).toContain("outside the expiry")
+      expect(r.limits.map((l) => l.limit)).not.toContain("expiry")
+      expect(r.limits.filter((l) => l.verdict === "outside")).toEqual([])
+      for (const l of r.limits) expect(l.verdict).toBe("unchecked")
+    }, 15_000)
+
   })
 })
 
