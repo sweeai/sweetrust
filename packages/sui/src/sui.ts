@@ -304,13 +304,17 @@ const LIMIT_KEYS: ReadonlySet<string> = new Set(["lifetimeCap", "rate", "start",
 
 // ── Intake: every argument is read once, here, and never again ───────────────
 
+function refuseUnknownKeys(where: string, keys: ReadonlyArray<string>): void {
+  for (const k of keys) {
+    if (!LIMIT_KEYS.has(k)) throw typeErr(where, `limits has an unknown key ${JSON.stringify(k)}; the limits are lifetimeCap, rate, start, expiry, recipients, perSpendMax. A misspelled key would be dropped silently, so it is refused.`)
+  }
+}
+
 function snapshotLimits(where: string, l: AllowanceLimits): AllowanceLimits {
   if (typeof l !== "object" || l === null) throw typeErr(where, "limits must be an object")
   // A key outside the six is refused, never ignored: `recipient` or `maxPerSpend`
   // would otherwise open with no recipient check and no per-spend refusal (ruling 1).
-  for (const k of Object.keys(l)) {
-    if (!LIMIT_KEYS.has(k)) throw typeErr(where, `limits has an unknown key ${JSON.stringify(k)}; the limits are lifetimeCap, rate, start, expiry, recipients, perSpendMax. A misspelled key would be dropped silently, so it is refused.`)
-  }
+  refuseUnknownKeys(where, Object.keys(l))
   const lifetimeCap = l.lifetimeCap
   const rate = l.rate
   const start = l.start
@@ -352,6 +356,117 @@ function snapshotLimits(where: string, l: AllowanceLimits): AllowanceLimits {
 }
 
 /**
+ * A decimal digit string, as JSON holds a bigint; anything else is left for `snapshotLimits` to refuse.
+ * A JSON number is refused, never read: `JSON.parse("999.99999999999999999")` is already `1000` by the time
+ * it gets here, so a number cannot be told from a rounded fraction. The README's replacer writes strings.
+ */
+function persistedAmount(where: string, field: string, v: unknown): unknown {
+  if (typeof v === "number") throw typeErr(where, `${field} must be a bigint, or the decimal digits of one as a handle saved as JSON holds it; a JSON number may have been rounded, so it is refused`)
+  if (typeof v !== "string") return v
+  // 100 digits is past u256 (78 digits) with room to spare; a longer string is refused before BigInt reads it.
+  if (!/^\d+$/.test(v) || v.length > 100) throw typeErr(where, `${field} must be a bigint, or the decimal digits of one as a handle saved as JSON holds it`)
+  return BigInt(v)
+}
+
+// Four-digit years, or the six-digit signed form `toISOString()` writes past year 9999 (an expiry of 8.64e15 ms is one).
+const ISO_8601 = /^(\d{4}|[+-]\d{6})-(\d{2})-(\d{2})T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/
+
+/** True when the year, month and day name a real date: `Date.parse` would roll 2026-02-31 into March. */
+function isCalendarDate(year: number, month: number, day: number): boolean {
+  const probe = new Date(0)
+  probe.setUTCFullYear(year, month - 1, day)
+  return probe.getUTCFullYear() === year && probe.getUTCMonth() === month - 1 && probe.getUTCDate() === day
+}
+
+/** A time in the form `Date.prototype.toISOString` writes, as JSON holds a Date; anything else is left for `snapshotLimits` to refuse. */
+function persistedDate(where: string, field: string, v: unknown): unknown {
+  if (typeof v !== "string") return v
+  const m = ISO_8601.exec(v)
+  const ms = m !== null && isCalendarDate(Number(m[1]), Number(m[2]), Number(m[3])) ? Date.parse(v) : Number.NaN
+  if (Number.isNaN(ms)) throw typeErr(where, `${field} must be a Date, or a time in the form Date.prototype.toISOString writes, as a handle saved as JSON holds it`)
+  return new Date(ms)
+}
+
+/**
+ * The limits of a handle that may have been saved as JSON and loaded back: `open()` returns bigint and
+ * Date, and JSON holds them as a decimal string and the string `toISOString` writes. Those two forms are read
+ * back; anything else is refused, by a stricter intake than 0.1.0's, so nothing is sent on a malformed one.
+ * Only handles come through here: `open()`'s own limits go straight to `snapshotLimits`, typed.
+ */
+function snapshotPersistedLimits(where: string, l: AllowanceLimits): AllowanceLimits {
+  if (typeof l !== "object" || l === null) return snapshotLimits(where, l)
+  // First, before any code of the caller's runs for any other reason, read the limits in 0.1.0's order:
+  // `Object.keys` for the unknown-key check, one ordinary read per limit, rate's two fields, each Date's time,
+  // then one pass over the recipient list. Neither a Proxy's traps nor a getter can then tell this intake from
+  // 0.1.0's by when they run, so the values used are the ones 0.1.0 read and enforced.
+  refuseUnknownKeys(where, Object.keys(l))
+  const read: Record<string, unknown> = Object.create(null) as Record<string, unknown>
+  for (const k of LIMIT_KEYS) read[k] = Reflect.get(l, k)
+  const rateRead: Record<string, unknown> = Object.create(null) as Record<string, unknown>
+  const r = read.rate
+  if (typeof r === "object" && r !== null) for (const k of ["amount", "windowMs"]) rateRead[k] = Reflect.get(r, k)
+  const start = read.start instanceof Date ? new Date(read.start.getTime()) : undefined
+  const expiry = read.expiry instanceof Date ? new Date(read.expiry.getTime()) : undefined
+  const recipients = Array.isArray(read.recipients) ? [...(read.recipients as unknown[])] : undefined
+  // Then fail closed: only a plain data object is accepted. A limit that sits on a prototype, behind a getter or
+  // in a non-enumerable property is invisible to a copy of the own enumerable keys, and a dropped recipient list or
+  // perSpendMax would let `spend` pay any address. Every copied value must be the value read first, or the handle
+  // is refused, so this step can only refuse: it never changes a value that is used.
+  const copy = plainData(where, "limits", l)
+  agreesWithRead(where, "limits", read, copy)
+  if (start !== undefined) copy.start = start
+  if (expiry !== undefined) copy.expiry = expiry
+  if (recipients !== undefined) copy.recipients = recipients
+  if ("lifetimeCap" in copy) copy.lifetimeCap = persistedAmount(where, "limits.lifetimeCap", copy.lifetimeCap)
+  if ("perSpendMax" in copy) copy.perSpendMax = persistedAmount(where, "limits.perSpendMax", copy.perSpendMax)
+  if ("start" in copy) copy.start = persistedDate(where, "limits.start", copy.start)
+  if ("expiry" in copy) copy.expiry = persistedDate(where, "limits.expiry", copy.expiry)
+  const rate = copy.rate
+  if (typeof rate === "object" && rate !== null) {
+    const own = plainData(where, "limits.rate", rate)
+    agreesWithRead(where, "limits.rate", rateRead, own)
+    const { amount, windowMs } = own
+    copy.rate = { amount: persistedAmount(where, "limits.rate.amount", amount), windowMs }
+  }
+  return snapshotLimits(where, copy as AllowanceLimits)
+}
+
+/**
+ * A copy of a plain data object's own properties, read from their descriptors, so no getter runs and no
+ * prototype is consulted. The copy has no prototype: JSON.parse makes "__proto__" an own key, and assigning
+ * it to a plain {} would swap the copy's prototype instead of adding a key, so the unknown-key check would
+ * never see it. Anything that is not a plain data object is a TypeError naming `field`.
+ */
+function plainData(where: string, field: string, o: object): Record<string, unknown> {
+  const proto: unknown = Object.getPrototypeOf(o)
+  if (proto !== Object.prototype && proto !== null) throw typeErr(where, `${field} must be a plain object: its prototype is neither Object.prototype nor null, so a limit on it would go unread and unenforced`)
+  const out: Record<string, unknown> = Object.create(null) as Record<string, unknown>
+  for (const k of Reflect.ownKeys(o)) {
+    if (typeof k === "symbol") throw typeErr(where, `${field} must be a plain object: it has a symbol key`)
+    const d = Object.getOwnPropertyDescriptor(o, k)
+    if (d === undefined || !("value" in d) || d.enumerable !== true) {
+      throw typeErr(where, `${field} must be plain data: ${JSON.stringify(k.slice(0, 40))} is a getter, a setter or a non-enumerable property, so its value would go unread and unenforced`)
+    }
+    out[k] = d.value
+  }
+  return out
+}
+
+/**
+ * Each value read first, the ordinary way, must be the copied one. A Proxy can lie to `ownKeys` and descriptors
+ * (the copy comes out empty while a read still serves a limit), or change its answers once another trap has run,
+ * and a polluted `Object.prototype` can serve a limit the copy lacks. A Proxy that only forwards reads the same
+ * either way, so it passes.
+ */
+function agreesWithRead(where: string, field: string, read: Record<string, unknown>, copy: Record<string, unknown>): void {
+  for (const k of Object.keys(read)) {
+    if (!Object.is(read[k], copy[k])) {
+      throw typeErr(where, `${field}.${k} reads differently from the copy of ${field}'s own properties (for example, a Proxy that hides or changes a key, or an Object.prototype polluted with this limit), so ${field} must be plain data and its value would go unread and unenforced`)
+    }
+  }
+}
+
+/**
  * Exactly the two digests, each read once, into a copy of our own: a getter
  * cannot show the check one answer and the receipt another, and extra keys never
  * reach a receipt. A wrong JS type throws; a wrong value is `not-authorized`.
@@ -366,7 +481,14 @@ function snapshotAuthorizedBy(where: string, a: AuthorizedBy | undefined): Autho
   return Object.freeze({ verdictDigest, paymentDigest: given })
 }
 
-function snapshotHandle(where: string, h: SuiAllowance): SuiAllowance {
+/** A handle without its limits: all that `revoke` reads (DAN-1593). */
+type HandleIdentity = Omit<SuiAllowance, "limits">
+
+/**
+ * The handle's six identity fields, each read once and checked. `limits` is not read here, so
+ * `revoke` works whatever the handle's limits hold: they are never touched on its path.
+ */
+function snapshotIdentity(where: string, h: SuiAllowance): HandleIdentity {
   if (typeof h !== "object" || h === null) throw typeErr(where, "allowance must be the object open() returned")
   const network = h.network
   const asset = h.asset
@@ -374,7 +496,6 @@ function snapshotHandle(where: string, h: SuiAllowance): SuiAllowance {
   const capId = h.capId
   const funder = h.funder
   const spender = h.spender
-  const limits = h.limits
   for (const [k, v] of [["network", network], ["asset", asset], ["allowanceId", allowanceId], ["capId", capId], ["funder", funder], ["spender", spender]] as const) {
     if (typeof v !== "string") throw typeErr(where, `allowance.${k} must be a string`)
   }
@@ -389,7 +510,14 @@ function snapshotHandle(where: string, h: SuiAllowance): SuiAllowance {
   for (const [k, v] of [["allowanceId", allowanceId], ["capId", capId], ["funder", funder], ["spender", spender]] as const) {
     if ((v as string).length > SUI_ADDRESS_CHARS) throw typeErr(where, `allowance.${k} is too long to be an address`)
   }
-  const held = snapshotLimits(where, limits)
+  return Object.freeze({ network, asset, allowanceId, capId, funder, spender })
+}
+
+/** The whole handle, for `spend` and `remaining`: the identity, then the limits under the strict intake. */
+function snapshotHandle(where: string, h: SuiAllowance): SuiAllowance {
+  const identity = snapshotIdentity(where, h)
+  // A handle may have been saved as JSON and loaded back; open()'s own limits never take this path.
+  const held = snapshotPersistedLimits(where, h.limits)
   // open() refuses a limit past u256, so only a hand-built handle can carry one. Writing it into a
   // receipt line is the cost (2^1073741000 never finishes formatting), so it is a programmer error
   // here, before any chain read, and the message quotes no digits.
@@ -402,7 +530,7 @@ function snapshotHandle(where: string, h: SuiAllowance): SuiAllowance {
   // chain had moved.
   const w = held.rate?.windowMs
   if (w !== undefined && (!Number.isSafeInteger(w) || w <= 0)) throw typeErr(where, "allowance.limits.rate.windowMs must be a positive whole number of milliseconds, as open() returned it")
-  return Object.freeze({ network, asset, allowanceId, capId, funder, spender, limits: held })
+  return Object.freeze({ ...identity, limits: held })
 }
 
 // ── The adapter ──────────────────────────────────────────────────────────────
@@ -638,7 +766,7 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
    * as a type argument, skips this check and keeps the behavior it had before (DAN-1473 item 2;
    * SECURITY.md, "Honest limits").
    */
-  const checkAsset = async (h: SuiAllowance, verb: "spend" | "revoke"): Promise<AssetCheck> => {
+  const checkAsset = async (h: HandleIdentity, verb: "spend" | "revoke"): Promise<AssetCheck> => {
     if (h.asset.includes("/") || h.asset.includes("@")) return MATCH
     const named = parseValidCoinType(h.asset)
     const expected = allowanceTypeFor(named)
@@ -1045,7 +1173,7 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
       if (holder(l) !== "chain" || st === null) return null
       const missing = l === "lifetimeCap" ? st.lifetimeCap === null : l === "rate" ? st.rate === null : l === "start" ? st.startMs === null : l === "expiry" ? st.expiryMs === null : false
       if (!missing) return null
-      return line(l, "none on chain", "chain", "unchecked", `Not checked by Sui: the handle passed to spend() says ${limitValue(l, h.limits, scale)}, but allowance ${h.allowanceId} on chain holds no ${limitWords(l)}, so Sui checked none.`)
+      return line(l, "none on chain", "chain", "unchecked", `Not checked by Sui: the handle passed to spend() says ${limitValue(l, h.limits, scale)}, but allowance ${h.allowanceId} on chain holds no ${limitWords(l).replace(/^the /, "")}, so Sui checked none.`)
     }
     const notSent = (code: RefusalCode, why: string, own: Partial<Record<LimitName, LimitLine>> = {}): AllowanceReceipt =>
       finish(receiptOf({
@@ -1177,10 +1305,14 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
     if (out.kind === "executed") {
       const lines = present.map((l) => {
         if (l === "recipients") return recipientsWithin()
-        const absent = absentOnChain(l, facts === null ? null : facts.state)
+        // The read after the spend returned no decoded allowance, for whatever reason. The spend executed, so Sui
+        // enforced whatever limits the allowance holds, but which ones and at what values cannot be
+        // reported, and the handle's value is not the chain's, so the line is `unchecked` and says why.
+        if (facts === null) return line(l, limitValue(l, h.limits, scale), holder(l), "unchecked", `Not re-read: the spend executed, so Sui enforced whatever limits this allowance holds, but sweetrust-sui could not re-read the allowance after the spend, so it cannot say whether Sui holds this limit or at what value. The value shown is the handle's, not the chain's.`)
+        const absent = absentOnChain(l, facts.state)
         if (absent !== null) return absent
-        const { value, flag } = heldValue(l, facts === null ? null : facts.state)
-        return line(l, value, holder(l), "within", (facts === null ? "Sui checked it: the spend executed." : chainWithinWhy(l, facts)) + flag)
+        const { value, flag } = heldValue(l, facts.state)
+        return line(l, value, holder(l), "within", chainWithinWhy(l, facts) + flag)
       })
       return finish(receiptOf({
         ...base, recipient, verdict: "executed", digest: out.digest, ...at, limits: lines, refusal: null,
@@ -1200,7 +1332,7 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
       code = failed === "lifetimeCap" ? "lifetime-cap-exceeded" : failed === "rate" ? "rate-exceeded" : failed === "start" ? "not-started" : "expired"
     } else if (failed !== null) {
       code = failed === "lifetimeCap" ? "lifetime-cap-exceeded" : failed === "rate" ? "rate-exceeded" : failed === "start" ? "not-started" : "expired"
-      why = `Refused by Sui validators (allowance::${native?.abortName}): this spend was outside ${limitWords(failed)}. sweetrust-sui could not read the allowance afterwards, so the numbers are not shown; the digest has them.`
+      why = `Refused by Sui validators (allowance::${native?.abortName}): this spend was outside ${limitWords(failed)}. sweetrust-sui could not read the allowance afterwards, so each value on this receipt's limit lines is the handle's, not read from chain; the digest has the chain's.`
     } else if (native?.abortName === "ENotSpender") {
       code = "not-spender"
       why = `Refused by Sui validators (allowance::ENotSpender): the transaction was signed by ${normAddr(signer.toSuiAddress())}, and only the allowance's spender ${h.spender} may spend from it.`
@@ -1216,7 +1348,11 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
       const idx = CHAIN_CHECK_ORDER.indexOf(l)
       if (failed !== null && l === failed) return line(l, value, "chain", "outside", why + flag)
       if (failed !== null && idx < failedAt && facts !== null) return line(l, value, "chain", "within", chainWithinWhy(l, facts) + flag)
-      if (failed !== null) return line(l, value, "chain", "unchecked", `Not evaluated: Sui checks the start, the expiry, the lifetime cap and then the rate, and stops at the first that fails; ${limitWords(failed)} failed first.` + flag)
+      if (failed !== null) {
+        return line(l, value, "chain", "unchecked", facts === null
+          ? `Not confirmed: Sui checks the start, the expiry, the lifetime cap and then the rate, and stops at the first that fails; ${limitWords(failed)} failed, and sweetrust-sui could not read the allowance after the refusal, so this receipt cannot confirm whether Sui checked this limit. The value shown is the handle's, not the chain's.`
+          : `Not evaluated: Sui checks the start, the expiry, the lifetime cap and then the rate, and stops at the first that fails; ${limitWords(failed)} failed first.` + flag)
+      }
       return line(l, value, "chain", "unchecked", `Not evaluated: Sui refused the transaction before its limit checks${native === null ? "" : `, on ${native.abortName}`}.` + flag)
     })
     return finish(receiptOf({
@@ -1230,10 +1366,10 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
   const revoke: SuiAllowances["revoke"] = async (args) => {
     if (typeof args !== "object" || args === null) throw typeErr("revoke", "arguments must be an object")
     const signer = args.signer
-    const h = snapshotHandle("revoke", args.allowance)
+    // A revoke deletes the Allowance object, and the chain refuses every later spend whatever limits it held, so
+    // revoke reads only the handle's identity, never its limits (DAN-1593): any `limits` value revokes.
+    const h = snapshotIdentity("revoke", args.allowance)
     if (typeof signer !== "object" || signer === null || typeof signer.toSuiAddress !== "function") throw typeErr("revoke", "signer must be a @mysten/sui Signer (the funder's keypair)")
-    const scale = scaleFor(h.asset)
-    const present = presentLimits(h.limits)
     const base = { verb: "revoke" as Verb, asset: h.asset, allowanceId: h.allowanceId, funder: h.funder, spender: h.spender, amount: null, amountText: null, recipient: null }
     if (h.network !== network) {
       const why = `Refused in-process; nothing was sent. The allowance is on ${h.network}, and this adapter is connected to ${network}.`
@@ -1250,13 +1386,12 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
     }
     // A kill switch is not stopped by a handle that names the wrong coin (DAN-1502). The type just
     // read is the allowance's for good, so the revoke is built under the coin the chain holds and its
-    // receipt names that coin. The handle's limits describe a handle the chain contradicts, so they
-    // are not listed. Every receipt from here says so. The chain still checks the AllowanceCap.
+    // receipt names that coin. Every receipt from here says so. The chain still checks the AllowanceCap.
     const coin = checked.kind === "holds" ? checked.coin : h.asset
     const run = checked.kind === "holds" ? { ...base, asset: coin } : base
     // "would have been" where the build itself is what failed (not-sent), so no receipt claims a build that never happened.
     const noteFor = (built: boolean): string => checked.kind === "holds"
-      ? ` The handle passed to revoke() names the coin type ${checked.named}, but allowance ${h.allowanceId} on ${network} holds ${coin}, so this revoke ${built ? "was" : "would have been"} built under ${coin}, the coin type the chain holds; the handle's limits describe another coin and are not listed.`
+      ? ` The handle passed to revoke() names the coin type ${checked.named}, but allowance ${h.allowanceId} on ${network} holds ${coin}, so this revoke ${built ? "was" : "would have been"} built under ${coin}, the coin type the chain holds.`
       : ""
     const note = noteFor(true)
     const tx = new Transaction()
@@ -1284,13 +1419,9 @@ export function suiAllowances(options: SuiAllowancesOptions): SuiAllowances {
       const why = `Refused by Sui validators${native === null ? "" : ` (${native.module}::${native.abortName})`}: ${out.tx.status.error?.message ?? "the revoke failed"}. The allowance is still live.${note}`
       return finish(receiptOf({ ...run, verdict: "refused", digest: out.digest, ...at, limits: [], refusal: refusal("chain-error", "chain", native, why), summary: why }))
     }
-    const lines = checked.kind === "holds" ? [] : present.map((l) => line(l, limitValue(l, h.limits, scale), holder(l), "revoked",
-      holder(l) === "chain"
-        ? "Revoked on chain: the Allowance object is deleted, so Sui refuses every later spend against it, from any client."
-        : "Revoked: the library refuses nothing more because there is nothing left to spend against; the on-chain object is gone."))
     return finish(receiptOf({
-      ...run, verdict: "executed", digest: out.digest, ...at, limits: lines, refusal: null,
-      summary: `Revoked allowance ${h.allowanceId} on ${network}: the funder's AllowanceCap deleted it, so Sui refuses every later spend against it (tx ${out.digest}).${note}`,
+      ...run, verdict: "executed", digest: out.digest, ...at, limits: [], refusal: null,
+      summary: `Revoked allowance ${h.allowanceId} on ${network} (tx ${out.digest}): the funder's AllowanceCap deleted the Allowance object, so Sui refuses every later spend against it from any client, whatever limits it held, and revoke does not read the handle's limits.${note}`,
     }))
   }
 

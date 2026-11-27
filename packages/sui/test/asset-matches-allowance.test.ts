@@ -309,13 +309,13 @@ describe("a revoke whose handle names another coin runs under the coin the chain
     expect(r.summary).not.toContain("this revoke was built")
   }, 10_000)
 
-  it("a matching revoke is unchanged: the handle's asset, its limits listed, no note", async () => {
+  it("a matching revoke: the handle's asset, no limit lines (revoke does not read limits), no note", async () => {
     const chain = live()
     chain.script.push({ kind: "executed", digest: DIGEST(3), timestampMs: ANCHOR, after: null })
     const r = await revoke(chain, "0x2::sui::SUI")
     expect(revokedUnder(chain)).toBe(BALANCE_SUI)
     expect(r.asset).toBe("0x2::sui::SUI")
-    expect(r.limits.map((l) => l.verdict)).toEqual(["revoked"])
+    expect(r.limits).toEqual([])
     expect(r.summary).not.toContain("names the coin type")
   })
 

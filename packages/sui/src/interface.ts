@@ -26,9 +26,13 @@ export type LimitName = "lifetimeCap" | "rate" | "start" | "expiry" | "recipient
  *   every spend the spender's key makes, through any client.
  * - `library`: this library refuses in-process, before anything is sent, so it
  *   binds only spends routed through this library.
- * - `nobody`: no layer can hold it. `open()` refuses an allowance that asks for
- *   it, so it is never silently dropped. Only a refused open's receipt carries
- *   this label.
+ * - `nobody`: no one holds this limit: neither the chain nor this library
+ *   enforces it. `open()` refuses an allowance that asks for it, so it is never
+ *   silently dropped.
+ *
+ * A line's `heldBy` comes from the adapter's fixed declaration (`enforces`), not
+ * from a chain read: it says who holds that limit on this chain, not whether
+ * this allowance's object carries it.
  */
 export type HeldBy = "chain" | "library" | "nobody"
 
@@ -76,7 +80,7 @@ export type RefusalCode =
   | "not-started"
   | "expired"
   | "recipient-not-allowed"
-  /** open(): the allowance asks for a limit nobody can hold on this chain. */
+  /** open() or spend(): the allowance asks for a limit nobody can hold on this chain. */
   | "limit-unheld"
   /** open(): no limit on how much may be spent. */
   | "unbounded-amount"
@@ -155,11 +159,14 @@ export interface Refusal {
  * - `held`: in force (an executed open, a `remaining()` read).
  * - `within`: this spend was inside it.
  * - `outside`: this spend (or this open request) was outside it.
- * - `unchecked`: not evaluated, because an earlier check refused first,
- *   nothing was sent, or the chain could not be read.
- * - `unheld`: nobody can hold it, so the open was refused.
- * - `revoked`: an executed revoke deleted the allowance. Only that receipt
- *   carries it; a read that finds nothing is `unchecked`.
+ * - `unchecked`: this receipt, or this `remaining()` result, does not confirm
+ *   that this limit was checked (or, if it was, at what value); the line's
+ *   `why` says why.
+ * - `unheld`: nobody can hold it, so the open or the spend was refused.
+ * - `revoked`: an executed revoke deleted the allowance. The Sui adapter no
+ *   longer writes it: `revoke` does not read the handle's limits, so its
+ *   receipt has no limit lines (DAN-1593). It stays in the type so receipts
+ *   written before then still type-check.
  */
 export type LimitVerdict = "held" | "within" | "outside" | "unchecked" | "unheld" | "revoked"
 

@@ -18,7 +18,9 @@ same list.
   reaches an execute context holds the token, and the spender's key can pay through another client
   regardless.
 - **Library-held limits bind only spends routed through this library.** The recipient list is
-  checked in-process before sending, and it lives in the handle `open()` returns, not on chain.
+  checked in-process before sending, and it lives in the handle `open()` returns, not on chain. A stored handle
+  is not signed, so the saved file is the only integrity that list has: keep it where the spender's
+  process cannot write.
 - **An MVR-named asset is not checked against its allowance.** `spend` refuses a handle whose coin
   type differs from the allowance object's as `asset-mismatch`, and `revoke` runs under the coin
   type the allowance object holds and says so on its receipt, but a handle whose asset
